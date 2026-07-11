@@ -1,0 +1,29 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# PyCharm
+.idea/
+.streamlit/secrets.toml
+
+# Local env
+.env
+
+# Data defaults
+data/raw/
+data/processed/**
+
+*.parquet
+*.csv
+*.geojson
+*.duckdb
+*.db
+
+# Deployment-ready app tables
+!data/processed/app_tables/
+!data/processed/app_tables/**
+
+# Streamlit cache
+.streamlit/cache/
