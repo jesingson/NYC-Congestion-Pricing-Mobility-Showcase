@@ -962,3 +962,707 @@ def validate_relationship_data(
             and missing_metric_values == 0
         ),
     }
+
+# ---------------------------------------------------------------------
+# Rolling relationship strength through time
+# ---------------------------------------------------------------------
+NOTEBOOK_ROLLING_PAIR_DEFINITIONS = (
+    ("taxi_trip_count", "subway_ridership"),
+    ("taxi_trip_count", "fhvhv_trip_count"),
+)
+
+NOTEBOOK_ROLLING_WINDOW_DAYS = 90
+NOTEBOOK_ROLLING_STEP_DAYS = 14
+NOTEBOOK_ROLLING_MIN_MATCHED_DAYS = 45
+NOTEBOOK_ROLLING_METHOD = "spearman"
+
+SUPPORTED_ROLLING_METHODS = (
+    "pearson",
+    "spearman",
+)
+
+
+def calculate_rolling_relationship_strength(
+    daily_wide_data: pd.DataFrame,
+    *,
+    pair_definitions: Iterable[tuple[str, str]],
+    rolling_window_days: int = NOTEBOOK_ROLLING_WINDOW_DAYS,
+    rolling_step_days: int = NOTEBOOK_ROLLING_STEP_DAYS,
+    minimum_matched_days: int = NOTEBOOK_ROLLING_MIN_MATCHED_DAYS,
+    minimum_coverage_share: float | None = None,
+    correlation_method: str = NOTEBOOK_ROLLING_METHOD,
+    metric_labels: dict[str, str] | None = None,
+    geography_level: str = "Citywide",
+    geography_id: str = "NYC",
+    geography_name: str = "New York City",
+    temporal_bucket: str = ALL_TEMPORAL_BUCKETS_LABEL,
+) -> pd.DataFrame:
+    """
+    Calculate rolling relationships across dates for one or more metric pairs.
+
+    This reproduces the Notebook 1.4.2 implementation used in the cell
+    "Track relationship strength through time for two high-value pairings":
+
+    - trailing calendar windows;
+    - 90-day windows by default;
+    - a new window every 14 days;
+    - Spearman correlation by default;
+    - at least 45 matched days;
+    - one output row per pair × rolling window;
+    - the plotted date is the window midpoint.
+
+    The input must already be aggregated to the intended geography and contain
+    one row per date. Unsupported windows remain in the output with a missing
+    correlation so charts can display honest gaps.
+    """
+    if rolling_window_days < 2:
+        raise ValueError(
+            "rolling_window_days must be at least 2."
+        )
+
+    if rolling_step_days < 1:
+        raise ValueError(
+            "rolling_step_days must be at least 1."
+        )
+
+    if minimum_matched_days < 3:
+        raise ValueError(
+            "minimum_matched_days must be at least 3."
+        )
+
+    if minimum_matched_days > rolling_window_days:
+        raise ValueError(
+            "minimum_matched_days cannot exceed rolling_window_days."
+        )
+
+    if minimum_coverage_share is not None:
+        if not 0 < minimum_coverage_share <= 1:
+            raise ValueError(
+                "minimum_coverage_share must be greater than 0 and "
+                "less than or equal to 1."
+            )
+
+    normalized_method = correlation_method.strip().lower()
+
+    if normalized_method not in SUPPORTED_ROLLING_METHODS:
+        raise ValueError(
+            "correlation_method must be one of "
+            f"{SUPPORTED_ROLLING_METHODS}; "
+            f"received {correlation_method!r}."
+        )
+
+    if daily_wide_data.empty:
+        return pd.DataFrame()
+
+    if "date" not in daily_wide_data.columns:
+        raise KeyError(
+            "daily_wide_data must contain a 'date' column."
+        )
+
+    pairs = list(pair_definitions)
+
+    if not pairs:
+        return pd.DataFrame()
+
+    for metric_x, metric_y in pairs:
+        if metric_x == metric_y:
+            raise ValueError(
+                "Each rolling relationship pair must contain two "
+                "different metrics."
+            )
+
+        missing_metrics = [
+            metric
+            for metric in (metric_x, metric_y)
+            if metric not in daily_wide_data.columns
+        ]
+
+        if missing_metrics:
+            raise KeyError(
+                "daily_wide_data is missing required metric columns: "
+                + ", ".join(missing_metrics)
+            )
+
+    labels = metric_labels or {}
+
+    source = daily_wide_data.copy()
+    source["date"] = pd.to_datetime(
+        source["date"],
+        errors="coerce",
+    )
+
+    source = (
+        source[
+            source["date"].notna()
+        ]
+        .sort_values("date")
+        .drop_duplicates(
+            subset="date",
+            keep="last",
+        )
+        .reset_index(drop=True)
+    )
+
+    records: list[dict[str, object]] = []
+
+    for metric_x, metric_y in pairs:
+        pair_label = (
+            f"{labels.get(metric_x, metric_x)} vs "
+            f"{labels.get(metric_y, metric_y)}"
+        )
+
+        pair_df = (
+            source[
+                [
+                    "date",
+                    metric_x,
+                    metric_y,
+                ]
+            ]
+            .sort_values("date")
+            .reset_index(drop=True)
+        )
+
+        if pair_df.empty:
+            continue
+
+        window_start = pair_df["date"].min()
+        window_end_limit = pair_df["date"].max()
+
+        while (
+            window_start
+            + pd.Timedelta(
+                days=rolling_window_days - 1
+            )
+            <= window_end_limit
+        ):
+            window_end = (
+                window_start
+                + pd.Timedelta(
+                    days=rolling_window_days - 1
+                )
+            )
+
+            eligible_window_df = pair_df.loc[
+                pair_df["date"].between(
+                    window_start,
+                    window_end,
+                )
+            ].copy()
+
+            eligible_date_count = int(
+                eligible_window_df["date"].nunique()
+            )
+
+            window_df = eligible_window_df[
+                [
+                    metric_x,
+                    metric_y,
+                ]
+            ].dropna()
+
+            matched_days = int(len(window_df))
+            x_unique = int(
+                window_df[metric_x].nunique()
+            )
+            y_unique = int(
+                window_df[metric_y].nunique()
+            )
+
+            if minimum_coverage_share is None:
+                required_matched_days = minimum_matched_days
+                support_mode = "fixed_days"
+            else:
+                required_matched_days = max(
+                    3,
+                    int(
+                        np.ceil(
+                            eligible_date_count
+                            * minimum_coverage_share
+                        )
+                    ),
+                )
+                support_mode = "eligible_date_share"
+
+            eligible_window = (
+                matched_days >= required_matched_days
+                and x_unique > 1
+                and y_unique > 1
+            )
+
+            correlation = (
+                window_df[metric_x].corr(
+                    window_df[metric_y],
+                    method=normalized_method,
+                )
+                if eligible_window
+                else np.nan
+            )
+
+            midpoint = (
+                window_start
+                + pd.Timedelta(
+                    days=rolling_window_days // 2
+                )
+            )
+
+            records.append(
+                {
+                    "pair_label": pair_label,
+                    "metric_x": metric_x,
+                    "metric_y": metric_y,
+                    "metric_x_label": labels.get(
+                        metric_x,
+                        metric_x,
+                    ),
+                    "metric_y_label": labels.get(
+                        metric_y,
+                        metric_y,
+                    ),
+                    "window_start": window_start,
+                    "window_end": window_end,
+                    "window_midpoint": midpoint,
+                    "rolling_correlation": (
+                        float(correlation)
+                        if pd.notna(correlation)
+                        else np.nan
+                    ),
+                    "rolling_spearman_correlation": (
+                        float(correlation)
+                        if (
+                            normalized_method == "spearman"
+                            and pd.notna(correlation)
+                        )
+                        else np.nan
+                    ),
+                    "rolling_pearson_correlation": (
+                        float(correlation)
+                        if (
+                            normalized_method == "pearson"
+                            and pd.notna(correlation)
+                        )
+                        else np.nan
+                    ),
+                    "matched_days": matched_days,
+                    "eligible_date_count": eligible_date_count,
+                    "required_matched_days": required_matched_days,
+                    "coverage_share": (
+                        matched_days / eligible_date_count
+                        if eligible_date_count
+                        else np.nan
+                    ),
+                    "support_mode": support_mode,
+                    "minimum_coverage_share": minimum_coverage_share,
+                    "x_unique_values": x_unique,
+                    "y_unique_values": y_unique,
+                    "eligible_window": eligible_window,
+                    "rolling_window_days": rolling_window_days,
+                    "rolling_step_days": rolling_step_days,
+                    "minimum_matched_days": minimum_matched_days,
+                    "correlation_method": normalized_method,
+                    "geography_level": geography_level,
+                    "geography_id": geography_id,
+                    "geography_name": geography_name,
+                    "temporal_bucket": temporal_bucket,
+                }
+            )
+
+            window_start = (
+                window_start
+                + pd.Timedelta(
+                    days=rolling_step_days
+                )
+            )
+
+    if not records:
+        return pd.DataFrame()
+
+    result = pd.DataFrame(records)
+
+    return (
+        result.sort_values(
+            [
+                "pair_label",
+                "window_midpoint",
+            ]
+        )
+        .reset_index(drop=True)
+    )
+
+
+def build_citywide_rolling_relationship_data(
+    *,
+    pair_definitions: Iterable[
+        tuple[str, str]
+    ] = NOTEBOOK_ROLLING_PAIR_DEFINITIONS,
+    temporal_bucket: str = ALL_TEMPORAL_BUCKETS_LABEL,
+    rolling_window_days: int = NOTEBOOK_ROLLING_WINDOW_DAYS,
+    rolling_step_days: int = NOTEBOOK_ROLLING_STEP_DAYS,
+    minimum_matched_days: int = NOTEBOOK_ROLLING_MIN_MATCHED_DAYS,
+    minimum_coverage_share: float | None = None,
+    correlation_method: str = NOTEBOOK_ROLLING_METHOD,
+) -> pd.DataFrame:
+    """
+    Build app-ready citywide rolling relationship data.
+
+    Daily citywide metrics are obtained through the app's canonical aggregation
+    layer, which preserves the established semantics:
+
+    - demand metrics are summed;
+    - Taxi speed is weighted by Taxi Trips;
+    - FHVHV speed is weighted by FHVHV Trips;
+    - Bus speed is weighted by Bus Trip Count.
+
+    The local import prevents a module-import cycle while keeping the rolling
+    relationship calculation in the relationship data-access module.
+    """
+    pairs = list(pair_definitions)
+
+    selected_metrics = list(
+        dict.fromkeys(
+            metric
+            for pair in pairs
+            for metric in pair
+        )
+    )
+
+    if not selected_metrics:
+        return pd.DataFrame()
+
+    from app.data_access.aggregations import (
+        get_daily_metric_trends,
+    )
+    from app.data_access.loaders import (
+        METRIC_LABELS,
+    )
+
+    daily_data = get_daily_metric_trends(
+        metrics=selected_metrics,
+        temporal_bucket=temporal_bucket,
+    )
+
+    return calculate_rolling_relationship_strength(
+        daily_data,
+        pair_definitions=pairs,
+        rolling_window_days=rolling_window_days,
+        rolling_step_days=rolling_step_days,
+        minimum_matched_days=minimum_matched_days,
+        minimum_coverage_share=minimum_coverage_share,
+        correlation_method=correlation_method,
+        metric_labels=METRIC_LABELS,
+        geography_level="Citywide",
+        geography_id="NYC",
+        geography_name="New York City",
+        temporal_bucket=temporal_bucket,
+    )
+
+
+
+def build_bucket_rolling_relationship_data(
+    *,
+    pair_definitions: Iterable[tuple[str, str]],
+    temporal_bucket: str,
+    rolling_window_days: int = NOTEBOOK_ROLLING_WINDOW_DAYS,
+    rolling_step_days: int = NOTEBOOK_ROLLING_STEP_DAYS,
+    minimum_coverage_share: float = 0.50,
+    correlation_method: str = NOTEBOOK_ROLLING_METHOD,
+) -> pd.DataFrame:
+    """
+    Build rolling relationships for an ordered temporal bucket.
+
+    Unlike the overall notebook view, bucket-specific windows use a
+    proportional support rule. A rolling point is eligible when both metrics
+    are present for at least `minimum_coverage_share` of the dates represented
+    by that bucket inside the calendar window.
+
+    This keeps weekday and weekend views comparable without imposing an
+    impossible fixed 45-day requirement on weekend-only series.
+    """
+    return build_citywide_rolling_relationship_data(
+        pair_definitions=pair_definitions,
+        temporal_bucket=temporal_bucket,
+        rolling_window_days=rolling_window_days,
+        rolling_step_days=rolling_step_days,
+        minimum_matched_days=3,
+        minimum_coverage_share=minimum_coverage_share,
+        correlation_method=correlation_method,
+    )
+
+def build_notebook_rolling_relationship_data() -> pd.DataFrame:
+    """
+    Reproduce the fixed Notebook 1.4.2 rolling relationship dataset.
+
+    Pairings:
+    - Taxi Trips vs Subway Ridership
+    - Taxi Trips vs FHVHV Trips
+
+    Definition:
+    - citywide daily aggregates;
+    - all temporal buckets;
+    - 90-day calendar windows;
+    - 14-day steps;
+    - Spearman correlation;
+    - minimum 45 matched days.
+    """
+    return build_citywide_rolling_relationship_data(
+        pair_definitions=NOTEBOOK_ROLLING_PAIR_DEFINITIONS,
+        temporal_bucket=ALL_TEMPORAL_BUCKETS_LABEL,
+        rolling_window_days=NOTEBOOK_ROLLING_WINDOW_DAYS,
+        rolling_step_days=NOTEBOOK_ROLLING_STEP_DAYS,
+        minimum_matched_days=NOTEBOOK_ROLLING_MIN_MATCHED_DAYS,
+        correlation_method=NOTEBOOK_ROLLING_METHOD,
+    )
+
+
+def summarize_rolling_relationship_validation(
+    rolling_data: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Return compact QA statistics for each rolling relationship pair.
+
+    This table supports numerical comparison with Notebook 1.4.2 before
+    Page 8 is built.
+    """
+    if rolling_data.empty:
+        return pd.DataFrame()
+
+    rows: list[dict[str, object]] = []
+
+    for pair_label, pair_df in rolling_data.groupby(
+        "pair_label",
+        observed=True,
+        sort=False,
+    ):
+        ordered = pair_df.sort_values(
+            "window_midpoint"
+        )
+
+        valid = ordered[
+            ordered["rolling_correlation"].notna()
+        ].copy()
+
+        if valid.empty:
+            first_valid_date = pd.NaT
+            last_valid_date = pd.NaT
+            latest_correlation = np.nan
+            minimum_correlation = np.nan
+            maximum_correlation = np.nan
+            median_correlation = np.nan
+            valid_window_count = 0
+            sign_change_count = 0
+        else:
+            first_valid_date = valid[
+                "window_midpoint"
+            ].min()
+            last_valid_date = valid[
+                "window_midpoint"
+            ].max()
+            latest_correlation = float(
+                valid.iloc[-1][
+                    "rolling_correlation"
+                ]
+            )
+            minimum_correlation = float(
+                valid[
+                    "rolling_correlation"
+                ].min()
+            )
+            maximum_correlation = float(
+                valid[
+                    "rolling_correlation"
+                ].max()
+            )
+            median_correlation = float(
+                valid[
+                    "rolling_correlation"
+                ].median()
+            )
+            valid_window_count = int(
+                len(valid)
+            )
+
+            signs = np.sign(
+                valid[
+                    "rolling_correlation"
+                ]
+            )
+
+            sign_change_count = int(
+                signs.ne(
+                    signs.shift()
+                )
+                .iloc[1:]
+                .sum()
+            )
+
+        rows.append(
+            {
+                "pair_label": pair_label,
+                "first_valid_midpoint": first_valid_date,
+                "last_valid_midpoint": last_valid_date,
+                "total_window_count": int(
+                    len(ordered)
+                ),
+                "valid_window_count": valid_window_count,
+                "unsupported_window_count": int(
+                    ordered[
+                        "rolling_correlation"
+                    ]
+                    .isna()
+                    .sum()
+                ),
+                "minimum_correlation": minimum_correlation,
+                "maximum_correlation": maximum_correlation,
+                "median_correlation": median_correlation,
+                "latest_correlation": latest_correlation,
+                "sign_change_count": sign_change_count,
+                "minimum_matched_days_observed": int(
+                    ordered[
+                        "matched_days"
+                    ].min()
+                ),
+                "maximum_matched_days_observed": int(
+                    ordered[
+                        "matched_days"
+                    ].max()
+                ),
+                "rolling_window_days": int(
+                    ordered.iloc[0][
+                        "rolling_window_days"
+                    ]
+                ),
+                "rolling_step_days": int(
+                    ordered.iloc[0][
+                        "rolling_step_days"
+                    ]
+                ),
+                "minimum_matched_days_required": int(
+                    ordered.iloc[0][
+                        "minimum_matched_days"
+                    ]
+                ),
+                "correlation_method": str(
+                    ordered.iloc[0][
+                        "correlation_method"
+                    ]
+                ),
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+def validate_rolling_relationship_data(
+    rolling_data: pd.DataFrame,
+) -> dict[str, object]:
+    """
+    Return structural QA checks for an app-ready rolling relationship table.
+    """
+    required_columns = {
+        "pair_label",
+        "metric_x",
+        "metric_y",
+        "window_start",
+        "window_end",
+        "window_midpoint",
+        "rolling_correlation",
+        "matched_days",
+        "eligible_date_count",
+        "required_matched_days",
+        "coverage_share",
+        "support_mode",
+        "eligible_window",
+        "rolling_window_days",
+        "rolling_step_days",
+        "minimum_matched_days",
+        "correlation_method",
+        "geography_level",
+        "geography_id",
+        "temporal_bucket",
+    }
+
+    missing_columns = sorted(
+        required_columns.difference(
+            rolling_data.columns
+        )
+    )
+
+    if rolling_data.empty:
+        return {
+            "row_count": 0,
+            "pair_count": 0,
+            "valid_window_count": 0,
+            "unsupported_window_count": 0,
+            "duplicate_window_rows": 0,
+            "missing_columns": missing_columns,
+            "invalid_supported_rows": 0,
+            "is_valid": False,
+        }
+
+    duplicate_window_rows = int(
+        rolling_data.duplicated(
+            [
+                "pair_label",
+                "geography_level",
+                "geography_id",
+                "temporal_bucket",
+                "window_start",
+                "window_end",
+            ]
+        ).sum()
+    )
+
+    invalid_supported_rows = int(
+        (
+            rolling_data["eligible_window"]
+            & rolling_data[
+                "rolling_correlation"
+            ].isna()
+        ).sum()
+    )
+
+    correlation_out_of_range = int(
+        (
+            rolling_data[
+                "rolling_correlation"
+            ]
+            .dropna()
+            .abs()
+            .gt(1)
+        ).sum()
+    )
+
+    return {
+        "row_count": int(
+            len(rolling_data)
+        ),
+        "pair_count": int(
+            rolling_data[
+                "pair_label"
+            ].nunique()
+        ),
+        "valid_window_count": int(
+            rolling_data[
+                "rolling_correlation"
+            ]
+            .notna()
+            .sum()
+        ),
+        "unsupported_window_count": int(
+            rolling_data[
+                "rolling_correlation"
+            ]
+            .isna()
+            .sum()
+        ),
+        "duplicate_window_rows": duplicate_window_rows,
+        "missing_columns": missing_columns,
+        "invalid_supported_rows": invalid_supported_rows,
+        "correlation_out_of_range": correlation_out_of_range,
+        "is_valid": (
+            not missing_columns
+            and duplicate_window_rows == 0
+            and invalid_supported_rows == 0
+            and correlation_out_of_range == 0
+        ),
+    }

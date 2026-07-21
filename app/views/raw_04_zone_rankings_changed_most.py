@@ -1446,6 +1446,463 @@ def build_detail_table(
     return display
 
 
+
+# ---------------------------------------------------------------------
+# Distribution helpers
+# ---------------------------------------------------------------------
+DISTRIBUTION_MEASURES = {
+    "Percent change": ("percent_change", "Post vs pre percent change", "%"),
+    "Daily-average change": ("absolute_change", "Post vs pre daily-average change", ""),
+}
+
+
+def _aggregate_period_value(df: pd.DataFrame, metric: str, period: str) -> float:
+    value_col = f"{period}_daily_average"
+    support_col = f"{period}_support_daily_average"
+    metric_df = df[df["metric"].eq(metric)].copy()
+    if metric_df.empty:
+        return np.nan
+    if metric in DEMAND_METRICS:
+        return float(metric_df[value_col].sum(min_count=1))
+    if metric in SPEED_METRICS and support_col in metric_df.columns:
+        return _weighted_average(metric_df[value_col], metric_df[support_col])
+    values = metric_df[value_col].dropna()
+    return float(values.mean()) if not values.empty else np.nan
+
+
+def _aggregate_change_value(
+    df: pd.DataFrame,
+    *,
+    metric: str,
+    measure_column: str,
+) -> float:
+    pre_value = _aggregate_period_value(df, metric, "pre")
+    post_value = _aggregate_period_value(df, metric, "post")
+    if pd.isna(pre_value) or pd.isna(post_value):
+        return np.nan
+    if measure_column == "absolute_change":
+        return float(post_value - pre_value)
+    return _safe_percent_change(pre_value, post_value)
+
+
+def _distribution_customdata(df: pd.DataFrame) -> np.ndarray:
+    prepared = _metric_customdata(_add_display_columns(df))
+    return prepared.to_numpy()
+
+
+def _distribution_hover_template() -> str:
+    return (
+        "<b>%{customdata[0]}</b><br>"
+        "Borough: %{customdata[1]}<br>"
+        "Geo-policy group: %{customdata[2]}<br>"
+        "Pre-CP daily average: %{customdata[3]}<br>"
+        "Post-CP daily average: %{customdata[4]}<br>"
+        "Daily-average change: %{customdata[5]}<br>"
+        "Percent change: %{customdata[6]}"
+        "<extra></extra>"
+    )
+
+
+def _add_distribution_traces(
+    fig: go.Figure,
+    df: pd.DataFrame,
+    *,
+    metric: str,
+    measure_column: str,
+    row: int,
+    col: int,
+    active_reference: float,
+    citywide_reference: float,
+    active_reference_label: str,
+) -> None:
+    valid = df[
+        df["metric"].eq(metric)
+        & df[measure_column].notna()
+    ].copy()
+    if valid.empty:
+        return
+
+    metric_color = METRIC_COLOR_MAP.get(metric, BRAND_COLORS["dark_teal"])
+
+    fig.add_trace(
+        go.Violin(
+            x=["Eligible Taxi Zones"] * len(valid),
+            y=valid[measure_column],
+            line={"color": BRAND_COLORS["seafoam"], "width": 1},
+            fillcolor="rgba(131,197,190,0.42)",
+            points=False,
+            width=0.78,
+            hoverinfo="skip",
+            showlegend=False,
+            spanmode="hard",
+        ),
+        row=row,
+        col=col,
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=["Eligible Taxi Zones"] * len(valid),
+            y=valid[measure_column],
+            mode="markers",
+            marker={
+                "color": metric_color,
+                "size": 6,
+                "opacity": 0.48,
+                "line": {"width": 0},
+            },
+            customdata=_distribution_customdata(valid),
+            hovertemplate=_distribution_hover_template(),
+            showlegend=False,
+        ),
+        row=row,
+        col=col,
+    )
+
+    median_value = float(valid[measure_column].median())
+
+    fig.add_hline(
+        y=0,
+        line_width=1,
+        line_color="rgba(60,60,60,0.40)",
+        row=row,
+        col=col,
+    )
+    fig.add_hline(
+        y=median_value,
+        line_width=2,
+        line_dash="dot",
+        line_color=BRAND_COLORS["pale_peach"],
+        annotation_text="Median zone",
+        annotation_position="bottom right",
+        row=row,
+        col=col,
+    )
+    if pd.notna(citywide_reference):
+        fig.add_hline(
+            y=citywide_reference,
+            line_width=2,
+            line_dash="dash",
+            line_color=BRAND_COLORS["terracotta"],
+            annotation_text="Citywide aggregate",
+            annotation_position="top left",
+            row=row,
+            col=col,
+        )
+    if (
+        pd.notna(active_reference)
+        and (
+            pd.isna(citywide_reference)
+            or not np.isclose(active_reference, citywide_reference)
+        )
+    ):
+        fig.add_hline(
+            y=active_reference,
+            line_width=2,
+            line_dash="solid",
+            line_color=BRAND_COLORS["dark_teal"],
+            annotation_text=active_reference_label,
+            annotation_position="bottom left",
+            row=row,
+            col=col,
+        )
+
+
+def build_manhattan_distribution_grid(
+    ranking_base: pd.DataFrame,
+    *,
+    metrics: list[str],
+    metric_labels: dict[str, str],
+) -> go.Figure:
+    fig = make_subplots(
+        rows=3,
+        cols=2,
+        subplot_titles=[metric_labels[m] for m in metrics],
+        vertical_spacing=0.11,
+        horizontal_spacing=0.12,
+    )
+
+    manhattan_base = ranking_base[
+        ranking_base["borough"].astype(str).eq("Manhattan")
+    ].copy()
+
+    for index, metric in enumerate(metrics):
+        row = index // 2 + 1
+        col = index % 2 + 1
+
+        _add_distribution_traces(
+            fig,
+            manhattan_base,
+            metric=metric,
+            measure_column="percent_change",
+            row=row,
+            col=col,
+            active_reference=_aggregate_change_value(
+                manhattan_base,
+                metric=metric,
+                measure_column="percent_change",
+            ),
+            citywide_reference=_aggregate_change_value(
+                ranking_base,
+                metric=metric,
+                measure_column="percent_change",
+            ),
+            active_reference_label="Manhattan aggregate",
+        )
+
+        fig.update_xaxes(
+            showticklabels=False,
+            title_text="",
+            row=row,
+            col=col,
+        )
+        fig.update_yaxes(
+            title_text="Post vs pre % change",
+            ticksuffix="%",
+            zeroline=False,
+            showgrid=True,
+            gridcolor="rgba(0,109,119,0.10)",
+            row=row,
+            col=col,
+        )
+
+    fig = _apply_chart_branding(fig)
+    fig.update_layout(
+        height=980,
+        margin={"l": 45, "r": 45, "t": 70, "b": 45},
+        showlegend=False,
+        violinmode="overlay",
+    )
+    return fig
+
+
+def build_distribution_chart(
+    filtered_base: pd.DataFrame,
+    *,
+    citywide_base: pd.DataFrame,
+    metric: str,
+    measure_column: str,
+    axis_title: str,
+    tick_suffix: str,
+    active_reference_label: str,
+) -> go.Figure:
+    fig = make_subplots(rows=1, cols=1)
+
+    active_reference = _aggregate_change_value(
+        filtered_base,
+        metric=metric,
+        measure_column=measure_column,
+    )
+    citywide_reference = _aggregate_change_value(
+        citywide_base,
+        metric=metric,
+        measure_column=measure_column,
+    )
+
+    _add_distribution_traces(
+        fig,
+        filtered_base,
+        metric=metric,
+        measure_column=measure_column,
+        row=1,
+        col=1,
+        active_reference=active_reference,
+        citywide_reference=citywide_reference,
+        active_reference_label=active_reference_label,
+    )
+
+    valid = filtered_base[
+        filtered_base["metric"].eq(metric)
+        & filtered_base[measure_column].notna()
+    ].copy()
+
+    if not valid.empty:
+        extremes = pd.concat(
+            [
+                valid.loc[[valid[measure_column].idxmin()]],
+                valid.loc[[valid[measure_column].idxmax()]],
+            ]
+        ).drop_duplicates(subset=["taxi_zone_id"])
+
+        fig.add_trace(
+            go.Scatter(
+                x=["Eligible Taxi Zones"] * len(extremes),
+                y=extremes[measure_column],
+                mode="markers+text",
+                marker={
+                    "color": BRAND_COLORS["terracotta"],
+                    "size": 11,
+                    "line": {"color": "white", "width": 1},
+                },
+                text=extremes["zone"],
+                textposition="middle right",
+                customdata=_distribution_customdata(extremes),
+                hovertemplate=_distribution_hover_template(),
+                showlegend=False,
+                cliponaxis=False,
+            ),
+            row=1,
+            col=1,
+        )
+
+    fig.update_xaxes(showticklabels=False, title_text="")
+    fig.update_yaxes(
+        title_text=axis_title,
+        ticksuffix=tick_suffix,
+        zeroline=False,
+        showgrid=True,
+        gridcolor="rgba(0,109,119,0.10)",
+    )
+    fig = _apply_chart_branding(fig)
+    fig.update_layout(
+        height=610,
+        margin={"l": 55, "r": 150, "t": 35, "b": 45},
+        showlegend=False,
+        violinmode="overlay",
+    )
+    return fig
+
+
+def _distribution_summary(
+    df: pd.DataFrame,
+    *,
+    metric: str,
+    measure_column: str,
+) -> dict[str, float]:
+    valid = df[
+        df["metric"].eq(metric)
+        & df[measure_column].notna()
+    ].copy()
+    if valid.empty:
+        return {
+            "eligible": 0,
+            "median": np.nan,
+            "iqr": np.nan,
+            "share_increasing": np.nan,
+        }
+    values = valid[measure_column]
+    return {
+        "eligible": float(valid["taxi_zone_id"].nunique()),
+        "median": float(values.median()),
+        "iqr": float(values.quantile(0.75) - values.quantile(0.25)),
+        "share_increasing": float((values > 0).mean() * 100),
+    }
+
+
+def _render_distribution_cards(
+    summary: dict[str, float],
+    *,
+    measure_column: str,
+) -> None:
+    suffix = "%" if measure_column == "percent_change" else ""
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Eligible zones", f"{int(summary['eligible']):,}")
+    c2.metric(
+        "Median zone change",
+        (
+            f"{summary['median']:+,.1f}{suffix}"
+            if pd.notna(summary["median"])
+            else "Unavailable"
+        ),
+    )
+    c3.metric(
+        "Middle 50% spread",
+        (
+            f"{summary['iqr']:,.1f}{suffix}"
+            if pd.notna(summary["iqr"])
+            else "Unavailable"
+        ),
+        help="Interquartile range across eligible Taxi Zones.",
+    )
+    c4.metric(
+        "Zones increasing",
+        (
+            f"{summary['share_increasing']:.1f}%"
+            if pd.notna(summary["share_increasing"])
+            else "Unavailable"
+        ),
+    )
+
+
+def _build_distribution_insight(
+    filtered_base: pd.DataFrame,
+    *,
+    citywide_base: pd.DataFrame,
+    metric: str,
+    metric_label: str,
+    context_label: str,
+    measure_column: str,
+    active_reference_label: str,
+) -> str:
+    valid = filtered_base[
+        filtered_base["metric"].eq(metric)
+        & filtered_base[measure_column].notna()
+    ].copy()
+    if valid.empty:
+        return "No zones met the reliability requirements for this view."
+
+    values = valid[measure_column]
+    median_value = float(values.median())
+    q1 = float(values.quantile(0.25))
+    q3 = float(values.quantile(0.75))
+    iqr = q3 - q1
+    outlier_count = int(
+        ((values < q1 - 1.5 * iqr) | (values > q3 + 1.5 * iqr)).sum()
+    )
+    increase_count = int((values > 0).sum())
+    eligible_count = len(valid)
+
+    active_reference = _aggregate_change_value(
+        filtered_base,
+        metric=metric,
+        measure_column=measure_column,
+    )
+    citywide_reference = _aggregate_change_value(
+        citywide_base,
+        metric=metric,
+        measure_column=measure_column,
+    )
+
+    suffix = "%" if measure_column == "percent_change" else ""
+
+    if increase_count > eligible_count / 2:
+        direction = (
+            f"Most eligible zones increased: **{increase_count} of "
+            f"{eligible_count}** were above zero."
+        )
+    elif increase_count < eligible_count / 2:
+        direction = (
+            f"Most eligible zones did not increase: **{eligible_count - increase_count} "
+            f"of {eligible_count}** were at or below zero."
+        )
+    else:
+        direction = (
+            f"The distribution was evenly split, with **{increase_count} of "
+            f"{eligible_count}** zones above zero."
+        )
+
+    references = (
+        f"The median zone was **{median_value:+,.1f}{suffix}**, compared with "
+        f"**{active_reference_label} {active_reference:+,.1f}{suffix}** and "
+        f"the **citywide aggregate {citywide_reference:+,.1f}{suffix}**."
+    )
+
+    if outlier_count <= max(2, round(eligible_count * 0.10)):
+        tail = (
+            f"Only **{outlier_count} zones** fall beyond the conventional "
+            "1.5-IQR fences, so the ranked extremes are relatively isolated."
+        )
+    else:
+        tail = (
+            f"**{outlier_count} zones** fall beyond the conventional 1.5-IQR "
+            "fences, indicating a broader tail of unusual neighborhood changes."
+        )
+
+    return (
+        f"For **{metric_label}** in **{context_label}**, "
+        f"{direction} {references} {tail}"
+    )
+
 # ---------------------------------------------------------------------
 # Page data
 # ---------------------------------------------------------------------
@@ -1549,6 +2006,62 @@ st.info(
 )
 
 
+st.divider()
+st.header("How unusual were Manhattan's largest changes?")
+
+st.write(
+    "Rankings show which zones changed most. This view shows whether "
+    "those zones were isolated extremes or part of a broader Manhattan "
+    "pattern."
+)
+
+manhattan_distribution_fig = build_manhattan_distribution_grid(
+    hero_ranking_base,
+    metrics=available_metrics,
+    metric_labels=metric_labels,
+)
+
+st.plotly_chart(
+    manhattan_distribution_fig,
+    use_container_width=True,
+    config={"displayModeBar": False, "responsive": True},
+    key="raw04_manhattan_distribution_grid",
+)
+
+st.caption(
+    "Each violin shows the complete spread of eligible Manhattan Taxi Zones. "
+    "Points are individual zones; the dotted line marks the median zone, the "
+    "solid teal line marks the Manhattan aggregate, and the dashed terracotta "
+    "line marks the citywide aggregate."
+)
+
+taxi_manhattan = hero_ranking_base[
+    hero_ranking_base["metric"].eq("taxi_trip_count")
+    & hero_ranking_base["borough"].astype(str).eq("Manhattan")
+].copy()
+
+if not taxi_manhattan.empty:
+    taxi_median = float(taxi_manhattan["percent_change"].median())
+    taxi_manhattan_aggregate = _aggregate_change_value(
+        taxi_manhattan,
+        metric="taxi_trip_count",
+        measure_column="percent_change",
+    )
+    taxi_citywide_aggregate = _aggregate_change_value(
+        hero_ranking_base,
+        metric="taxi_trip_count",
+        measure_column="percent_change",
+    )
+    st.info(
+        f"For Taxi trips, the median eligible Manhattan zone changed "
+        f"**{taxi_median:+,.1f}%**, compared with a "
+        f"**{taxi_manhattan_aggregate:+,.1f}% Manhattan aggregate** and a "
+        f"**{taxi_citywide_aggregate:+,.1f}% citywide aggregate**. The gap "
+        "between the typical zone and the broad summaries shows why rankings "
+        "and aggregate results should be interpreted together."
+    )
+
+
 # ---------------------------------------------------------------------
 # Interactive explorer
 # ---------------------------------------------------------------------
@@ -1556,8 +2069,8 @@ st.divider()
 st.header("Explore the rankings")
 
 st.write(
-    "Choose a mobility measure, geographic scope, and time context to "
-    "compare the largest reliable zone-level increases and decreases."
+    "Choose a mobility measure, geographic scope, and time context, then use "
+    "the tabs below to inspect either the largest changes or the full zone distribution."
 )
 
 control1, control2, control3 = st.columns(
@@ -1647,6 +2160,8 @@ if geography_scope != "Citywide":
             "for the selected measure and time context."
         )
 
+citywide_explorer_base = explorer_base.copy()
+
 explorer_base = _filter_geography(
     explorer_base,
     geography_scope=geography_scope,
@@ -1660,95 +2175,234 @@ context_label = _build_context_label(
     temporal_bucket=temporal_bucket,
 )
 
-st.caption(
-    f"{metric_labels[selected_metric]} · "
-    f"{context_label} · Percent change · "
-    f"Reliability thresholds on"
-)
+largest_tab, distribution_tab = st.tabs([
+    "Largest changes",
+    "Full zone distribution",
+])
 
-explorer_summary = _build_explorer_summary(
-    explorer_base
-)
-
-_render_explorer_summary_cards(
-    explorer_summary
-)
-
-st.markdown("#### What stands out in this view")
-
-st.info(
-    _build_explorer_insight(
-        explorer_base,
-        metric_label=metric_labels[selected_metric],
-        context_label=context_label,
+with largest_tab:
+    st.markdown(
+        "Identify the zones with the largest reliable increases and decreases "
+        "within the selected context."
     )
-)
-
-explorer_increases, explorer_decreases = _get_metric_leaders(
-    explorer_base,
-    metric=selected_metric,
-    n=10,
-)
-
-if explorer_increases.empty and explorer_decreases.empty:
-    st.info(
-        "No eligible increases or decreases were available for this "
-        "combination of filters."
-    )
-else:
-    explorer_fig = build_split_lollipop_leaderboard(
-        explorer_increases,
-        explorer_decreases,
-    )
-
-    st.plotly_chart(
-        explorer_fig,
-        use_container_width=True,
-        config={
-            "displayModeBar": False,
-            "responsive": True,
-        },
-        key=(
-            f"explorer_{selected_metric}_"
-            f"{geography_scope}_{geography_value}_"
-            f"{time_context}_{temporal_bucket}"
-        ),
-    )
-
     st.caption(
-        "The chart shows up to ten increases and ten decreases. "
-        "Hover over a zone to compare its pre-CP average, post-CP average, "
-        "daily-average change, and percent change."
+        f"{metric_labels[selected_metric]} · "
+        f"{context_label} · Percent change · Reliability thresholds on"
     )
 
-    with st.expander(
-        "Compare the underlying daily averages",
-        expanded=False,
-    ):
-        detail_table = build_detail_table(
+    explorer_summary = _build_explorer_summary(explorer_base)
+    _render_explorer_summary_cards(explorer_summary)
+
+    st.markdown("#### What stands out in this view")
+    st.info(
+        _build_explorer_insight(
+            explorer_base,
+            metric_label=metric_labels[selected_metric],
+            context_label=context_label,
+        )
+    )
+
+    explorer_increases, explorer_decreases = _get_metric_leaders(
+        explorer_base,
+        metric=selected_metric,
+        n=10,
+    )
+
+    if explorer_increases.empty and explorer_decreases.empty:
+        st.info(
+            "No eligible increases or decreases were available for this "
+            "combination of filters."
+        )
+    else:
+        explorer_fig = build_split_lollipop_leaderboard(
             explorer_increases,
             explorer_decreases,
         )
-
-        st.dataframe(
-            detail_table,
+        st.plotly_chart(
+            explorer_fig,
             use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Rank": st.column_config.NumberColumn(
-                    format="%d",
-                ),
-                "Pre-CP daily avg": st.column_config.NumberColumn(
-                    format="%,.1f",
-                ),
-                "Post-CP daily avg": st.column_config.NumberColumn(
-                    format="%,.1f",
-                ),
-                "Daily-average change": st.column_config.NumberColumn(
-                    format="%+,.1f",
-                ),
-                "Percent change": st.column_config.NumberColumn(
-                    format="%+,.1f%%",
-                ),
-            },
+            config={"displayModeBar": False, "responsive": True},
+            key=(
+                f"explorer_rankings_{selected_metric}_"
+                f"{geography_scope}_{geography_value}_"
+                f"{time_context}_{temporal_bucket}"
+            ),
         )
+        st.caption(
+            "The chart shows up to ten increases and ten decreases. Hover over "
+            "a zone to compare its pre-CP average, post-CP average, "
+            "daily-average change, and percent change."
+        )
+
+        with st.expander(
+            "Compare the underlying daily averages",
+            expanded=False,
+        ):
+            detail_table = build_detail_table(
+                explorer_increases,
+                explorer_decreases,
+            )
+            st.dataframe(
+                detail_table,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Rank": st.column_config.NumberColumn(format="%d"),
+                    "Pre-CP daily avg": st.column_config.NumberColumn(
+                        format="%,.1f"
+                    ),
+                    "Post-CP daily avg": st.column_config.NumberColumn(
+                        format="%,.1f"
+                    ),
+                    "Daily-average change": st.column_config.NumberColumn(
+                        format="%+,.1f"
+                    ),
+                    "Percent change": st.column_config.NumberColumn(
+                        format="%+,.1f%%"
+                    ),
+                },
+            )
+
+with distribution_tab:
+    st.markdown(
+        "See whether the ranked zones are isolated extremes or part of a broader "
+        "geographic pattern."
+    )
+    distribution_measure = st.selectbox(
+        "Distribution measure",
+        options=list(DISTRIBUTION_MEASURES),
+        index=0,
+        key="raw04_distribution_measure",
+        help=(
+            "Percent change compares relative movement across zones. "
+            "Daily-average change preserves the original metric units and "
+            "helps reveal percentage outliers driven by small baselines."
+        ),
+    )
+    measure_column, axis_title, tick_suffix = DISTRIBUTION_MEASURES[
+        distribution_measure
+    ]
+
+    if geography_scope == "Citywide":
+        active_reference_label = "Citywide aggregate"
+    elif geography_scope == "Borough":
+        active_reference_label = f"{geography_value} aggregate"
+    else:
+        active_reference_label = (
+            f"{_format_geo_policy(geography_value)} aggregate"
+        )
+
+    st.caption(
+        f"{metric_labels[selected_metric]} · {context_label} · "
+        f"{distribution_measure} · Reliability thresholds on"
+    )
+
+    summary = _distribution_summary(
+        explorer_base,
+        metric=selected_metric,
+        measure_column=measure_column,
+    )
+    _render_distribution_cards(
+        summary,
+        measure_column=measure_column,
+    )
+
+    st.markdown("#### What the full spread tells us")
+    st.info(
+        _build_distribution_insight(
+            explorer_base,
+            citywide_base=citywide_explorer_base,
+            metric=selected_metric,
+            metric_label=metric_labels[selected_metric],
+            context_label=context_label,
+            measure_column=measure_column,
+            active_reference_label=active_reference_label,
+        )
+    )
+
+    if int(summary["eligible"]) == 0:
+        st.info(
+            "No eligible zones were available for this combination of filters."
+        )
+    else:
+        distribution_fig = build_distribution_chart(
+            explorer_base,
+            citywide_base=citywide_explorer_base,
+            metric=selected_metric,
+            measure_column=measure_column,
+            axis_title=axis_title,
+            tick_suffix=tick_suffix,
+            active_reference_label=active_reference_label,
+        )
+        st.plotly_chart(
+            distribution_fig,
+            use_container_width=True,
+            config={"displayModeBar": False, "responsive": True},
+            key=(
+                f"explorer_distribution_{selected_metric}_"
+                f"{geography_scope}_{geography_value}_"
+                f"{time_context}_{temporal_bucket}_{measure_column}"
+            ),
+        )
+        st.caption(
+            "The violin shows the full eligible-zone distribution. Points are "
+            "individual Taxi Zones; the dotted line marks the median zone, the "
+            "solid teal line marks the active-geography aggregate when it differs "
+            "from citywide, and the dashed terracotta line marks the citywide "
+            "aggregate. The two labeled points are the filtered extremes."
+        )
+
+        with st.expander("Inspect all eligible zones", expanded=False):
+            table = explorer_base[
+                explorer_base["metric"].eq(selected_metric)
+            ][
+                [
+                    "zone",
+                    "borough",
+                    "cbd_spatial_category",
+                    "pre_daily_average",
+                    "post_daily_average",
+                    "absolute_change",
+                    "percent_change",
+                ]
+            ].copy()
+
+            table = table.sort_values(
+                measure_column,
+                ascending=False,
+            ).rename(
+                columns={
+                    "zone": "Taxi Zone",
+                    "borough": "Borough",
+                    "cbd_spatial_category": "Geo-policy group",
+                    "pre_daily_average": "Pre-CP daily avg",
+                    "post_daily_average": "Post-CP daily avg",
+                    "absolute_change": "Daily-average change",
+                    "percent_change": "Percent change",
+                }
+            )
+            table["Geo-policy group"] = (
+                table["Geo-policy group"]
+                .fillna("Unavailable")
+                .map(_format_geo_policy)
+            )
+
+            st.dataframe(
+                table,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Pre-CP daily avg": st.column_config.NumberColumn(
+                        format="%,.1f"
+                    ),
+                    "Post-CP daily avg": st.column_config.NumberColumn(
+                        format="%,.1f"
+                    ),
+                    "Daily-average change": st.column_config.NumberColumn(
+                        format="%+,.1f"
+                    ),
+                    "Percent change": st.column_config.NumberColumn(
+                        format="%+,.1f%%"
+                    ),
+                },
+            )

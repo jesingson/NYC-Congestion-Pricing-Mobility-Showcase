@@ -1651,6 +1651,428 @@ def build_interactive_relationship_chart(
     return fig
 
 
+
+
+# ---------------------------------------------------------------------
+# Temporal-bucket relationship heatmap
+# ---------------------------------------------------------------------
+HEATMAP_BUCKETS = [
+    bucket
+    for bucket in TEMPORAL_BUCKET_OPTIONS
+    if bucket != ALL_TEMPORAL_BUCKETS_LABEL
+]
+
+
+def _build_temporal_relationship_matrix(
+    *,
+    x_metric: str,
+    y_metric: str,
+    geography_level: str,
+    display_mode: str,
+    filter_scope: str,
+    filter_value: str | None,
+) -> pd.DataFrame:
+    """Calculate pre/post cross-sectional correlations for every time bucket."""
+    rows: list[dict[str, object]] = []
+
+    for temporal_bucket in HEATMAP_BUCKETS:
+        relationship_data = build_relationship_long_data(
+            metrics=[x_metric, y_metric],
+            temporal_bucket=temporal_bucket,
+            aggregation_level=geography_level,
+            apply_reliability_thresholds=False,
+        )
+
+        pair_data = build_metric_pair_data(
+            relationship_data,
+            x_metric=x_metric,
+            y_metric=y_metric,
+        )
+
+        if (
+            display_mode == "Taxi Zones"
+            and filter_scope != "All Taxi Zones"
+        ):
+            pair_data = _filter_taxi_zone_pair_data(
+                pair_data,
+                filter_scope=filter_scope,
+                filter_value=filter_value,
+            )
+
+        correlations = calculate_pair_correlations(
+            pair_data
+        )
+
+        pre_row = correlations[
+            correlations["period"].eq("Pre-CP")
+        ]
+        post_row = correlations[
+            correlations["period"].eq("Post-CP")
+        ]
+
+        pre_correlation = (
+            float(pre_row.iloc[0]["pearson_correlation"])
+            if not pre_row.empty
+            else np.nan
+        )
+        post_correlation = (
+            float(post_row.iloc[0]["pearson_correlation"])
+            if not post_row.empty
+            else np.nan
+        )
+
+        pre_count = (
+            int(pre_row.iloc[0]["observation_count"])
+            if (
+                not pre_row.empty
+                and "observation_count" in pre_row.columns
+                and pd.notna(pre_row.iloc[0]["observation_count"])
+            )
+            else int(
+                pair_data[
+                    pair_data["period"].eq("Pre-CP")
+                ][["x_value", "y_value"]]
+                .dropna()
+                .shape[0]
+            )
+        )
+
+        post_count = (
+            int(post_row.iloc[0]["observation_count"])
+            if (
+                not post_row.empty
+                and "observation_count" in post_row.columns
+                and pd.notna(post_row.iloc[0]["observation_count"])
+            )
+            else int(
+                pair_data[
+                    pair_data["period"].eq("Post-CP")
+                ][["x_value", "y_value"]]
+                .dropna()
+                .shape[0]
+            )
+        )
+
+        change = (
+            post_correlation - pre_correlation
+            if pd.notna(pre_correlation)
+            and pd.notna(post_correlation)
+            else np.nan
+        )
+
+        rows.append(
+            {
+                "temporal_bucket": temporal_bucket,
+                "temporal_bucket_label": TEMPORAL_BUCKET_LABELS[
+                    temporal_bucket
+                ],
+                "pre_correlation": pre_correlation,
+                "post_correlation": post_correlation,
+                "correlation_change": change,
+                "pre_observation_count": pre_count,
+                "post_observation_count": post_count,
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+def build_temporal_relationship_heatmap(
+    matrix_df: pd.DataFrame,
+) -> go.Figure:
+    """Build the compact pre/post/change correlation matrix."""
+    if matrix_df.empty:
+        return _apply_chart_branding(go.Figure())
+
+    columns = [
+        "Pre-CP",
+        "Post-CP",
+        "Change",
+    ]
+
+    z_values = matrix_df[
+        [
+            "pre_correlation",
+            "post_correlation",
+            "correlation_change",
+        ]
+    ].to_numpy(dtype=float)
+
+    text_values = np.empty(
+        z_values.shape,
+        dtype=object,
+    )
+
+    for row_index in range(z_values.shape[0]):
+        for column_index in range(z_values.shape[1]):
+            value = z_values[row_index, column_index]
+            text_values[row_index, column_index] = (
+                f"{value:+.2f}"
+                if np.isfinite(value)
+                else "—"
+            )
+
+    customdata = np.empty(
+        z_values.shape + (2,),
+        dtype=object,
+    )
+
+    for row_index, row in matrix_df.reset_index(drop=True).iterrows():
+        customdata[row_index, 0] = [
+            row["pre_observation_count"],
+            "Pre-CP",
+        ]
+        customdata[row_index, 1] = [
+            row["post_observation_count"],
+            "Post-CP",
+        ]
+        customdata[row_index, 2] = [
+            min(
+                row["pre_observation_count"],
+                row["post_observation_count"],
+            ),
+            "Post minus pre",
+        ]
+
+    finite_values = z_values[np.isfinite(z_values)]
+    color_bound = (
+        max(1.0, float(np.abs(finite_values).max()))
+        if finite_values.size
+        else 1.0
+    )
+
+    fig = go.Figure(
+        go.Heatmap(
+            z=z_values,
+            x=columns,
+            y=matrix_df["temporal_bucket_label"],
+            zmin=-color_bound,
+            zmax=color_bound,
+            zmid=0,
+            colorscale=[
+                [0.0, BRAND_COLORS["terracotta"]],
+                [0.5, BRAND_COLORS["ice"]],
+                [1.0, BRAND_COLORS["dark_teal"]],
+            ],
+            text=text_values,
+            texttemplate="%{text}",
+            textfont={"size": 13},
+            customdata=customdata,
+            hovertemplate=(
+                "<b>%{y}</b><br>"
+                "%{customdata[1]}: %{z:+.3f}<br>"
+                "Paired geographies: %{customdata[0]:,}"
+                "<extra></extra>"
+            ),
+            colorbar={
+                "title": {
+                    "text": "Correlation<br>or change",
+                },
+                "tickformat": "+.1f",
+            },
+            hoverongaps=False,
+        )
+    )
+
+    fig.update_xaxes(
+        title_text="",
+        side="top",
+        showgrid=False,
+    )
+    fig.update_yaxes(
+        title_text="",
+        autorange="reversed",
+        showgrid=False,
+        automargin=True,
+    )
+
+    fig = _apply_chart_branding(fig)
+
+    fig.update_layout(
+        height=610,
+        margin={
+            "l": 10,
+            "r": 45,
+            "t": 45,
+            "b": 35,
+        },
+    )
+
+    return fig
+
+
+def _build_heatmap_summary(
+    matrix_df: pd.DataFrame,
+) -> dict[str, object]:
+    """Summarize the strongest temporal-bucket relationship patterns."""
+    valid_post = matrix_df[
+        matrix_df["post_correlation"].notna()
+    ].copy()
+
+    valid_change = matrix_df[
+        matrix_df["correlation_change"].notna()
+    ].copy()
+
+    sign_flips = matrix_df[
+        matrix_df[
+            [
+                "pre_correlation",
+                "post_correlation",
+            ]
+        ]
+        .notna()
+        .all(axis=1)
+        & (
+            np.sign(matrix_df["pre_correlation"])
+            != np.sign(matrix_df["post_correlation"])
+        )
+    ].copy()
+
+    strongest_post = (
+        valid_post.loc[
+            valid_post["post_correlation"].abs().idxmax()
+        ]
+        if not valid_post.empty
+        else None
+    )
+
+    largest_shift = (
+        valid_change.loc[
+            valid_change["correlation_change"].abs().idxmax()
+        ]
+        if not valid_change.empty
+        else None
+    )
+
+    return {
+        "strongest_post": strongest_post,
+        "largest_shift": largest_shift,
+        "sign_flip_count": int(len(sign_flips)),
+        "valid_bucket_count": int(len(valid_change)),
+    }
+
+
+def _render_heatmap_summary_cards(
+    summary: dict[str, object],
+) -> None:
+    strongest_post = summary["strongest_post"]
+    largest_shift = summary["largest_shift"]
+
+    card1, card2, card3 = st.columns(3)
+
+    card1.metric(
+        "Strongest post-CP relationship",
+        (
+            f"{strongest_post['post_correlation']:+.3f}"
+            if strongest_post is not None
+            else "Unavailable"
+        ),
+        (
+            str(strongest_post["temporal_bucket_label"])
+            if strongest_post is not None
+            else None
+        ),
+    )
+
+    card2.metric(
+        "Largest pre/post shift",
+        (
+            f"{largest_shift['correlation_change']:+.3f}"
+            if largest_shift is not None
+            else "Unavailable"
+        ),
+        (
+            str(largest_shift["temporal_bucket_label"])
+            if largest_shift is not None
+            else None
+        ),
+    )
+
+    card3.metric(
+        "Buckets that changed sign",
+        f"{summary['sign_flip_count']} of {summary['valid_bucket_count']}",
+    )
+
+
+def _build_heatmap_insight(
+    matrix_df: pd.DataFrame,
+    *,
+    x_label: str,
+    y_label: str,
+    geography_context: str,
+) -> str:
+    """Build a dynamic takeaway for the temporal relationship matrix."""
+    valid = matrix_df[
+        matrix_df[
+            [
+                "pre_correlation",
+                "post_correlation",
+                "correlation_change",
+            ]
+        ]
+        .notna()
+        .all(axis=1)
+    ].copy()
+
+    if valid.empty:
+        return (
+            "There were too few paired geographies to compare the selected "
+            "relationship across temporal buckets."
+        )
+
+    strongest_positive = valid.loc[
+        valid["post_correlation"].idxmax()
+    ]
+    strongest_inverse = valid.loc[
+        valid["post_correlation"].idxmin()
+    ]
+    largest_shift = valid.loc[
+        valid["correlation_change"].abs().idxmax()
+    ]
+
+    sign_flip_count = int(
+        (
+            np.sign(valid["pre_correlation"])
+            != np.sign(valid["post_correlation"])
+        ).sum()
+    )
+
+    post_spread = (
+        float(valid["post_correlation"].max())
+        - float(valid["post_correlation"].min())
+    )
+
+    if post_spread >= 0.50 or sign_flip_count >= 2:
+        consistency_sentence = (
+            "The relationship is strongly time-dependent, so a single overall "
+            "correlation would hide meaningful differences across the week."
+        )
+    elif post_spread >= 0.25 or sign_flip_count == 1:
+        consistency_sentence = (
+            "The relationship varies by time of week, although most buckets "
+            "retain a broadly similar direction."
+        )
+    else:
+        consistency_sentence = (
+            "The relationship is comparatively consistent across temporal "
+            "buckets."
+        )
+
+    return (
+        f"For **{x_label}** and **{y_label}** across **{geography_context}**, "
+        f"the strongest positive post-CP relationship appeared during "
+        f"**{strongest_positive['temporal_bucket_label']}** "
+        f"(**{strongest_positive['post_correlation']:+.3f}**), while the most "
+        f"inverse post-CP relationship appeared during "
+        f"**{strongest_inverse['temporal_bucket_label']}** "
+        f"(**{strongest_inverse['post_correlation']:+.3f}**). The largest "
+        f"pre/post shift occurred during "
+        f"**{largest_shift['temporal_bucket_label']}** "
+        f"(**{largest_shift['correlation_change']:+.3f}**). "
+        f"{consistency_sentence}"
+    )
+
+
 # ---------------------------------------------------------------------
 # Dynamic summaries
 # ---------------------------------------------------------------------
@@ -2107,9 +2529,9 @@ st.header(
 )
 
 st.write(
-    "Choose two positional measures and an optional third measure for "
-    "bubble area. Keep individual Taxi Zones—with optional geographic "
-    "filtering—or compare values aggregated by Borough or policy geography."
+    "Choose two mobility measures and a geographic frame, then use the "
+    "tabs to compare relationships across places or across the ordered "
+    "time-of-week buckets."
 )
 
 if "raw05_saved_view" not in st.session_state:
@@ -2122,8 +2544,9 @@ saved_view = st.selectbox(
     options=SAVED_VIEW_OPTIONS,
     index=0,
     help=(
-        "Saved configurations provide curated starting points. "
-        "Changing any control switches the selection to Custom."
+        "Saved configurations provide curated starting points for the "
+        "across-geographies view. Changing any shared control switches "
+        "the selection to Custom."
     ),
     key="raw05_saved_view",
 )
@@ -2147,7 +2570,7 @@ if (
 
 if saved_view == "Custom":
     st.caption(
-        "Custom view · adjust any measure, geography, or time control."
+        "Custom view · adjust any measure or geography control."
     )
 else:
     st.caption(
@@ -2156,15 +2579,13 @@ else:
         ]
     )
 
-st.markdown("##### Measures")
+st.markdown("##### Shared measures")
 
-measure_col1, measure_col2, measure_col3 = (
-    st.columns(3)
-)
+measure_col1, measure_col2 = st.columns(2)
 
 with measure_col1:
     x_metric = st.selectbox(
-        "X-axis measure",
+        "X measure",
         options=CORE_METRICS,
         index=(
             CORE_METRICS.index(TAXI_METRIC)
@@ -2198,7 +2619,7 @@ with measure_col2:
         )
 
     y_metric = st.selectbox(
-        "Y-axis measure",
+        "Y measure",
         options=y_options,
         index=(
             y_options.index(FHVHV_METRIC)
@@ -2210,58 +2631,9 @@ with measure_col2:
         on_change=_mark_saved_view_custom,
     )
 
-with measure_col3:
-    bubble_options: list[str | None] = [
-        None,
-        *[
-            metric
-            for metric in CORE_METRICS
-            if metric not in {
-                x_metric,
-                y_metric,
-            }
-        ],
-    ]
+st.markdown("##### Shared geography")
 
-    default_bubble_index = (
-        bubble_options.index(SUBWAY_METRIC)
-        if SUBWAY_METRIC in bubble_options
-        else 0
-    )
-
-    if (
-        st.session_state.get(
-            "raw05_bubble_metric"
-        )
-        not in bubble_options
-    ):
-        st.session_state[
-            "raw05_bubble_metric"
-        ] = (
-            SUBWAY_METRIC
-            if SUBWAY_METRIC
-            in bubble_options
-            else None
-        )
-
-    bubble_metric = st.selectbox(
-        "Bubble-area measure",
-        options=bubble_options,
-        index=default_bubble_index,
-        format_func=_metric_display_label,
-        help=(
-            "Bubble area adds a third quantitative measure. "
-            "Select None to use fixed-size markers."
-        ),
-        key="raw05_bubble_metric",
-        on_change=_mark_saved_view_custom,
-    )
-
-st.markdown("##### Geography")
-
-geography_col1, geography_col2 = (
-    st.columns(2)
-)
+geography_col1, geography_col2 = st.columns(2)
 
 with geography_col1:
     display_mode = st.selectbox(
@@ -2271,7 +2643,7 @@ with geography_col1:
         help=(
             "Taxi Zones preserves local observations. Aggregated "
             "geographies combines the underlying zones into Borough "
-            "or policy-geography totals."
+            "or policy-geography summaries."
         ),
         key="raw05_display_mode",
         on_change=_mark_saved_view_custom,
@@ -2289,25 +2661,10 @@ if display_mode == "Taxi Zones":
             on_change=_mark_saved_view_custom,
         )
 
-    color_col, filter_value_col = (
-        st.columns(2)
-    )
-
-    with color_col:
-        taxi_zone_color = st.selectbox(
-            "Color Taxi Zones by",
-            options=TAXI_ZONE_COLOR_OPTIONS,
-            index=0,
-            key="raw05_taxi_zone_color",
-            on_change=_mark_saved_view_custom,
-        )
-
     aggregate_by = None
-
 else:
     filter_scope = "All Taxi Zones"
     taxi_zone_color = "Geo-policy group"
-    filter_value_col = None
 
     with geography_col2:
         aggregate_by = st.selectbox(
@@ -2320,69 +2677,20 @@ else:
 
     geography_level = aggregate_by
 
-st.markdown("##### Time")
-
-time_col1, time_col2 = st.columns(2)
-
-with time_col1:
-    temporal_bucket = st.selectbox(
-        "Time bucket",
-        options=TEMPORAL_BUCKET_OPTIONS,
-        format_func=lambda value: (
-            TEMPORAL_BUCKET_LABELS[value]
-        ),
-        index=0,
-        key="raw05_temporal_bucket",
-        on_change=_mark_saved_view_custom,
-    )
-
-with time_col2:
-    period_view = st.selectbox(
-        "Period view",
-        options=PERIOD_OPTIONS,
-        index=0,
-        key="raw05_period_view",
-        on_change=_mark_saved_view_custom,
-    )
-
-selected_metrics = [
-    x_metric,
-    y_metric,
-]
-
-if (
-    bubble_metric is not None
-    and bubble_metric not in selected_metrics
-):
-    selected_metrics.append(
-        bubble_metric
-    )
-
 with st.spinner(
-    "Updating the relationship explorer..."
+    "Preparing the shared geography sample..."
 ):
-    explorer_data = build_relationship_long_data(
-        metrics=selected_metrics,
-        temporal_bucket=temporal_bucket,
+    shared_relationship_data = build_relationship_long_data(
+        metrics=[x_metric, y_metric],
+        temporal_bucket=ALL_TEMPORAL_BUCKETS_LABEL,
         aggregation_level=geography_level,
         apply_reliability_thresholds=False,
     )
 
-    xy_pair_data = build_metric_pair_data(
-        explorer_data,
+    shared_pair_data = build_metric_pair_data(
+        shared_relationship_data,
         x_metric=x_metric,
         y_metric=y_metric,
-    )
-
-    xy_geography_count = int(
-        xy_pair_data["geography_id"]
-        .nunique()
-    )
-
-    pair_data = _attach_bubble_metric(
-        xy_pair_data,
-        explorer_data,
-        bubble_metric=bubble_metric,
     )
 
 filter_value: str | None = None
@@ -2392,34 +2700,21 @@ if (
     and filter_scope != "All Taxi Zones"
 ):
     filter_values = _available_filter_values(
-        pair_data,
+        shared_pair_data,
         filter_scope=filter_scope,
     )
 
     if filter_values:
-        filter_container = (
-            filter_value_col
-            if filter_value_col is not None
-            else st
-        )
-
-        with filter_container:
-            filter_value = st.selectbox(
-                (
-                    "Borough"
-                    if filter_scope == "Borough"
-                    else "Geo-policy group"
-                ),
-                options=filter_values,
-                index=0,
-                key="raw05_taxi_zone_filter_value",
-                on_change=_mark_saved_view_custom,
-            )
-
-        pair_data = _filter_taxi_zone_pair_data(
-            pair_data,
-            filter_scope=filter_scope,
-            filter_value=filter_value,
+        filter_value = st.selectbox(
+            (
+                "Borough"
+                if filter_scope == "Borough"
+                else "Geo-policy group"
+            ),
+            options=filter_values,
+            index=0,
+            key="raw05_taxi_zone_filter_value",
+            on_change=_mark_saved_view_custom,
         )
     else:
         st.warning(
@@ -2427,335 +2722,575 @@ if (
             "of measures."
         )
 
-pair_data = pair_data[
-    pair_data["x_value"].gt(0)
-    & pair_data["y_value"].gt(0)
-].copy()
-
-if bubble_metric is not None:
-    pair_data = pair_data[
-        pair_data["bubble_value"].gt(0)
-    ].copy()
-
-comparison = build_pre_post_pair_comparison(
-    pair_data
+metric_labels = _metric_label_lookup(
+    shared_relationship_data
 )
 
-comparison = _build_bubble_comparison(
-    comparison,
-    pair_data,
-    bubble_metric=bubble_metric,
+x_label = metric_labels.get(
+    x_metric,
+    _metric_display_label(x_metric),
 )
 
-correlations = calculate_pair_correlations(
-    pair_data
+y_label = metric_labels.get(
+    y_metric,
+    _metric_display_label(y_metric),
 )
 
-if comparison.empty or pair_data.empty:
-    st.info(
-        "No complete positive observations were available for this "
-        "combination of measures and filters."
+if display_mode == "Taxi Zones":
+    geography_context = (
+        "all eligible Taxi Zones"
+        if filter_scope == "All Taxi Zones"
+        else f"{filter_scope}: {filter_value}"
     )
-
+    geography_label = "Taxi Zone observations"
 else:
-    metric_labels = _metric_label_lookup(
-        explorer_data
+    geography_context = f"geographies aggregated by {aggregate_by}"
+    geography_label = f"{aggregate_by.lower()} groups"
+
+across_tab, temporal_tab = st.tabs(
+    [
+        "Across geographies",
+        "By time of week",
+    ]
+)
+
+with across_tab:
+    st.markdown(
+        "Compare where the selected modes sit across the city and how each "
+        "geography moved from the pre-CP to post-CP period."
     )
 
-    x_label = metric_labels.get(
-        x_metric,
-        _metric_display_label(x_metric),
+    st.markdown("##### Chart-specific measures")
+
+    bubble_metric = st.selectbox(
+        "Bubble-area measure",
+        options=[
+            None,
+            *[
+                metric
+                for metric in CORE_METRICS
+                if metric not in {
+                    x_metric,
+                    y_metric,
+                }
+            ],
+        ],
+        format_func=_metric_display_label,
+        help=(
+            "Bubble area adds a third quantitative measure. "
+            "Select None to use fixed-size markers."
+        ),
+        key="raw05_bubble_metric",
+        on_change=_mark_saved_view_custom,
     )
 
-    y_label = metric_labels.get(
-        y_metric,
-        _metric_display_label(y_metric),
-    )
+    chart_control1, chart_control2, chart_control3 = st.columns(3)
 
-    bubble_label = (
-        metric_labels.get(
-            bubble_metric,
-            _metric_display_label(
-                bubble_metric
+    with chart_control1:
+        if display_mode == "Taxi Zones":
+            taxi_zone_color = st.selectbox(
+                "Color Taxi Zones by",
+                options=TAXI_ZONE_COLOR_OPTIONS,
+                index=0,
+                key="raw05_taxi_zone_color",
+                on_change=_mark_saved_view_custom,
+            )
+        else:
+            taxi_zone_color = "Geo-policy group"
+            st.markdown(
+                f"**Color grouping**  \n{aggregate_by}"
+            )
+
+    with chart_control2:
+        temporal_bucket = st.selectbox(
+            "Time bucket",
+            options=TEMPORAL_BUCKET_OPTIONS,
+            format_func=lambda value: (
+                TEMPORAL_BUCKET_LABELS[value]
             ),
-        )
-        if bubble_metric is not None
-        else "Fixed marker size"
-    )
-
-    displayed_geography_count = int(
-        comparison["geography_id"]
-        .nunique()
-    )
-
-    pre_correlation = _get_period_correlation(
-        correlations,
-        period="Pre-CP",
-    )
-
-    post_correlation = _get_period_correlation(
-        correlations,
-        period="Post-CP",
-    )
-
-    complete_pairs = comparison[
-        [
-            "x_percent_change",
-            "y_percent_change",
-        ]
-    ].dropna()
-
-    moved_together_share = (
-        comparison["moved_together"]
-        .fillna(False)
-        .sum()
-        / len(complete_pairs)
-        if len(complete_pairs)
-        else np.nan
-    )
-
-    card1, card2, card3, card4 = (
-        st.columns(4)
-    )
-
-    card1.metric(
-        (
-            "Taxi Zones shown"
-            if display_mode == "Taxi Zones"
-            else "Geographic groups"
-        ),
-        f"{displayed_geography_count:,}",
-    )
-
-    card2.metric(
-        "Pre-CP correlation",
-        _format_correlation(
-            pre_correlation
-        ),
-    )
-
-    card3.metric(
-        "Post-CP correlation",
-        _format_correlation(
-            post_correlation
-        ),
-    )
-
-    card4.metric(
-        "Moved together",
-        (
-            f"{moved_together_share:.1%}"
-            if pd.notna(
-                moved_together_share
-            )
-            else "Unavailable"
-        ),
-    )
-
-    if display_mode == "Taxi Zones":
-        geography_context = (
-            "All Taxi Zones"
-            if filter_scope
-            == "All Taxi Zones"
-            else (
-                f"{filter_scope}: "
-                f"{filter_value}"
-            )
+            index=0,
+            key="raw05_temporal_bucket",
+            on_change=_mark_saved_view_custom,
         )
 
-        color_label = taxi_zone_color
-
-        geography_label = (
-            "Taxi Zone observations"
+    with chart_control3:
+        period_view = st.selectbox(
+            "Period view",
+            options=PERIOD_OPTIONS,
+            index=0,
+            key="raw05_period_view",
+            on_change=_mark_saved_view_custom,
         )
 
-    else:
-        geography_context = (
-            f"Aggregated by {aggregate_by}"
-        )
-
-        color_label = aggregate_by
-
-        geography_label = (
-            f"{aggregate_by.lower()} groups"
-        )
-
-    st.caption(
-        f"X: {x_label} · "
-        f"Y: {y_label} · "
-        f"Bubble area: {bubble_label} · "
-        f"{geography_context} · "
-        f"Color: {color_label} · "
-        f"{TEMPORAL_BUCKET_LABELS[temporal_bucket]} · "
-        f"{period_view}"
-    )
+    selected_metrics = [
+        x_metric,
+        y_metric,
+    ]
 
     if (
         bubble_metric is not None
-        and displayed_geography_count
-        < xy_geography_count
+        and bubble_metric not in selected_metrics
     ):
-        excluded_count = (
-            xy_geography_count
-            - displayed_geography_count
+        selected_metrics.append(
+            bubble_metric
+        )
+
+    with st.spinner(
+        "Updating the geographic relationship view..."
+    ):
+        explorer_data = build_relationship_long_data(
+            metrics=selected_metrics,
+            temporal_bucket=temporal_bucket,
+            aggregation_level=geography_level,
+            apply_reliability_thresholds=False,
+        )
+
+        xy_pair_data = build_metric_pair_data(
+            explorer_data,
+            x_metric=x_metric,
+            y_metric=y_metric,
+        )
+
+        xy_geography_count = int(
+            xy_pair_data["geography_id"]
+            .nunique()
+        )
+
+        pair_data = _attach_bubble_metric(
+            xy_pair_data,
+            explorer_data,
+            bubble_metric=bubble_metric,
+        )
+
+    if (
+        display_mode == "Taxi Zones"
+        and filter_scope != "All Taxi Zones"
+    ):
+        pair_data = _filter_taxi_zone_pair_data(
+            pair_data,
+            filter_scope=filter_scope,
+            filter_value=filter_value,
+        )
+
+    pair_data = pair_data[
+        pair_data["x_value"].gt(0)
+        & pair_data["y_value"].gt(0)
+    ].copy()
+
+    if bubble_metric is not None:
+        pair_data = pair_data[
+            pair_data["bubble_value"].gt(0)
+        ].copy()
+
+    comparison = build_pre_post_pair_comparison(
+        pair_data
+    )
+
+    comparison = _build_bubble_comparison(
+        comparison,
+        pair_data,
+        bubble_metric=bubble_metric,
+    )
+
+    correlations = calculate_pair_correlations(
+        pair_data
+    )
+
+    if comparison.empty or pair_data.empty:
+        st.info(
+            "No complete positive observations were available for this "
+            "combination of measures and filters."
+        )
+    else:
+        bubble_label = (
+            metric_labels.get(
+                bubble_metric,
+                _metric_display_label(
+                    bubble_metric
+                ),
+            )
+            if bubble_metric is not None
+            else "Fixed marker size"
+        )
+
+        displayed_geography_count = int(
+            comparison["geography_id"]
+            .nunique()
+        )
+
+        pre_correlation = _get_period_correlation(
+            correlations,
+            period="Pre-CP",
+        )
+
+        post_correlation = _get_period_correlation(
+            correlations,
+            period="Post-CP",
+        )
+
+        complete_pairs = comparison[
+            [
+                "x_percent_change",
+                "y_percent_change",
+            ]
+        ].dropna()
+
+        moved_together_share = (
+            comparison["moved_together"]
+            .fillna(False)
+            .sum()
+            / len(complete_pairs)
+            if len(complete_pairs)
+            else np.nan
+        )
+
+        card1, card2, card3, card4 = st.columns(4)
+
+        card1.metric(
+            (
+                "Taxi Zones shown"
+                if display_mode == "Taxi Zones"
+                else "Geographic groups"
+            ),
+            f"{displayed_geography_count:,}",
+        )
+
+        card2.metric(
+            "Pre-CP correlation",
+            _format_correlation(
+                pre_correlation
+            ),
+        )
+
+        card3.metric(
+            "Post-CP correlation",
+            _format_correlation(
+                post_correlation
+            ),
+        )
+
+        card4.metric(
+            "Moved together",
+            (
+                f"{moved_together_share:.1%}"
+                if pd.notna(
+                    moved_together_share
+                )
+                else "Unavailable"
+            ),
+        )
+
+        color_label = (
+            taxi_zone_color
+            if display_mode == "Taxi Zones"
+            else aggregate_by
         )
 
         st.caption(
-            f"Adding {bubble_label} reduced the complete geographic "
-            f"sample by {excluded_count:,} because bubble sizing requires "
-            "a positive value for all three selected measures."
+            f"X: {x_label} · "
+            f"Y: {y_label} · "
+            f"Bubble area: {bubble_label} · "
+            f"{geography_context} · "
+            f"Color: {color_label} · "
+            f"{TEMPORAL_BUCKET_LABELS[temporal_bucket]} · "
+            f"{period_view}"
         )
 
-    selected_metric_set = {
-        x_metric,
-        y_metric,
-        bubble_metric,
-    }
+        if (
+            bubble_metric is not None
+            and displayed_geography_count
+            < xy_geography_count
+        ):
+            excluded_count = (
+                xy_geography_count
+                - displayed_geography_count
+            )
 
-    if SUBWAY_METRIC in selected_metric_set:
-        st.caption(
-            "Subway Ridership does not cover Staten Island, so Staten "
-            "Island cannot appear when this measure is required."
+            st.caption(
+                f"Adding {bubble_label} reduced the complete geographic "
+                f"sample by {excluded_count:,} because bubble sizing requires "
+                "a positive value for all three selected measures."
+            )
+
+        selected_metric_set = {
+            x_metric,
+            y_metric,
+            bubble_metric,
+        }
+
+        if SUBWAY_METRIC in selected_metric_set:
+            st.caption(
+                "Subway Ridership does not cover Staten Island, so Staten "
+                "Island cannot appear when this measure is required."
+            )
+
+        st.markdown(
+            "#### What stands out in this view"
         )
+
+        st.info(
+            _build_explorer_insight(
+                comparison,
+                correlations,
+                x_label=x_label,
+                y_label=y_label,
+                geography_label=geography_label,
+                bubble_label=bubble_label,
+                bubble_metric=bubble_metric,
+            )
+        )
+
+        relationship_fig = (
+            build_interactive_relationship_chart(
+                pair_data,
+                comparison,
+                geography_level=geography_level,
+                period_view=period_view,
+                taxi_zone_color=taxi_zone_color,
+                bubble_metric=bubble_metric,
+            )
+        )
+
+        st.plotly_chart(
+            relationship_fig,
+            use_container_width=True,
+            config={
+                "displayModeBar": False,
+                "responsive": True,
+            },
+            key=(
+                f"raw05_geographic_"
+                f"{x_metric}_{y_metric}_"
+                f"{bubble_metric}_"
+                f"{display_mode}_"
+                f"{geography_level}_"
+                f"{filter_scope}_"
+                f"{filter_value}_"
+                f"{taxi_zone_color}_"
+                f"{temporal_bucket}_"
+                f"{period_view}"
+            ),
+        )
+
+        if bubble_metric is not None:
+            st.caption(
+                f"Bubble area—not radius—is proportional to {bubble_label}. "
+                "Open markers show pre-CP values; filled markers show post-CP "
+                "values. Logarithmic axes require positive X and Y values."
+            )
+        else:
+            st.caption(
+                "Marker size is fixed. Open markers show pre-CP values; "
+                "filled markers show post-CP values. Logarithmic axes require "
+                "positive X and Y values."
+            )
+
+        with st.expander(
+            "Inspect the paired pre- and post-CP values",
+            expanded=False,
+        ):
+            st.caption(
+                "Rows are sorted by the largest combined absolute percentage "
+                "movement across the displayed measures."
+            )
+
+            detail = _build_detail_table(
+                comparison,
+                x_label=x_label,
+                y_label=y_label,
+                bubble_label=bubble_label,
+                bubble_metric=bubble_metric,
+            )
+
+            column_config: dict[
+                str,
+                st.column_config.Column
+            ] = {
+                f"{x_label} · Pre-CP": (
+                    st.column_config.NumberColumn(
+                        format="%,.2f",
+                    )
+                ),
+                f"{x_label} · Post-CP": (
+                    st.column_config.NumberColumn(
+                        format="%,.2f",
+                    )
+                ),
+                f"{x_label} · Change": (
+                    st.column_config.NumberColumn(
+                        format="%+,.1f%%",
+                    )
+                ),
+                f"{y_label} · Pre-CP": (
+                    st.column_config.NumberColumn(
+                        format="%,.2f",
+                    )
+                ),
+                f"{y_label} · Post-CP": (
+                    st.column_config.NumberColumn(
+                        format="%,.2f",
+                    )
+                ),
+                f"{y_label} · Change": (
+                    st.column_config.NumberColumn(
+                        format="%+,.1f%%",
+                    )
+                ),
+            }
+
+            if bubble_metric is not None:
+                column_config.update(
+                    {
+                        f"{bubble_label} · Pre-CP": (
+                            st.column_config.NumberColumn(
+                                format="%,.2f",
+                            )
+                        ),
+                        f"{bubble_label} · Post-CP": (
+                            st.column_config.NumberColumn(
+                                format="%,.2f",
+                            )
+                        ),
+                        f"{bubble_label} · Change": (
+                            st.column_config.NumberColumn(
+                                format="%+,.1f%%",
+                            )
+                        ),
+                    }
+                )
+
+            st.dataframe(
+                detail,
+                use_container_width=True,
+                hide_index=True,
+                column_config=column_config,
+            )
+
+with temporal_tab:
+    st.markdown(
+        "Compare the same mode pair across every ordered temporal bucket. "
+        "Each row reports the Pearson relationship before congestion pricing, "
+        "after congestion pricing, and the post-minus-pre change."
+    )
+
+    with st.spinner(
+        "Calculating relationships across temporal buckets..."
+    ):
+        temporal_matrix = _build_temporal_relationship_matrix(
+            x_metric=x_metric,
+            y_metric=y_metric,
+            geography_level=geography_level,
+            display_mode=display_mode,
+            filter_scope=filter_scope,
+            filter_value=filter_value,
+        )
+
+    heatmap_summary = _build_heatmap_summary(
+        temporal_matrix
+    )
+
+    _render_heatmap_summary_cards(
+        heatmap_summary
+    )
+
+    st.caption(
+        f"{x_label} versus {y_label} · {geography_context} · "
+        "Pearson correlations across displayed geographies"
+    )
 
     st.markdown(
-        "#### What stands out in this view"
+        "#### What the time-of-week comparison adds"
     )
 
     st.info(
-        _build_explorer_insight(
-            comparison,
-            correlations,
+        _build_heatmap_insight(
+            temporal_matrix,
             x_label=x_label,
             y_label=y_label,
-            geography_label=geography_label,
-            bubble_label=bubble_label,
-            bubble_metric=bubble_metric,
+            geography_context=geography_context,
         )
     )
 
-    relationship_fig = (
-        build_interactive_relationship_chart(
-            pair_data,
-            comparison,
-            geography_level=geography_level,
-            period_view=period_view,
-            taxi_zone_color=taxi_zone_color,
-            bubble_metric=bubble_metric,
-        )
+    temporal_fig = build_temporal_relationship_heatmap(
+        temporal_matrix
     )
 
     st.plotly_chart(
-        relationship_fig,
+        temporal_fig,
         use_container_width=True,
         config={
             "displayModeBar": False,
             "responsive": True,
         },
         key=(
-            f"raw05_explorer_"
+            f"raw05_temporal_heatmap_"
             f"{x_metric}_{y_metric}_"
-            f"{bubble_metric}_"
-            f"{display_mode}_"
-            f"{geography_level}_"
-            f"{filter_scope}_"
-            f"{filter_value}_"
-            f"{taxi_zone_color}_"
-            f"{temporal_bucket}_"
-            f"{period_view}"
+            f"{display_mode}_{geography_level}_"
+            f"{filter_scope}_{filter_value}"
         ),
     )
 
-    if bubble_metric is not None:
+    st.caption(
+        "Teal indicates a positive relationship or strengthening; terracotta "
+        "indicates an inverse relationship or weakening. The Change column is "
+        "Post-CP minus Pre-CP. Hover over a cell to see the number of paired "
+        "geographies supporting that estimate."
+    )
+
+    if SUBWAY_METRIC in {
+        x_metric,
+        y_metric,
+    }:
         st.caption(
-            f"Bubble area—not radius—is proportional to {bubble_label}. "
-            "Open markers show pre-CP values; filled markers show post-CP "
-            "values. Logarithmic axes require positive X and Y values."
-        )
-    else:
-        st.caption(
-            "Marker size is fixed. Open markers show pre-CP values; "
-            "filled markers show post-CP values. Logarithmic axes require "
-            "positive X and Y values."
+            "Subway Ridership does not cover Staten Island, so Staten Island "
+            "cannot contribute when Subway Ridership is selected."
         )
 
     with st.expander(
-        "Inspect the paired pre- and post-CP values",
+        "Inspect temporal-bucket correlations",
         expanded=False,
     ):
-        st.caption(
-            "Rows are sorted by the largest combined absolute percentage "
-            "movement across the displayed measures."
+        heatmap_table = temporal_matrix[
+            [
+                "temporal_bucket_label",
+                "pre_correlation",
+                "post_correlation",
+                "correlation_change",
+                "pre_observation_count",
+                "post_observation_count",
+            ]
+        ].copy()
+
+        heatmap_table = heatmap_table.rename(
+            columns={
+                "temporal_bucket_label": "Temporal bucket",
+                "pre_correlation": "Pre-CP correlation",
+                "post_correlation": "Post-CP correlation",
+                "correlation_change": "Post minus pre",
+                "pre_observation_count": "Pre-CP paired geographies",
+                "post_observation_count": "Post-CP paired geographies",
+            }
         )
-
-        detail = _build_detail_table(
-            comparison,
-            x_label=x_label,
-            y_label=y_label,
-            bubble_label=bubble_label,
-            bubble_metric=bubble_metric,
-        )
-
-        column_config: dict[
-            str,
-            st.column_config.Column
-        ] = {
-            f"{x_label} · Pre-CP": (
-                st.column_config.NumberColumn(
-                    format="%,.2f",
-                )
-            ),
-            f"{x_label} · Post-CP": (
-                st.column_config.NumberColumn(
-                    format="%,.2f",
-                )
-            ),
-            f"{x_label} · Change": (
-                st.column_config.NumberColumn(
-                    format="%+,.1f%%",
-                )
-            ),
-            f"{y_label} · Pre-CP": (
-                st.column_config.NumberColumn(
-                    format="%,.2f",
-                )
-            ),
-            f"{y_label} · Post-CP": (
-                st.column_config.NumberColumn(
-                    format="%,.2f",
-                )
-            ),
-            f"{y_label} · Change": (
-                st.column_config.NumberColumn(
-                    format="%+,.1f%%",
-                )
-            ),
-        }
-
-        if bubble_metric is not None:
-            column_config.update(
-                {
-                    f"{bubble_label} · Pre-CP": (
-                        st.column_config.NumberColumn(
-                            format="%,.2f",
-                        )
-                    ),
-                    f"{bubble_label} · Post-CP": (
-                        st.column_config.NumberColumn(
-                            format="%,.2f",
-                        )
-                    ),
-                    f"{bubble_label} · Change": (
-                        st.column_config.NumberColumn(
-                            format="%+,.1f%%",
-                        )
-                    ),
-                }
-            )
 
         st.dataframe(
-            detail,
+            heatmap_table,
             use_container_width=True,
             hide_index=True,
-            column_config=column_config,
+            column_config={
+                "Pre-CP correlation": st.column_config.NumberColumn(
+                    format="%+.3f",
+                ),
+                "Post-CP correlation": st.column_config.NumberColumn(
+                    format="%+.3f",
+                ),
+                "Post minus pre": st.column_config.NumberColumn(
+                    format="%+.3f",
+                ),
+                "Pre-CP paired geographies": st.column_config.NumberColumn(
+                    format="%d",
+                ),
+                "Post-CP paired geographies": st.column_config.NumberColumn(
+                    format="%d",
+                ),
+            },
         )

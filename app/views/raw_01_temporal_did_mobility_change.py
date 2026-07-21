@@ -38,6 +38,7 @@ HERO_DEFAULT_METRICS = [
     "fhvhv_trip_count",
 ]
 
+ADJUSTMENT_BASELINE_DAYS = 90
 
 INTERESTING_VIEWS = {
     "Citywide taxi baseline": {
@@ -198,6 +199,313 @@ def _add_period_trend_line(
     )
 
 
+def _build_monthly_adjustment_path(
+    daily_df: pd.DataFrame,
+    *,
+    metrics: list[str],
+    baseline_days: int = ADJUSTMENT_BASELINE_DAYS,
+) -> pd.DataFrame:
+    """Index monthly post-CP values to the immediate pre-CP daily baseline."""
+    if daily_df.empty:
+        return pd.DataFrame()
+
+    working = daily_df.copy()
+    working["date"] = pd.to_datetime(working["date"], errors="coerce")
+    working = working.loc[working["date"].notna()].sort_values("date")
+
+    baseline_start = CONGESTION_PRICING_START_DATE - pd.Timedelta(days=baseline_days)
+    baseline_mask = (
+        working["date"].ge(baseline_start)
+        & working["date"].lt(CONGESTION_PRICING_START_DATE)
+    )
+    post_mask = working["date"].ge(CONGESTION_PRICING_START_DATE)
+
+    rows: list[dict[str, object]] = []
+
+    for metric_name in metrics:
+        if metric_name not in working.columns:
+            continue
+
+        baseline_values = working.loc[baseline_mask, metric_name].dropna()
+        if baseline_values.empty:
+            continue
+
+        baseline_value = float(baseline_values.mean())
+        if not np.isfinite(baseline_value) or baseline_value == 0:
+            continue
+
+        rows.append(
+            {
+                "metric": metric_name,
+                "metric_label": METRIC_LABELS.get(metric_name, metric_name),
+                "period_start": baseline_start.normalize(),
+                "period_label": "Pre-CP reference",
+                "period_order": 0,
+                "period_value": baseline_value,
+                "baseline_value": baseline_value,
+                "index_value": 100.0,
+                "observed_days": int(baseline_values.count()),
+            }
+        )
+
+        metric_post = working.loc[post_mask, ["date", metric_name]].dropna().copy()
+        if metric_post.empty:
+            continue
+
+        metric_post["period_start"] = (
+            metric_post["date"].dt.to_period("M").dt.to_timestamp()
+        )
+
+        monthly = (
+            metric_post.groupby("period_start", as_index=False)
+            .agg(
+                period_value=(metric_name, "mean"),
+                observed_days=(metric_name, "count"),
+            )
+            .sort_values("period_start")
+        )
+
+        for period_order, row in enumerate(monthly.itertuples(index=False), start=1):
+            period_value = float(row.period_value)
+            rows.append(
+                {
+                    "metric": metric_name,
+                    "metric_label": METRIC_LABELS.get(metric_name, metric_name),
+                    "period_start": row.period_start,
+                    "period_label": pd.Timestamp(row.period_start).strftime("%b %Y"),
+                    "period_order": period_order,
+                    "period_value": period_value,
+                    "baseline_value": baseline_value,
+                    "index_value": period_value / baseline_value * 100.0,
+                    "observed_days": int(row.observed_days),
+                }
+            )
+
+    if not rows:
+        return pd.DataFrame()
+
+    result = pd.DataFrame(rows)
+    return result.sort_values(["metric", "period_order"]).reset_index(drop=True)
+
+
+def _build_adjustment_figure(
+    adjustment_df: pd.DataFrame,
+    *,
+    title: str,
+    height: int = 520,
+) -> go.Figure:
+    """Build a policy-relative monthly adjustment-path chart."""
+    fig = go.Figure()
+
+    if adjustment_df.empty:
+        fig.update_layout(title=title, height=height)
+        return apply_branding(fig)
+
+    period_order = (
+        adjustment_df[["period_order", "period_label"]]
+        .drop_duplicates()
+        .sort_values("period_order")
+    )
+    category_order = period_order["period_label"].tolist()
+
+    for metric_name, metric_df in adjustment_df.groupby("metric", sort=False):
+        metric_df = metric_df.sort_values("period_order")
+        fig.add_trace(
+            go.Scatter(
+                x=metric_df["period_label"],
+                y=metric_df["index_value"],
+                mode="lines+markers",
+                name=METRIC_LABELS.get(metric_name, metric_name),
+                customdata=metric_df[["period_value", "observed_days"]],
+                hovertemplate=(
+                    "<b>%{fullData.name}</b><br>"
+                    "Period: %{x}<br>"
+                    "Index: %{y:.1f}<br>"
+                    "Period daily avg: %{customdata[0]:,.2f}<br>"
+                    "Observed days: %{customdata[1]:,}<br>"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+    fig.add_hline(
+        y=100,
+        line_dash="dot",
+        line_color="rgba(0, 109, 119, 0.50)",
+        annotation_text=f"Final {ADJUSTMENT_BASELINE_DAYS} pre-CP days = 100",
+        annotation_position="bottom right",
+    )
+
+    fig.update_xaxes(
+        categoryorder="array",
+        categoryarray=category_order,
+        tickangle=-35,
+    )
+    fig.update_layout(
+        title=title,
+        xaxis_title="Policy-relative period",
+        yaxis_title="Index value",
+        hovermode="x unified",
+        height=height,
+    )
+
+    fig = apply_branding(fig)
+    return _apply_bottom_legend(fig, bottom_margin=145)
+
+
+def _build_hero_metric_insight(
+    summary_df: pd.DataFrame,
+    *,
+    metrics: list[str],
+) -> str:
+    """Summarize the strongest pre/post movements among the selected hero metrics."""
+    selected = summary_df.loc[
+        summary_df["metric"].isin(metrics)
+        & summary_df["percent_change"].notna()
+    ].copy()
+
+    if selected.empty:
+        return "The selected metrics do not have enough pre/post coverage for a concise comparison."
+
+    selected["metric_label"] = selected["metric"].map(
+        lambda value: METRIC_LABELS.get(value, value)
+    )
+    selected = selected.sort_values("percent_change")
+
+    weakest = selected.iloc[0]
+    strongest = selected.iloc[-1]
+
+    if len(selected) == 1:
+        return (
+            f"<strong>{strongest['metric_label']}</strong> changed "
+            f"<strong>{strongest['percent_change']:+.1f}%</strong> in the full-period "
+            "post-CP versus pre-CP comparison."
+        )
+
+    same_direction = (selected["percent_change"] > 0).all() or (
+        selected["percent_change"] < 0
+    ).all()
+    direction_note = (
+        "The selected metrics moved in the same broad direction, but by different magnitudes."
+        if same_direction
+        else "The selected metrics did not move uniformly, pointing to a mixed multimodal response."
+    )
+
+    return (
+        f"Among the selected series, <strong>{strongest['metric_label']}</strong> had the "
+        f"largest full-period change at <strong>{strongest['percent_change']:+.1f}%</strong>, "
+        f"while <strong>{weakest['metric_label']}</strong> had the smallest at "
+        f"<strong>{weakest['percent_change']:+.1f}%</strong>. {direction_note}"
+    )
+
+
+def _classify_adjustment_pattern(metric_df: pd.DataFrame) -> tuple[str, float, float]:
+    """Return a concise pattern label plus early and later index levels."""
+    post_df = metric_df.loc[
+        metric_df["period_order"].gt(0) & metric_df["index_value"].notna()
+    ].sort_values("period_order")
+
+    if post_df.empty:
+        return "insufficient post-CP data", np.nan, np.nan
+
+    early = float(post_df.head(min(2, len(post_df)))["index_value"].mean())
+    later = float(post_df.tail(min(3, len(post_df)))["index_value"].mean())
+    early_change = early - 100.0
+    later_change = later - 100.0
+    threshold = 3.0
+
+    if abs(early_change) < threshold and abs(later_change) < threshold:
+        label = "stayed near baseline"
+    elif abs(early_change) >= threshold and abs(later_change) < abs(early_change) * 0.55:
+        label = "faded toward baseline"
+    elif abs(early_change) < threshold and abs(later_change) >= threshold:
+        label = "emerged later"
+    elif np.sign(early_change) != np.sign(later_change) and abs(later_change) >= threshold:
+        label = "changed direction"
+    elif abs(later_change) >= threshold:
+        label = "persisted above baseline" if later_change > 0 else "persisted below baseline"
+    else:
+        label = "followed a mixed path"
+
+    return label, early, later
+
+
+def _build_adjustment_overview(
+    adjustment_df: pd.DataFrame,
+    *,
+    metrics: list[str],
+) -> str:
+    """Summarize how the selected adjustment paths differ in persistence."""
+    summaries: list[dict[str, object]] = []
+
+    for metric in metrics:
+        metric_df = adjustment_df.loc[adjustment_df["metric"] == metric]
+        label, early, later = _classify_adjustment_pattern(metric_df)
+        if not np.isfinite(later):
+            continue
+        summaries.append(
+            {
+                "metric": metric,
+                "metric_label": METRIC_LABELS.get(metric, metric),
+                "pattern": label,
+                "early": early,
+                "later": later,
+                "later_change": later - 100.0,
+            }
+        )
+
+    if not summaries:
+        return "The selected metrics do not have enough post-CP coverage to compare persistence."
+
+    strongest = max(summaries, key=lambda row: abs(float(row["later_change"])))
+    pattern_text = "; ".join(
+        f"<strong>{row['metric_label']}</strong> {row['pattern']}"
+        for row in summaries
+    )
+
+    return (
+        f"{pattern_text}. The largest later-period departure among these selections was "
+        f"<strong>{strongest['metric_label']}</strong> at "
+        f"<strong>{float(strongest['later']):.1f}</strong> on the index "
+        f"({float(strongest['later_change']):+.1f} relative to baseline)."
+    )
+
+
+def _build_adjustment_interpretation(
+    adjustment_df: pd.DataFrame,
+    *,
+    metric: str,
+) -> str:
+    """Describe whether the selected post-CP path persisted, faded, or developed later."""
+    metric_df = adjustment_df.loc[
+        (adjustment_df["metric"] == metric)
+        & adjustment_df["period_order"].gt(0)
+        & adjustment_df["index_value"].notna()
+    ].sort_values("period_order")
+
+    metric_label = METRIC_LABELS.get(metric, metric)
+    if metric_df.empty:
+        return "This selection does not have enough post-CP data to summarize an adjustment path."
+
+    pattern_label, early, later = _classify_adjustment_pattern(metric_df)
+    pattern_lookup = {
+        "stayed near baseline": "stayed close to its immediate pre-CP baseline",
+        "faded toward baseline": "showed an early shift that later moved substantially back toward baseline",
+        "emerged later": "showed limited initial movement but a clearer shift later in the post-CP period",
+        "changed direction": "changed direction between the early and later post-CP periods",
+        "persisted above baseline": "remained meaningfully above its immediate pre-CP baseline in later months",
+        "persisted below baseline": "remained meaningfully below its immediate pre-CP baseline in later months",
+        "followed a mixed path": "followed a mixed path without a clearly persistent later shift",
+    }
+    pattern = pattern_lookup.get(pattern_label, pattern_label)
+
+    return (
+        f"<strong>{metric_label}</strong> {pattern}. "
+        f"The first two post-CP months averaged <strong>{early:.1f}</strong> on the index, "
+        f"while the latest three available months averaged <strong>{later:.1f}</strong>."
+    )
+
+
 def _display_summary_table(summary_df: pd.DataFrame) -> None:
     """Display a formatted pre/post summary table."""
     st.dataframe(
@@ -306,6 +614,7 @@ st.subheader("What changed at a glance")
 
 summary_df = get_pre_post_metric_summary(metrics=CORE_METRICS)
 trend_df = get_indexed_daily_trends(metrics=CORE_METRICS, smoothing_window=14)
+adjustment_daily_df = get_daily_metric_trends(metrics=CORE_METRICS)
 
 st.markdown(build_raw01_frozen_interpretation(summary_df))
 
@@ -373,6 +682,16 @@ st.caption(
     "Demand metrics are shown by default; speed metrics can be added with the selector."
 )
 
+st.markdown(
+    f"""
+    <div class="soft-callout">
+        <strong>So what?</strong><br>
+        {_build_hero_metric_insight(summary_df, metrics=hero_metrics)}
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
 taxi_change = summary_df.loc[
     summary_df["metric"] == "taxi_trip_count", "percent_change"
 ].iloc[0]
@@ -408,6 +727,46 @@ with col3:
         delta="Post-CP vs pre-CP daily average",
     )
 
+st.markdown("### Did the change persist?")
+st.markdown(
+    "A full pre/post average can hide whether a response appeared immediately, "
+    "strengthened gradually, or faded. This view compares each selected metric with "
+    f"its average during the final {ADJUSTMENT_BASELINE_DAYS} pre-CP days."
+)
+
+hero_adjustment_df = _build_monthly_adjustment_path(
+    adjustment_daily_df,
+    metrics=hero_metrics,
+)
+
+if hero_adjustment_df.empty:
+    st.warning("The monthly post-CP adjustment path could not be calculated.")
+else:
+    hero_adjustment_fig = _build_adjustment_figure(
+        hero_adjustment_df,
+        title="Monthly mobility adjustment after congestion pricing",
+        height=540,
+    )
+    st.plotly_chart(
+        hero_adjustment_fig,
+        use_container_width=True,
+        key="raw01_curated_adjustment_path",
+    )
+    st.caption(
+        f"Each line begins at 100 for the final {ADJUSTMENT_BASELINE_DAYS} days before "
+        "congestion pricing. Monthly points are averages of the available daily values; "
+        "the January 2025 point begins on the January 5 launch date."
+    )
+    st.markdown(
+        f"""
+        <div class="soft-callout">
+            <strong>So what?</strong><br>
+            {_build_adjustment_overview(hero_adjustment_df, metrics=hero_metrics)}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
 with st.expander("Show pre/post summary across core metrics", expanded=False):
     _display_summary_table(summary_df)
 
@@ -441,8 +800,9 @@ st.subheader("Explore the pattern yourself")
 
 st.markdown(
     """
-    Start with a saved view, or adjust the controls to test whether the same pattern holds for a
-    different metric, geography, temporal bucket, or date window.
+    Start with a saved view, then use the tabs below to inspect either the detailed daily pattern
+    or the persistence of the post-CP adjustment. Shared controls apply to both tabs; only the
+    controls specific to each chart appear inside that tab.
     """
 )
 
@@ -461,20 +821,6 @@ if active_saved_view == "None":
     st.info("Custom view: the controls below no longer match a saved view.")
 else:
     st.info(INTERESTING_VIEWS[active_saved_view]["interpretation"])
-
-trend_guide = st.selectbox(
-    "Trend guide",
-    options=[
-        "None",
-        "Full-period trend line",
-        "Separate pre/post trend lines",
-    ],
-    index=0,
-    help=(
-        "Optional visual guide for noisy series. Full-period shows one simple trend across the "
-        "selected window; pre/post shows separate fits on each side of the CP start date."
-    ),
-)
 
 filter_values = get_available_filter_values()
 
@@ -495,7 +841,7 @@ metric = st.selectbox(
     on_change=_mark_raw01_custom,
 )
 
-control_col1, control_col2, control_col3 = st.columns(3)
+control_col1, control_col2 = st.columns(2)
 
 with control_col1:
     geography_scope = st.selectbox(
@@ -515,13 +861,6 @@ with control_col2:
         on_change=_mark_raw01_custom,
     )
 
-with control_col3:
-    smoothing_window_label = st.selectbox(
-        "Smoothing",
-        options=RAW01_SMOOTHING_OPTIONS,
-        key="raw01_smoothing",
-        on_change=_mark_raw01_custom,
-    )
 
 borough = None
 cbd_spatial_category = None
@@ -542,194 +881,132 @@ elif geography_scope == "CBD spatial category":
         on_change=_mark_raw01_custom,
     )
 
-date_col1, date_col2 = st.columns(2)
 
-with date_col1:
-    date_start = st.date_input(
-        "Start date",
-        min_value=STUDY_START_DATE.date(),
-        max_value=STUDY_END_DATE.date(),
-        key="raw01_start_date",
-        on_change=_mark_raw01_custom,
+daily_tab, adjustment_tab = st.tabs([
+    "Daily trend",
+    "Post-CP persistence",
+])
+
+with daily_tab:
+    st.markdown(
+        "Explore the full observed timeline, including smoothing, custom dates, "
+        "and optional trend guides."
     )
-
-with date_col2:
-    date_end = st.date_input(
-        "End date",
-        min_value=STUDY_START_DATE.date(),
-        max_value=STUDY_END_DATE.date(),
-        key="raw01_end_date",
-        on_change=_mark_raw01_custom,
-    )
-
-if date_start > date_end:
-    st.warning("Start date must be before or equal to end date.")
-    st.stop()
-
-smoothing_lookup = {
-    "None": None,
-    "7-day rolling average": 7,
-    "14-day rolling average": 14,
-    "28-day rolling average": 28,
-}
-
-smoothing_window = smoothing_lookup[smoothing_window_label]
-
-date_range = (
-    pd.Timestamp(date_start),
-    pd.Timestamp(date_end),
-)
-
-selected_daily_df = get_daily_metric_trends(
-    metrics=[metric],
-    temporal_bucket=temporal_bucket,
-    borough=borough,
-    cbd_spatial_category=cbd_spatial_category,
-    date_range=date_range,
-)
-
-selected_daily_df = add_rolling_average(
-    selected_daily_df,
-    metrics=[metric],
-    window=smoothing_window,
-)
-
-selected_summary_df = get_pre_post_metric_summary(
-    metrics=[metric],
-    temporal_bucket=temporal_bucket,
-    borough=borough,
-    cbd_spatial_category=cbd_spatial_category,
-    date_range=date_range,
-)
-
-selected_summary_display_df = format_summary_for_display(selected_summary_df)
-
-selected_metric_label = METRIC_LABELS.get(metric, metric)
-display_col = f"{metric}_display"
-
-selected_fig = go.Figure()
-
-if smoothing_window is not None:
-    selected_fig.add_trace(
-        go.Scatter(
-            x=selected_daily_df["date"],
-            y=selected_daily_df[metric],
-            mode="lines",
-            name="Daily value",
-            line={"color": "rgba(0, 109, 119, 0.25)"},
-            hovertemplate=(
-                "Date: %{x|%b %d, %Y}<br>"
-                f"{selected_metric_label}: "
-                + "%{y:,.2f}<br>"
-                "<extra></extra>"
-            ),
+    c1, c2 = st.columns(2)
+    with c1:
+        smoothing_window_label = st.selectbox(
+            "Smoothing", RAW01_SMOOTHING_OPTIONS,
+            key="raw01_smoothing", on_change=_mark_raw01_custom,
         )
-    )
-
-selected_fig.add_trace(
-    go.Scatter(
-        x=selected_daily_df["date"],
-        y=selected_daily_df[display_col],
-        mode="lines",
-        name=smoothing_window_label if smoothing_window is not None else "Daily value",
-        line={"color": BRAND_COLORS["dark_teal"], "width": 3},
-        hovertemplate=(
-            "Date: %{x|%b %d, %Y}<br>"
-            f"{selected_metric_label}: "
-            + "%{y:,.2f}<br>"
-            "<extra></extra>"
-        ),
-    )
-)
-
-if date_range[0] <= CONGESTION_PRICING_START_DATE <= date_range[1]:
-    selected_fig.add_vline(
-        x=CONGESTION_PRICING_START_DATE,
-        line_dash="dash",
-        line_color=BRAND_COLORS["terracotta"],
-        annotation_text="CP starts",
-        annotation_position="top left",
-    )
-
-if trend_guide == "Full-period trend line":
-    _add_full_period_trend_line(
-        selected_fig,
-        selected_daily_df,
-        metric_col=metric,
-        color=BRAND_COLORS["terracotta"],
-    )
-
-elif trend_guide == "Separate pre/post trend lines":
-    _add_period_trend_line(
-        selected_fig,
-        selected_daily_df,
-        metric_col=metric,
-        label="Pre-CP fitted line",
-        period="pre_cp",
-        color=BRAND_COLORS["terracotta"],
-    )
-    _add_period_trend_line(
-        selected_fig,
-        selected_daily_df,
-        metric_col=metric,
-        label="Post-CP fitted line",
-        period="post_cp",
-        color=BRAND_COLORS["dark_teal"],
-    )
-
-selected_fig.update_layout(
-    title=f"{selected_metric_label} over time",
-    xaxis_title="Date",
-    yaxis_title=selected_metric_label,
-    hovermode="x unified",
-    height=500,
-)
-
-selected_fig = apply_branding(selected_fig)
-selected_fig = _apply_bottom_legend(selected_fig, bottom_margin=105)
-
-st.plotly_chart(selected_fig, use_container_width=True)
-
-st.markdown(
-    f"""
-    <div class="soft-callout">
-        <strong>What to notice:</strong><br>
-        {build_selected_view_interpretation(
-            selected_summary_df,
-            metric=metric,
-            geography_scope=geography_scope,
-            temporal_bucket=temporal_bucket,
-            borough=borough,
+    with c2:
+        trend_guide = st.selectbox(
+            "Trend guide",
+            ["None", "Full-period trend line", "Separate pre/post trend lines"],
+            key="raw01_trend_guide",
+        )
+    d1, d2 = st.columns(2)
+    with d1:
+        date_start = st.date_input(
+            "Start date", min_value=STUDY_START_DATE.date(),
+            max_value=STUDY_END_DATE.date(), key="raw01_start_date",
+            on_change=_mark_raw01_custom,
+        )
+    with d2:
+        date_end = st.date_input(
+            "End date", min_value=STUDY_START_DATE.date(),
+            max_value=STUDY_END_DATE.date(), key="raw01_end_date",
+            on_change=_mark_raw01_custom,
+        )
+    if date_start > date_end:
+        st.warning("Start date must be before or equal to end date.")
+    else:
+        smoothing_window = {
+            "None": None, "7-day rolling average": 7,
+            "14-day rolling average": 14, "28-day rolling average": 28,
+        }[smoothing_window_label]
+        date_range = (pd.Timestamp(date_start), pd.Timestamp(date_end))
+        daily_df = get_daily_metric_trends(
+            metrics=[metric], temporal_bucket=temporal_bucket,
+            borough=borough, cbd_spatial_category=cbd_spatial_category,
+            date_range=date_range,
+        )
+        daily_df = add_rolling_average(daily_df, metrics=[metric], window=smoothing_window)
+        summary = get_pre_post_metric_summary(
+            metrics=[metric], temporal_bucket=temporal_bucket,
+            borough=borough, cbd_spatial_category=cbd_spatial_category,
+            date_range=date_range,
+        )
+        label = METRIC_LABELS.get(metric, metric)
+        display_col = f"{metric}_display"
+        chart = go.Figure()
+        if smoothing_window is not None:
+            chart.add_trace(go.Scatter(
+                x=daily_df["date"], y=daily_df[metric], mode="lines",
+                name="Daily value", line={"color": "rgba(0,109,119,0.25)"},
+            ))
+        chart.add_trace(go.Scatter(
+            x=daily_df["date"], y=daily_df[display_col], mode="lines",
+            name=smoothing_window_label if smoothing_window else "Daily value",
+            line={"color": BRAND_COLORS["dark_teal"], "width": 3},
+        ))
+        if date_range[0] <= CONGESTION_PRICING_START_DATE <= date_range[1]:
+            chart.add_vline(
+                x=CONGESTION_PRICING_START_DATE, line_dash="dash",
+                line_color=BRAND_COLORS["terracotta"],
+                annotation_text="CP starts", annotation_position="top left",
+            )
+        if trend_guide == "Full-period trend line":
+            _add_full_period_trend_line(chart, daily_df, metric_col=metric, color=BRAND_COLORS["terracotta"])
+        elif trend_guide == "Separate pre/post trend lines":
+            _add_period_trend_line(chart, daily_df, metric_col=metric, label="Pre-CP fitted line", period="pre_cp", color=BRAND_COLORS["terracotta"])
+            _add_period_trend_line(chart, daily_df, metric_col=metric, label="Post-CP fitted line", period="post_cp", color=BRAND_COLORS["dark_teal"])
+        chart.update_layout(title=f"{label} over time", xaxis_title="Date", yaxis_title=label, hovermode="x unified", height=500)
+        chart = _apply_bottom_legend(apply_branding(chart), bottom_margin=105)
+        st.plotly_chart(chart, use_container_width=True, key="raw01_daily_timeline_chart")
+        insight = build_selected_view_interpretation(
+            summary, metric=metric, geography_scope=geography_scope,
+            temporal_bucket=temporal_bucket, borough=borough,
             cbd_spatial_category=cbd_spatial_category,
-        )}
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+        )
+        st.markdown('<div class="soft-callout"><strong>What to notice:</strong><br>'+insight+'</div>', unsafe_allow_html=True)
+        m1,m2,m3=st.columns(3)
+        m1.metric("Pre-CP daily average", f"{summary['pre_daily_average'].iloc[0]:,.2f}")
+        m2.metric("Post-CP daily average", f"{summary['post_daily_average'].iloc[0]:,.2f}")
+        m3.metric("Post vs pre difference", f"{summary['percent_change'].iloc[0]:,.2f}%")
+        with st.expander("Show selected pre/post summary", expanded=False):
+            _display_summary_table(summary)
 
-selected_change = selected_summary_df["percent_change"].iloc[0]
-selected_pre_avg = selected_summary_df["pre_daily_average"].iloc[0]
-selected_post_avg = selected_summary_df["post_daily_average"].iloc[0]
-
-metric_col1, metric_col2, metric_col3 = st.columns(3)
-
-with metric_col1:
-    st.metric(
-        label="Pre-CP daily average",
-        value=f"{selected_pre_avg:,.2f}",
+with adjustment_tab:
+    st.markdown(
+        "Compare monthly post-CP movement with the immediate pre-CP baseline "
+        "to see whether changes persisted, faded, or emerged gradually."
     )
-
-with metric_col2:
-    st.metric(
-        label="Post-CP daily average",
-        value=f"{selected_post_avg:,.2f}",
+    st.caption(
+        f"This view uses calendar months and a fixed {ADJUSTMENT_BASELINE_DAYS}-day "
+        "immediate pre-CP baseline. Smoothing and arbitrary date windows do not apply."
     )
-
-with metric_col3:
-    st.metric(
-        label="Post vs pre difference",
-        value=f"{selected_change:,.2f}%",
+    daily_df = get_daily_metric_trends(
+        metrics=[metric], temporal_bucket=temporal_bucket,
+        borough=borough, cbd_spatial_category=cbd_spatial_category,
+        date_range=(STUDY_START_DATE, STUDY_END_DATE),
     )
-
-with st.expander("Show selected pre/post summary", expanded=False):
-    _display_summary_table(selected_summary_df)
+    adjustment_df = _build_monthly_adjustment_path(daily_df, metrics=[metric])
+    label = METRIC_LABELS.get(metric, metric)
+    chart = _build_adjustment_figure(
+        adjustment_df, title=f"{label}: monthly post-CP adjustment path", height=520,
+    )
+    st.plotly_chart(chart, use_container_width=True, key="raw01_adjustment_path_chart")
+    insight = _build_adjustment_interpretation(adjustment_df, metric=metric)
+    st.markdown('<div class="soft-callout"><strong>What to notice:</strong><br>'+insight+'</div>', unsafe_allow_html=True)
+    path = adjustment_df.loc[adjustment_df["metric"].eq(metric)].sort_values("period_order")
+    if path.empty:
+        baseline = first_idx = latest_idx = np.nan
+    else:
+        baseline = path.iloc[0]["baseline_value"]
+        post = path.loc[path["period_order"].gt(0)]
+        first_idx = post.iloc[0]["index_value"] if not post.empty else np.nan
+        latest_idx = post.tail(min(3, len(post)))["index_value"].mean() if not post.empty else np.nan
+    m1,m2,m3=st.columns(3)
+    m1.metric(f"Final {ADJUSTMENT_BASELINE_DAYS}-day pre-CP average", f"{baseline:,.2f}" if pd.notna(baseline) else "—")
+    m2.metric("First post-CP month", f"{first_idx:.1f}" if pd.notna(first_idx) else "—", delta=f"{first_idx-100:+.1f} vs baseline" if pd.notna(first_idx) else None)
+    m3.metric("Latest 3-month average", f"{latest_idx:.1f}" if pd.notna(latest_idx) else "—", delta=f"{latest_idx-100:+.1f} vs baseline" if pd.notna(latest_idx) else None)
