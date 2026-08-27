@@ -10,6 +10,10 @@ from app.data_access.spatial_aggregations import (
     ALL_TEMPORAL_BUCKETS_LABEL,
     get_zone_pre_post_metric_summary,
 )
+from app.data_access.mobility_environments import (
+    attach_mobility_regime_cluster_context,
+    format_mobility_regime_cluster_label,
+)
 from app.data_access.spatial_visuals import add_reliability_flags
 
 
@@ -29,6 +33,7 @@ SUPPORTED_AGGREGATION_LEVELS = (
     "Taxi Zone",
     "Borough",
     "Geo-policy group",
+    "Mobility regime cluster",
     "Citywide",
 )
 
@@ -474,6 +479,77 @@ def aggregate_relationship_geography(
         result["zone"] = pd.NA
         result["borough"] = "Multiple boroughs"
 
+    elif aggregation_level == "Mobility regime cluster":
+        pre_source = attach_mobility_regime_cluster_context(
+            source[source["period"].eq("Pre-CP")].copy(),
+            assignment_period="pre_cp",
+        )
+        post_source = attach_mobility_regime_cluster_context(
+            source[source["period"].eq("Post-CP")].copy(),
+            assignment_period="post_cp",
+        )
+
+        source = pd.concat(
+            [
+                pre_source,
+                post_source,
+            ],
+            ignore_index=True,
+        )
+
+        group_columns = [
+            "mobility_regime_cluster_label",
+            "mobility_regime_cluster_name",
+            "temporal_bucket",
+            "period",
+            "metric",
+            "metric_label",
+            "aggregation",
+            "support_metric",
+        ]
+
+        grouped_rows = []
+
+        for group_values, group_df in source.groupby(
+            group_columns,
+            observed=True,
+            dropna=False,
+            sort=False,
+        ):
+            aggregation_result = _aggregate_metric_group(
+                group_df
+            )
+
+            row = dict(
+                zip(
+                    group_columns,
+                    group_values,
+                )
+            )
+
+            row.update(
+                aggregation_result.to_dict()
+            )
+
+            grouped_rows.append(row)
+
+        result = pd.DataFrame(grouped_rows)
+
+        result["geography_level"] = "Mobility regime cluster"
+        result["geography_id"] = (
+            result["mobility_regime_cluster_label"]
+            .astype("Int64")
+            .astype(str)
+        )
+        result["geography_name"] = (
+            result["mobility_regime_cluster_label"]
+            .map(format_mobility_regime_cluster_label)
+        )
+        result["taxi_zone_id"] = pd.NA
+        result["zone"] = pd.NA
+        result["borough"] = "Multiple boroughs"
+        result["cbd_spatial_category"] = "Mixed"
+
     else:
         group_columns = [
             "temporal_bucket",
@@ -717,6 +793,13 @@ def build_pre_post_pair_comparison(
         "borough",
         "cbd_spatial_category",
     ]
+
+    for column in [
+        "mobility_regime_cluster_label",
+        "mobility_regime_cluster_name",
+    ]:
+        if column in pair_data.columns:
+            descriptive_columns.append(column)
 
     value_columns = [
         "x_value",

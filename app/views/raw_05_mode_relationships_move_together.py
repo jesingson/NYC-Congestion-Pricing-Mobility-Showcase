@@ -22,6 +22,11 @@ from app.utils.project_branding import (
     apply_branding,
     inject_app_css,
 )
+from app.data_access.mobility_environments import (
+    attach_mobility_regime_cluster_context,
+    format_mobility_regime_cluster_label,
+    get_mobility_regime_cluster_options,
+)
 
 
 inject_app_css()
@@ -82,17 +87,33 @@ TAXI_ZONE_FILTER_OPTIONS = [
     "All Taxi Zones",
     "Borough",
     "Geo-policy group",
+    "Mobility regime cluster",
 ]
 
 TAXI_ZONE_COLOR_OPTIONS = [
     "Geo-policy group",
     "Borough",
+    "Mobility regime cluster",
 ]
 
 AGGREGATION_OPTIONS = [
     "Borough",
     "Geo-policy group",
+    "Mobility regime cluster",
 ]
+
+MOBILITY_REGIME_CLUSTER_ORDER = [
+    format_mobility_regime_cluster_label(label)
+    for label in get_mobility_regime_cluster_options()
+]
+
+MOBILITY_REGIME_CLUSTER_COLORS = {
+    MOBILITY_REGIME_CLUSTER_ORDER[0]: BRAND_COLORS["dark_teal"],
+    MOBILITY_REGIME_CLUSTER_ORDER[1]: BRAND_COLORS["terracotta"],
+    MOBILITY_REGIME_CLUSTER_ORDER[2]: BRAND_COLORS["seafoam"],
+    MOBILITY_REGIME_CLUSTER_ORDER[3]: "#5B5F97",
+    MOBILITY_REGIME_CLUSTER_ORDER[4]: "#6B8E23",
+}
 
 GEO_POLICY_ORDER = [
     "CBD",
@@ -346,7 +367,7 @@ def _format_percent(
     if pd.isna(value):
         return "Unavailable"
 
-    return f"{float(value):+,.1f}%"
+    return f"{float(value):+,.2f}%"
 
 
 def _format_correlation(
@@ -528,6 +549,9 @@ def _get_color_map(
     geography_level: str,
     taxi_zone_color: str,
 ) -> dict[str, str]:
+    if geography_level == "Mobility regime cluster":
+        return MOBILITY_REGIME_CLUSTER_COLORS
+
     if geography_level == "Borough":
         return BOROUGH_COLORS
 
@@ -536,6 +560,12 @@ def _get_color_map(
         and taxi_zone_color == "Borough"
     ):
         return BOROUGH_COLORS
+
+    if (
+        geography_level == "Taxi Zone"
+        and taxi_zone_color == "Mobility regime cluster"
+    ):
+        return MOBILITY_REGIME_CLUSTER_COLORS
 
     return GEO_POLICY_COLORS
 
@@ -562,9 +592,19 @@ def _get_group_order(
         )
     )
 
+    use_cluster_order = (
+        geography_level == "Mobility regime cluster"
+        or (
+            geography_level == "Taxi Zone"
+            and taxi_zone_color == "Mobility regime cluster"
+        )
+    )
+
     preferred = (
         BOROUGH_ORDER
         if use_borough_order
+        else MOBILITY_REGIME_CLUSTER_ORDER
+        if use_cluster_order
         else GEO_POLICY_ORDER
     )
 
@@ -599,6 +639,13 @@ def _add_color_groups(
             .astype(str)
         )
 
+    elif geography_level == "Mobility regime cluster":
+        result["color_group"] = (
+            result["geography_name"]
+            .fillna("Cluster Unknown")
+            .astype(str)
+        )
+
     elif (
         geography_level == "Taxi Zone"
         and taxi_zone_color == "Borough"
@@ -606,6 +653,17 @@ def _add_color_groups(
         result["color_group"] = (
             result["borough"]
             .fillna("Unknown")
+            .astype(str)
+        )
+
+    elif (
+        geography_level == "Taxi Zone"
+        and taxi_zone_color == "Mobility regime cluster"
+    ):
+        result["color_group"] = (
+            result["mobility_regime_cluster_label"]
+            .map(format_mobility_regime_cluster_label)
+            .fillna("Cluster Unknown")
             .astype(str)
         )
 
@@ -1272,6 +1330,13 @@ def _filter_taxi_zone_pair_data(
             )
         ].copy()
 
+    if filter_scope == "Mobility regime cluster":
+        return pair_data[
+            pair_data["mobility_regime_cluster_label"]
+            .astype(str)
+            .eq(str(filter_value))
+        ].copy()
+
     return pair_data.copy()
 
 
@@ -1317,6 +1382,27 @@ def _available_filter_values(
             category
             for category in GEO_POLICY_ORDER
             if category in represented
+        ]
+
+        return ordered + sorted(
+            represented.difference(ordered)
+        )
+
+    if filter_scope == "Mobility regime cluster":
+        represented = set(
+            pd.to_numeric(
+                pair_data["mobility_regime_cluster_label"],
+                errors="coerce",
+            )
+            .dropna()
+            .astype(int)
+            .tolist()
+        )
+
+        ordered = [
+            cluster
+            for cluster in get_mobility_regime_cluster_options()
+            if cluster in represented
         ]
 
         return ordered + sorted(
@@ -2693,6 +2779,12 @@ with st.spinner(
         y_metric=y_metric,
     )
 
+    if display_mode == "Taxi Zones":
+        shared_pair_data = attach_mobility_regime_cluster_context(
+            shared_pair_data,
+            assignment_period="post_cp",
+        )
+
 filter_value: str | None = None
 
 if (
@@ -2705,16 +2797,28 @@ if (
     )
 
     if filter_values:
+        filter_label = (
+            "Borough"
+            if filter_scope == "Borough"
+            else "Geo-policy group"
+            if filter_scope == "Geo-policy group"
+            else "Mobility regime cluster"
+        )
+
         filter_value = st.selectbox(
-            (
-                "Borough"
-                if filter_scope == "Borough"
-                else "Geo-policy group"
-            ),
+            filter_label,
             options=filter_values,
             index=0,
             key="raw05_taxi_zone_filter_value",
             on_change=_mark_saved_view_custom,
+            format_func=(
+                (lambda value: value)
+                if filter_scope in {
+                    "Borough",
+                    "Geo-policy group",
+                }
+                else format_mobility_regime_cluster_label
+            ),
         )
     else:
         st.warning(
@@ -2740,7 +2844,13 @@ if display_mode == "Taxi Zones":
     geography_context = (
         "all eligible Taxi Zones"
         if filter_scope == "All Taxi Zones"
-        else f"{filter_scope}: {filter_value}"
+        else (
+            f"{filter_scope}: {filter_value}"
+            if filter_scope != "Mobility regime cluster"
+            else format_mobility_regime_cluster_label(
+                filter_value
+            )
+        )
     )
     geography_label = "Taxi Zone observations"
 else:
@@ -2861,6 +2971,12 @@ with across_tab:
             explorer_data,
             bubble_metric=bubble_metric,
         )
+
+        if display_mode == "Taxi Zones":
+            pair_data = attach_mobility_regime_cluster_context(
+                pair_data,
+                assignment_period="post_cp",
+            )
 
     if (
         display_mode == "Taxi Zones"

@@ -18,6 +18,10 @@ from app.data_access.aggregations import (
     get_indexed_daily_trends,
     get_pre_post_metric_summary,
 )
+from app.data_access.mobility_environments import (
+    format_mobility_regime_cluster_label,
+    get_mobility_regime_cluster_options,
+)
 from app.data_access.loaders import (
     CONGESTION_PRICING_START_DATE,
     METRIC_LABELS,
@@ -545,7 +549,12 @@ def _display_summary_table(summary_df: pd.DataFrame) -> None:
 
 RAW01_DEFAULT_SAVED_VIEW = "Citywide taxi baseline"
 RAW01_SAVED_VIEW_OPTIONS = ["None"] + list(INTERESTING_VIEWS.keys())
-RAW01_GEO_OPTIONS = ["Citywide", "Borough", "CBD spatial category"]
+RAW01_GEO_OPTIONS = [
+    "Citywide",
+    "Borough",
+    "CBD spatial category",
+    "Mobility regime cluster",
+]
 RAW01_SMOOTHING_OPTIONS = [
     "None",
     "7-day rolling average",
@@ -864,6 +873,7 @@ with control_col2:
 
 borough = None
 cbd_spatial_category = None
+mobility_regime_cluster_label = None
 
 if geography_scope == "Borough":
     borough = st.selectbox(
@@ -878,6 +888,14 @@ elif geography_scope == "CBD spatial category":
         "CBD spatial category",
         options=filter_values["cbd_spatial_categories"],
         key="raw01_cbd_spatial_category",
+        on_change=_mark_raw01_custom,
+    )
+elif geography_scope == "Mobility regime cluster":
+    mobility_regime_cluster_label = st.selectbox(
+        "Mobility regime cluster",
+        options=get_mobility_regime_cluster_options(),
+        format_func=format_mobility_regime_cluster_label,
+        key="raw01_mobility_regime_cluster",
         on_change=_mark_raw01_custom,
     )
 
@@ -928,12 +946,14 @@ with daily_tab:
         daily_df = get_daily_metric_trends(
             metrics=[metric], temporal_bucket=temporal_bucket,
             borough=borough, cbd_spatial_category=cbd_spatial_category,
+            mobility_regime_cluster_label=mobility_regime_cluster_label,
             date_range=date_range,
         )
         daily_df = add_rolling_average(daily_df, metrics=[metric], window=smoothing_window)
         summary = get_pre_post_metric_summary(
             metrics=[metric], temporal_bucket=temporal_bucket,
             borough=borough, cbd_spatial_category=cbd_spatial_category,
+            mobility_regime_cluster_label=mobility_regime_cluster_label,
             date_range=date_range,
         )
         label = METRIC_LABELS.get(metric, metric)
@@ -967,6 +987,7 @@ with daily_tab:
             summary, metric=metric, geography_scope=geography_scope,
             temporal_bucket=temporal_bucket, borough=borough,
             cbd_spatial_category=cbd_spatial_category,
+            mobility_regime_cluster_label=mobility_regime_cluster_label,
         )
         st.markdown('<div class="soft-callout"><strong>What to notice:</strong><br>'+insight+'</div>', unsafe_allow_html=True)
         m1,m2,m3=st.columns(3)
@@ -988,6 +1009,7 @@ with adjustment_tab:
     daily_df = get_daily_metric_trends(
         metrics=[metric], temporal_bucket=temporal_bucket,
         borough=borough, cbd_spatial_category=cbd_spatial_category,
+        mobility_regime_cluster_label=mobility_regime_cluster_label,
         date_range=(STUDY_START_DATE, STUDY_END_DATE),
     )
     adjustment_df = _build_monthly_adjustment_path(daily_df, metrics=[metric])

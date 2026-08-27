@@ -32,8 +32,13 @@ from app.data_access.aggregations import (
     get_required_columns,
 )
 from app.data_access.loaders import (
-    CORE_METRICS,
+    BASE_METRICS,
+    CONGESTION_PRICING_START_DATE,
     load_analysis_panel,
+)
+from app.data_access.mobility_environments import (
+    attach_mobility_regime_cluster_context,
+    format_mobility_regime_cluster_label,
 )
 from app.data_access.spatial_aggregations import (
     ALL_TEMPORAL_BUCKETS_LABEL,
@@ -51,6 +56,11 @@ ZONE_PROFILE_DAILY_DIR = (
 ZONE_PROFILE_COMPARISON_DIR = (
     APP_TABLE_DIR
     / "zone_profile_comparison_daily_totals"
+)
+
+ZONE_PROFILE_CLUSTER_COMPARISON_DIR = (
+    APP_TABLE_DIR
+    / "zone_profile_cluster_comparison_daily_totals.parquet"
 )
 
 ALL_TAXI_ZONES_GROUP = "All Taxi Zones"
@@ -152,7 +162,7 @@ def _build_zone_daily_metrics(
         ZONE_ID_COLUMN,
         "date",
         "temporal_bucket",
-        *CORE_METRICS,
+        *BASE_METRICS,
     ]
 
     bucket_daily = panel[
@@ -191,7 +201,7 @@ def _build_zone_daily_metrics(
 
     overall_daily = aggregate_metrics(
         panel,
-        metrics=CORE_METRICS,
+        metrics=BASE_METRICS,
         group_cols=[
             ZONE_ID_COLUMN,
             "date",
@@ -241,7 +251,7 @@ def _build_zone_daily_metrics(
         "zone",
         "borough",
         "cbd_spatial_category",
-        *CORE_METRICS,
+        *BASE_METRICS,
     ]
 
     zone_daily = (
@@ -360,15 +370,44 @@ def _build_comparison_daily_totals(
         "cbd_spatial_category",
     ]
 
+    cluster_source = zone_daily.copy()
+    cluster_source["pre_post_cp"] = np.where(
+        pd.to_datetime(cluster_source["date"])
+        >= CONGESTION_PRICING_START_DATE,
+        "post_cp",
+        "pre_cp",
+    )
+    pre_cluster = attach_mobility_regime_cluster_context(
+        cluster_source[
+            cluster_source["pre_post_cp"].eq("pre_cp")
+        ].copy(),
+        assignment_period="pre_cp",
+    )
+    post_cluster = attach_mobility_regime_cluster_context(
+        cluster_source[
+            cluster_source["pre_post_cp"].eq("post_cp")
+        ].copy(),
+        assignment_period="post_cp",
+    )
+    cluster_frame = pd.concat(
+        [pre_cluster, post_cluster],
+        ignore_index=True,
+    )
+    cluster_frame["mobility_regime_cluster_display"] = (
+        cluster_frame["mobility_regime_cluster_label"].map(
+            format_mobility_regime_cluster_label
+        )
+    )
+
     for metric_number, metric in enumerate(
-        CORE_METRICS,
+        BASE_METRICS,
         start=1,
     ):
         metric_start = perf_counter()
 
         print(
             f"Building comparison totals for "
-            f"{metric_number}/{len(CORE_METRICS)}: {metric}",
+            f"{metric_number}/{len(BASE_METRICS)}: {metric}",
             flush=True,
         )
 
@@ -404,6 +443,25 @@ def _build_comparison_daily_totals(
                 comparison_level="Geo-policy group",
                 comparison_group_column=(
                     "cbd_spatial_category"
+                ),
+            )
+        )
+
+        summaries.append(
+            _summarize_comparison_group(
+                cluster_frame[
+                    [
+                        ZONE_ID_COLUMN,
+                        "date",
+                        "temporal_bucket",
+                        *BASE_METRICS,
+                        "mobility_regime_cluster_display",
+                    ]
+                ],
+                metric=metric,
+                comparison_level="Mobility regime cluster",
+                comparison_group_column=(
+                    "mobility_regime_cluster_display"
                 ),
             )
         )
@@ -451,6 +509,111 @@ def _build_comparison_daily_totals(
     return comparison_totals
 
 
+def _build_cluster_comparison_daily_totals(
+    zone_daily: pd.DataFrame,
+) -> pd.DataFrame:
+    """Build Mobility regime cluster comparison totals once at write time."""
+    total_start = perf_counter()
+    summaries: list[pd.DataFrame] = []
+
+    cluster_source = zone_daily.copy()
+    cluster_source["pre_post_cp"] = np.where(
+        pd.to_datetime(cluster_source["date"])
+        >= CONGESTION_PRICING_START_DATE,
+        "post_cp",
+        "pre_cp",
+    )
+
+    pre_cluster = attach_mobility_regime_cluster_context(
+        cluster_source[
+            cluster_source["pre_post_cp"].eq("pre_cp")
+        ].copy(),
+        assignment_period="pre_cp",
+    )
+    post_cluster = attach_mobility_regime_cluster_context(
+        cluster_source[
+            cluster_source["pre_post_cp"].eq("post_cp")
+        ].copy(),
+        assignment_period="post_cp",
+    )
+
+    cluster_frame = pd.concat(
+        [pre_cluster, post_cluster],
+        ignore_index=True,
+    )
+    cluster_frame["comparison_group"] = (
+        cluster_frame["mobility_regime_cluster_label"]
+        .map(format_mobility_regime_cluster_label)
+    )
+
+    for metric_number, metric in enumerate(
+        BASE_METRICS,
+        start=1,
+    ):
+        metric_start = perf_counter()
+
+        print(
+            f"Building cluster comparison totals for "
+            f"{metric_number}/{len(BASE_METRICS)}: {metric}",
+            flush=True,
+        )
+
+        metric_frame = cluster_frame[
+            [
+                "comparison_group",
+                "date",
+                "temporal_bucket",
+                metric,
+            ]
+        ]
+
+        summaries.append(
+            _summarize_comparison_group(
+                metric_frame,
+                metric=metric,
+                comparison_level="Mobility regime cluster",
+                comparison_group_column="comparison_group",
+            )
+        )
+
+        print(
+            f"Completed cluster totals for {metric} in "
+            f"{perf_counter() - metric_start:,.1f} seconds.",
+            flush=True,
+        )
+
+    cluster_totals = (
+        pd.concat(
+            summaries,
+            ignore_index=True,
+        )
+        .sort_values(
+            COMPARISON_GRAIN
+        )
+        .reset_index(drop=True)
+    )
+
+    duplicate_count = int(
+        cluster_totals.duplicated(
+            COMPARISON_GRAIN
+        ).sum()
+    )
+
+    if duplicate_count:
+        raise ValueError(
+            "Cluster comparison totals contain "
+            f"{duplicate_count:,} duplicate grain rows."
+        )
+
+    print(
+        f"Cluster comparison totals completed in "
+        f"{perf_counter() - total_start:,.1f} seconds.",
+        flush=True,
+    )
+
+    return cluster_totals
+
+
 def _write_partitioned_dataset(
     frame: pd.DataFrame,
     *,
@@ -484,7 +647,7 @@ def build_zone_profile_app_tables(
     required_columns = sorted(
         set(
             get_required_columns(
-                CORE_METRICS
+                BASE_METRICS
             )
             + ZONE_METADATA_COLUMNS
             + [
@@ -557,12 +720,36 @@ def build_zone_profile_app_tables(
         comparison_totals,
         path=ZONE_PROFILE_COMPARISON_DIR,
         partition_columns=[
+            "comparison_level",
+            "comparison_group",
+            "temporal_bucket",
             "metric",
         ],
     )
 
     print(
-        "Finished writing comparison-total dataset.",
+        "Writing Mobility regime cluster comparison dataset...",
+        flush=True,
+    )
+
+    cluster_comparison_totals = _build_cluster_comparison_daily_totals(
+        zone_daily
+    )
+
+    ZONE_PROFILE_CLUSTER_COMPARISON_DIR.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    cluster_comparison_totals.to_parquet(
+        ZONE_PROFILE_CLUSTER_COMPARISON_DIR,
+        engine="pyarrow",
+        compression="zstd",
+        index=False,
+    )
+
+    print(
+        "Finished writing Mobility regime cluster comparison dataset.",
         flush=True,
     )
 
@@ -572,6 +759,9 @@ def build_zone_profile_app_tables(
         ),
         "comparison_path": (
             ZONE_PROFILE_COMPARISON_DIR
+        ),
+        "cluster_comparison_path": (
+            ZONE_PROFILE_CLUSTER_COMPARISON_DIR
         ),
         "zone_daily_rows": len(
             zone_daily
@@ -610,12 +800,82 @@ def build_zone_profile_app_tables(
     return results
 
 
+def build_zone_profile_cluster_comparison_table(
+    *,
+    verbose: bool = True,
+) -> dict[str, object]:
+    """Build only the Mobility regime cluster comparison parquet."""
+    required_columns = [
+        ZONE_ID_COLUMN,
+        "date",
+        "temporal_bucket",
+        *BASE_METRICS,
+    ]
+
+    if verbose:
+        print(
+            "Loading zone-daily app table for cluster backfill..."
+        )
+
+    zone_daily = pd.read_parquet(
+        ZONE_PROFILE_DAILY_DIR,
+        engine="pyarrow",
+        columns=required_columns,
+    )
+
+    if verbose:
+        print(
+            f"Loaded {len(zone_daily):,} zone-daily rows."
+        )
+
+    cluster_comparison_totals = (
+        _build_cluster_comparison_daily_totals(
+            zone_daily
+        )
+    )
+
+    ZONE_PROFILE_CLUSTER_COMPARISON_DIR.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    cluster_comparison_totals.to_parquet(
+        ZONE_PROFILE_CLUSTER_COMPARISON_DIR,
+        engine="pyarrow",
+        compression="zstd",
+        index=False,
+    )
+
+    results = {
+        "cluster_comparison_path": (
+            ZONE_PROFILE_CLUSTER_COMPARISON_DIR
+        ),
+        "cluster_comparison_rows": len(
+            cluster_comparison_totals
+        ),
+    }
+
+    if verbose:
+        print(
+            "Mobility regime cluster comparison table "
+            "written successfully."
+        )
+
+        for key, value in results.items():
+            print(
+                f"{key}: {value}"
+            )
+
+    return results
+
+
 def ensure_zone_profile_app_tables() -> None:
     missing = [
         path
         for path in [
             ZONE_PROFILE_DAILY_DIR,
             ZONE_PROFILE_COMPARISON_DIR,
+            ZONE_PROFILE_CLUSTER_COMPARISON_DIR,
         ]
         if not path.exists()
     ]
@@ -692,38 +952,74 @@ def load_comparison_daily_totals(
     """Read one compact comparison partition and group."""
     ensure_zone_profile_app_tables()
 
-    frame = pd.read_parquet(
-        ZONE_PROFILE_COMPARISON_DIR,
-        engine="pyarrow",
-        columns=[
-            "comparison_group",
-            "date",
-            "metric_sum",
-            "valid_zone_count",
-        ],
-        filters=[
-            (
-                "comparison_level",
-                "==",
-                comparison_level,
-            ),
-            (
-                "temporal_bucket",
-                "==",
-                temporal_bucket,
-            ),
-            (
-                "metric",
-                "==",
-                metric,
-            ),
-            (
+    if comparison_level == "Mobility regime cluster":
+        frame = pd.read_parquet(
+            ZONE_PROFILE_CLUSTER_COMPARISON_DIR,
+            engine="pyarrow",
+            columns=[
                 "comparison_group",
-                "==",
-                comparison_group,
-            ),
-        ],
-    )
+                "date",
+                "metric_sum",
+                "valid_zone_count",
+            ],
+            filters=[
+                (
+                    "temporal_bucket",
+                    "==",
+                    temporal_bucket,
+                ),
+                (
+                    "metric",
+                    "==",
+                    metric,
+                ),
+                (
+                    "comparison_group",
+                    "==",
+                    comparison_group,
+                ),
+            ],
+        )
+    else:
+        frame = pd.read_parquet(
+            ZONE_PROFILE_COMPARISON_DIR,
+            engine="pyarrow",
+            columns=[
+                "comparison_group",
+                "date",
+                "metric_sum",
+                "valid_zone_count",
+            ],
+            filters=[
+                (
+                    "comparison_level",
+                    "==",
+                    comparison_level,
+                ),
+                (
+                    "temporal_bucket",
+                    "==",
+                    temporal_bucket,
+                ),
+                (
+                    "metric",
+                    "==",
+                    metric,
+                ),
+                (
+                    "comparison_group",
+                    "==",
+                    comparison_group,
+                ),
+            ],
+        )
+
+    if comparison_level != "Mobility regime cluster":
+        frame = frame[
+            frame["comparison_group"].astype(str).eq(
+                comparison_group
+            )
+        ].copy()
 
     frame["date"] = pd.to_datetime(
         frame["date"]

@@ -21,7 +21,11 @@ from app.utils.project_branding import (
     apply_branding,
     inject_app_css,
 )
-
+from app.data_access.mobility_environments import (
+    attach_mobility_environment,
+    format_mobility_regime_cluster_label,
+    get_mobility_regime_cluster_options,
+)
 
 inject_app_css()
 
@@ -228,6 +232,18 @@ def _clean_ranking_base(
     return result.reset_index(drop=True)
 
 
+def _attach_mobility_environment_context(
+    ranking_base: pd.DataFrame,
+) -> pd.DataFrame:
+    if ranking_base.empty:
+        return ranking_base
+
+    return attach_mobility_environment(
+        ranking_base,
+        assignment_period="post_cp",
+    )
+
+
 def _add_display_columns(
     df: pd.DataFrame,
 ) -> pd.DataFrame:
@@ -257,10 +273,11 @@ def _hover_template() -> str:
         "<b>%{customdata[0]}</b><br>"
         "Borough: %{customdata[1]}<br>"
         "Geo-policy group: %{customdata[2]}<br>"
-        "Pre-CP daily average: %{customdata[3]}<br>"
-        "Post-CP daily average: %{customdata[4]}<br>"
-        "Daily-average change: %{customdata[5]}<br>"
-        "Percent change: %{customdata[6]}"
+        "Mobility regime cluster: %{customdata[3]}<br>"
+        "Pre-CP daily average: %{customdata[4]}<br>"
+        "Post-CP daily average: %{customdata[5]}<br>"
+        "Daily-average change: %{customdata[6]}<br>"
+        "Percent change: %{customdata[7]}"
         "<extra></extra>"
     )
 
@@ -273,10 +290,17 @@ def _metric_customdata(
     if "cbd_spatial_category" not in result.columns:
         result["cbd_spatial_category"] = "Unavailable"
 
+    if "mobility_regime_cluster_label" not in result.columns:
+        result["mobility_regime_cluster_label"] = pd.NA
+
     result["display_geo_policy"] = (
         result["cbd_spatial_category"]
         .fillna("Unavailable")
         .map(_format_geo_policy)
+    )
+    result["display_mobility_regime_cluster"] = (
+        result["mobility_regime_cluster_label"]
+        .map(format_mobility_regime_cluster_label)
     )
 
     return result[
@@ -284,6 +308,7 @@ def _metric_customdata(
             "zone",
             "borough",
             "display_geo_policy",
+            "display_mobility_regime_cluster",
             "display_pre_average",
             "display_post_average",
             "display_absolute_change",
@@ -565,7 +590,8 @@ def _get_explorer_base(
             f"Unsupported time context: {time_context}"
         )
 
-    return _clean_ranking_base(result)
+    result = _clean_ranking_base(result)
+    return _attach_mobility_environment_context(result)
 
 
 # ---------------------------------------------------------------------
@@ -595,6 +621,9 @@ def _get_geography_values(
             key=_format_geo_policy,
         )
 
+    if geography_scope == "Mobility regime cluster":
+        return get_mobility_regime_cluster_options()
+
     return []
 
 
@@ -623,10 +652,18 @@ def _filter_geography(
             )
         ].copy()
 
+    if geography_scope == "Mobility regime cluster":
+        return ranking_base[
+            ranking_base[
+                "mobility_regime_cluster_label"
+            ].astype(str).eq(
+                str(geography_value)
+            )
+        ].copy()
+
     raise ValueError(
         f"Unsupported geography scope: {geography_scope}"
     )
-
 
 def _build_context_label(
     *,
@@ -639,6 +676,10 @@ def _build_context_label(
         geography_label = "Citywide"
     elif geography_scope == "Borough":
         geography_label = str(geography_value)
+    elif geography_scope == "Mobility regime cluster":
+        geography_label = format_mobility_regime_cluster_label(
+            geography_value
+        )
     else:
         geography_label = _format_geo_policy(
             geography_value
@@ -1411,6 +1452,9 @@ def build_detail_table(
         ignore_index=True,
     )
 
+    if "mobility_regime_cluster_label" not in combined.columns:
+        combined["mobility_regime_cluster_label"] = pd.NA
+
     display = combined[
         [
             "Direction",
@@ -1418,6 +1462,8 @@ def build_detail_table(
             "zone",
             "borough",
             "cbd_spatial_category",
+            "mobility_environment",
+            "mobility_regime_cluster_label",
             "pre_daily_average",
             "post_daily_average",
             "absolute_change",
@@ -1430,12 +1476,17 @@ def build_detail_table(
         .fillna("Unavailable")
         .map(_format_geo_policy)
     )
+    display["mobility_regime_cluster"] = (
+        display["mobility_regime_cluster_label"]
+        .map(format_mobility_regime_cluster_label)
+    )
 
     display = display.rename(
         columns={
             "zone": "Taxi Zone",
             "borough": "Borough",
             "cbd_spatial_category": "Geo-policy group",
+            "mobility_regime_cluster": "Mobility regime cluster",
             "pre_daily_average": "Pre-CP daily avg",
             "post_daily_average": "Post-CP daily avg",
             "absolute_change": "Daily-average change",
@@ -1988,7 +2039,7 @@ for row_start in range(0, len(available_metrics), 2):
 
             st.plotly_chart(
                 metric_fig,
-                use_container_width=True,
+                width="stretch",
                 config={
                     "displayModeBar": False,
                     "responsive": True,
@@ -2023,7 +2074,7 @@ manhattan_distribution_fig = build_manhattan_distribution_grid(
 
 st.plotly_chart(
     manhattan_distribution_fig,
-    use_container_width=True,
+    width="stretch",
     config={"displayModeBar": False, "responsive": True},
     key="raw04_manhattan_distribution_grid",
 )
@@ -2093,6 +2144,7 @@ with control2:
             "Citywide",
             "Borough",
             "Geo-policy group",
+            "Mobility regime cluster",
         ],
         index=0,
         key="raw04_geography_scope",
@@ -2117,9 +2169,7 @@ if time_context == "Specific time bucket":
     temporal_bucket = st.selectbox(
         "Time bucket",
         options=TEMPORAL_BUCKET_OPTIONS,
-        format_func=lambda bucket: TEMPORAL_BUCKET_LABELS[
-            bucket
-        ],
+        format_func=lambda bucket: TEMPORAL_BUCKET_LABELS[bucket],
         index=1,
         key="raw04_temporal_bucket",
     )
@@ -2132,6 +2182,7 @@ with st.spinner("Updating zone rankings..."):
     )
 
 geography_value: str | None = None
+citywide_explorer_base = explorer_base.copy()
 
 if geography_scope != "Citywide":
     geography_values = _get_geography_values(
@@ -2145,12 +2196,16 @@ if geography_scope != "Citywide":
                 "Borough"
                 if geography_scope == "Borough"
                 else "Geo-policy group"
+                if geography_scope == "Geo-policy group"
+                else "Mobility regime cluster"
             ),
             options=geography_values,
             format_func=(
                 (lambda value: value)
                 if geography_scope == "Borough"
                 else _format_geo_policy
+                if geography_scope == "Geo-policy group"
+                else format_mobility_regime_cluster_label
             ),
             key="raw04_geography_value",
         )
@@ -2160,13 +2215,12 @@ if geography_scope != "Citywide":
             "for the selected measure and time context."
         )
 
-citywide_explorer_base = explorer_base.copy()
-
 explorer_base = _filter_geography(
     explorer_base,
     geography_scope=geography_scope,
     geography_value=geography_value,
 )
+
 
 context_label = _build_context_label(
     geography_scope=geography_scope,
@@ -2220,7 +2274,7 @@ with largest_tab:
         )
         st.plotly_chart(
             explorer_fig,
-            use_container_width=True,
+            width="stretch",
             config={"displayModeBar": False, "responsive": True},
             key=(
                 f"explorer_rankings_{selected_metric}_"
@@ -2244,7 +2298,7 @@ with largest_tab:
             )
             st.dataframe(
                 detail_table,
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
                 column_config={
                     "Rank": st.column_config.NumberColumn(format="%d"),
@@ -2336,7 +2390,7 @@ with distribution_tab:
         )
         st.plotly_chart(
             distribution_fig,
-            use_container_width=True,
+            width="stretch",
             config={"displayModeBar": False, "responsive": True},
             key=(
                 f"explorer_distribution_{selected_metric}_"
@@ -2360,6 +2414,7 @@ with distribution_tab:
                     "zone",
                     "borough",
                     "cbd_spatial_category",
+                    "mobility_environment",
                     "pre_daily_average",
                     "post_daily_average",
                     "absolute_change",
@@ -2372,14 +2427,15 @@ with distribution_tab:
                 ascending=False,
             ).rename(
                 columns={
-                    "zone": "Taxi Zone",
-                    "borough": "Borough",
-                    "cbd_spatial_category": "Geo-policy group",
-                    "pre_daily_average": "Pre-CP daily avg",
-                    "post_daily_average": "Post-CP daily avg",
-                    "absolute_change": "Daily-average change",
-                    "percent_change": "Percent change",
-                }
+            "zone": "Taxi Zone",
+            "borough": "Borough",
+            "cbd_spatial_category": "Geo-policy group",
+            "mobility_regime_cluster": "Mobility regime cluster",
+            "pre_daily_average": "Pre-CP daily avg",
+            "post_daily_average": "Post-CP daily avg",
+            "absolute_change": "Daily-average change",
+            "percent_change": "Percent change",
+        }
             )
             table["Geo-policy group"] = (
                 table["Geo-policy group"]
@@ -2389,7 +2445,7 @@ with distribution_tab:
 
             st.dataframe(
                 table,
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
                 column_config={
                     "Pre-CP daily avg": st.column_config.NumberColumn(

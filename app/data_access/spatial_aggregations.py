@@ -26,12 +26,14 @@ import streamlit as st
 
 from app.data_access.aggregations import (
     COUNT_METRICS,
-    SPEED_METRICS,
+    WEIGHTED_MEAN_METRICS,
     WEIGHT_COLUMNS,
     get_metric_spec,
     get_required_columns,
 )
+
 from app.data_access.loaders import (
+    BASE_METRICS,
     CONGESTION_PRICING_START_DATE,
     CORE_METRICS,
     METRIC_LABELS,
@@ -151,9 +153,10 @@ def _aggregate_zone_daily(
         metric for metric in metrics
         if metric in COUNT_METRICS
     ]
-    speed_metrics = [
-        metric for metric in metrics
-        if metric in SPEED_METRICS
+    weighted_mean_metrics = [
+        metric
+        for metric in metrics
+        if metric in WEIGHTED_MEAN_METRICS
     ]
     support_columns = _support_columns(metrics)
 
@@ -172,7 +175,7 @@ def _aggregate_zone_daily(
         )
         pieces.append(summed)
 
-    for metric in speed_metrics:
+    for metric in weighted_mean_metrics:
         support_column = WEIGHT_COLUMNS.get(metric)
 
         if support_column and support_column in df.columns:
@@ -392,7 +395,9 @@ def build_spatial_zone_pre_post_summary(
     metrics: list[str] | None = None,
 ) -> pd.DataFrame:
     """Build all-zone summaries for all buckets plus the all-bucket rollup."""
-    metrics = metrics or CORE_METRICS
+    # The precomputed table contains all ten clean base metrics.
+    # Pages 01–06 still request only CORE_METRICS at runtime.
+    metrics = metrics or BASE_METRICS
     columns = get_required_columns(metrics)
 
     df = load_analysis_panel(columns=columns)

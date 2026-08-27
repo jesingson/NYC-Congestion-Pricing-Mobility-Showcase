@@ -7,7 +7,7 @@ Validate that a single Taxi Zone can drive a coordinated mobility profile:
 - selected-zone daily series;
 - citywide, Borough, or geo-policy peer baselines;
 - indexed and actual-value trend compatibility;
-- six-metric pre/post profile;
+- ten-metric pre/post profile;
 - temporal-bucket profile;
 - ranking context;
 - strongest local pairwise divergence.
@@ -15,7 +15,8 @@ Validate that a single Taxi Zone can drive a coordinated mobility profile:
 Important aggregation policy
 ----------------------------
 - Count metrics are summed within each Taxi Zone × date.
-- Speed metrics use weighted averages where the matching support metric exists.
+- Speed and duration metrics use weighted averages where the matching
+  activity-support metric exists.
 - Peer baselines are averages across peer Taxi Zones after each peer zone has
   first been reduced to one value per date.
 - The selected Taxi Zone is excluded from every comparison baseline.
@@ -29,17 +30,18 @@ from itertools import combinations
 import numpy as np
 import pandas as pd
 import streamlit as st
+from pathlib import Path
 
 from app.data_access.aggregations import (
     COUNT_METRICS,
-    SPEED_METRICS,
+    WEIGHTED_MEAN_METRICS,
     WEIGHT_COLUMNS,
     aggregate_metrics,
     get_required_columns,
 )
 from app.data_access.loaders import (
+    BASE_METRICS,
     CONGESTION_PRICING_START_DATE,
-    CORE_METRICS,
     METRIC_LABELS,
     TEMPORAL_BUCKET_ORDER,
     load_analysis_panel,
@@ -47,6 +49,10 @@ from app.data_access.loaders import (
 from app.data_access.spatial_aggregations import (
     ALL_TEMPORAL_BUCKETS_LABEL,
     get_zone_pre_post_metric_summary,
+)
+from app.data_access.mobility_environments import (
+    attach_mobility_regime_cluster_context,
+    format_mobility_regime_cluster_label,
 )
 from app.data_access.spatial_visuals import (
     add_reliability_flags,
@@ -63,6 +69,7 @@ COMPARISON_LEVELS = [
     "Citywide",
     "Borough",
     "Geo-policy group",
+    "Mobility regime cluster",
 ]
 
 RECOMMENDED_ZONE_NAMES = [
@@ -71,6 +78,8 @@ RECOMMENDED_ZONE_NAMES = [
     "Midtown Center",
     "JFK Airport",
     "Central Park",
+    "Jamaica Bay",
+    "Breezy Point/Fort Tilden/Riis Beach",
 ]
 
 ZONE_METADATA_COLUMNS = [
@@ -173,6 +182,17 @@ def get_comparison_label(
     if comparison_level == "Geo-policy group":
         return (
             f"{format_geo_policy_label(metadata['cbd_spatial_category'])} "
+            "Taxi Zone average"
+        )
+
+    if comparison_level == "Mobility regime cluster":
+        cluster_context = attach_mobility_regime_cluster_context(
+            pd.DataFrame({"taxi_zone_id": [taxi_zone_id]}),
+            assignment_period="post_cp",
+        )
+        cluster_row = cluster_context.iloc[0]
+        return (
+            f"{format_mobility_regime_cluster_label(cluster_row['mobility_regime_cluster_label'])} "
             "Taxi Zone average"
         )
 
@@ -297,7 +317,6 @@ def get_zone_metadata(
 
     return match.iloc[0]
 
-
 def _filter_temporal_bucket(
     panel: pd.DataFrame,
     temporal_bucket: str,
@@ -386,7 +405,7 @@ def get_zone_and_baseline_daily_series(
     This preserves the original comparison methodology while avoiding the
     expensive all-zone daily groupby during every Streamlit interaction.
     """
-    if metric not in CORE_METRICS:
+    if metric not in BASE_METRICS:
         raise ValueError(
             f"Unsupported metric: {metric}"
         )
@@ -441,6 +460,15 @@ def get_zone_and_baseline_daily_series(
                 selected_metadata[
                     "borough"
                 ]
+            )
+
+        elif comparison_level == "Mobility regime cluster":
+            cluster_context = attach_mobility_regime_cluster_context(
+                pd.DataFrame({"taxi_zone_id": [resolved_zone_id]}),
+                assignment_period="post_cp",
+            )
+            comparison_group = format_mobility_regime_cluster_label(
+                cluster_context.iloc[0]["mobility_regime_cluster_label"]
             )
 
         else:
@@ -627,34 +655,48 @@ def summarize_daily_comparison(
     daily: pd.DataFrame,
 ) -> dict[str, object]:
     """Summarize aligned selected-zone and peer-baseline daily series."""
+    zone_daily = daily[
+        daily["zone_value"].notna()
+    ].copy()
+
     paired = daily[
         daily["paired_observation"]
     ].copy()
 
-    pre = paired[
+    paired_pre = paired[
         paired["date"]
         < CONGESTION_PRICING_START_DATE
     ]
 
-    post = paired[
+    paired_post = paired[
         paired["date"]
         >= CONGESTION_PRICING_START_DATE
     ]
 
-    zone_pre = pre[
-        "zone_value"
-    ].mean()
+    zone_pre = zone_daily[
+        zone_daily["date"]
+        < CONGESTION_PRICING_START_DATE
+    ]
 
-    zone_post = post[
-        "zone_value"
-    ].mean()
+    zone_post = zone_daily[
+        zone_daily["date"]
+        >= CONGESTION_PRICING_START_DATE
+    ]
 
-    baseline_pre = pre[
+    baseline_pre = paired_pre[
         "baseline_value"
     ].mean()
 
-    baseline_post = post[
+    baseline_post = paired_post[
         "baseline_value"
+    ].mean()
+
+    zone_pre = zone_pre[
+        "zone_value"
+    ].mean()
+
+    zone_post = zone_post[
+        "zone_value"
     ].mean()
 
     zone_change = _safe_percent_change(
@@ -684,20 +726,10 @@ def summarize_daily_comparison(
             else np.nan
         ),
         "zone_first_date": (
-            daily.loc[
-                daily[
-                    "zone_value"
-                ].notna(),
-                "date",
-            ].min()
+            zone_daily["date"].min()
         ),
         "zone_last_date": (
-            daily.loc[
-                daily[
-                    "zone_value"
-                ].notna(),
-                "date",
-            ].max()
+            zone_daily["date"].max()
         ),
         "baseline_first_date": (
             daily.loc[
@@ -719,12 +751,7 @@ def summarize_daily_comparison(
             paired["date"].nunique()
         ),
         "zone_observations": int(
-            daily.loc[
-                daily[
-                    "zone_value"
-                ].notna(),
-                "date",
-            ].nunique()
+            zone_daily["date"].nunique()
         ),
         "baseline_observations": int(
             daily.loc[
@@ -804,6 +831,24 @@ def _peer_summary_from_zone_summary(
             )
         ].copy()
 
+    elif comparison_level == "Mobility regime cluster":
+        selected_cluster = source[
+            source["taxi_zone_id"]
+            .astype(str)
+            .eq(str(selected_zone_id))
+        ]
+
+        if not selected_cluster.empty:
+            cluster_label = selected_cluster.iloc[0][
+                "mobility_regime_cluster_label"
+            ]
+            if pd.notna(cluster_label):
+                peers = peers[
+                    peers["mobility_regime_cluster_label"]
+                    .astype("Int64")
+                    .eq(cluster_label)
+                ].copy()
+
     usable_peers = peers[
         peers[
             [
@@ -840,14 +885,19 @@ def get_zone_pre_post_profile(
     comparison_level: str,
     temporal_bucket: str = ALL_TEMPORAL_BUCKETS_LABEL,
 ) -> pd.DataFrame:
-    """Return six-metric selected-zone and peer-baseline pre/post profile."""
+    """Return ten-metric selected-zone and peer-baseline pre/post profile."""
     selected_metadata = get_zone_metadata(
         taxi_zone_id
     )
 
     source = get_zone_pre_post_metric_summary(
-        metrics=CORE_METRICS,
+        metrics=BASE_METRICS,
         temporal_bucket=temporal_bucket,
+    )
+
+    source = attach_mobility_regime_cluster_context(
+        source,
+        assignment_period="post_cp",
     )
 
     source = add_reliability_flags(
@@ -864,7 +914,7 @@ def get_zone_pre_post_profile(
 
     rows: list[dict[str, object]] = []
 
-    for metric in CORE_METRICS:
+    for metric in BASE_METRICS:
         selected_metric = selected[
             selected["metric"].eq(
                 metric
@@ -1006,6 +1056,11 @@ def get_zone_temporal_profile(
     if source.empty:
         return pd.DataFrame()
 
+    source = attach_mobility_regime_cluster_context(
+        source,
+        assignment_period="post_cp",
+    )
+
     rows: list[dict[str, object]] = []
 
     for bucket in TEMPORAL_BUCKET_ORDER:
@@ -1079,7 +1134,7 @@ def get_zone_rank_context(
 ) -> pd.DataFrame:
     """Return citywide and Borough rank/percentile for all eligible metrics."""
     source = get_zone_pre_post_metric_summary(
-        metrics=CORE_METRICS,
+        metrics=BASE_METRICS,
         temporal_bucket=temporal_bucket,
     )
 
@@ -1093,7 +1148,7 @@ def get_zone_rank_context(
 
     rows: list[dict[str, object]] = []
 
-    for metric in CORE_METRICS:
+    for metric in BASE_METRICS:
         eligible = source[
             source["metric"].eq(
                 metric

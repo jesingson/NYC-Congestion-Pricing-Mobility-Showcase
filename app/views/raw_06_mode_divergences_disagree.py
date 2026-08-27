@@ -6,6 +6,11 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from app.data_access.loaders import CORE_METRICS
+from app.data_access.mobility_environments import (
+    attach_mobility_regime_cluster_context,
+    format_mobility_regime_cluster_label,
+    get_mobility_regime_cluster_options,
+)
 from app.data_access.spatial_aggregations import (
     ALL_TEMPORAL_BUCKETS_LABEL,
     get_zone_pre_post_metric_summary,
@@ -68,6 +73,7 @@ GEOGRAPHY_FILTER_OPTIONS = [
     "All Taxi Zones",
     "Borough",
     "Geo-policy group",
+    "Mobility regime cluster",
 ]
 
 DIRECTION_OPTIONS = [
@@ -99,6 +105,8 @@ GEO_POLICY_ORDER = [
     "Non-CBD",
     "Unknown",
 ]
+
+MOBILITY_REGIME_CLUSTER_ORDER = get_mobility_regime_cluster_options()
 
 METRIC_A_COLOR = BRAND_COLORS["dark_teal"]
 METRIC_B_COLOR = BRAND_COLORS["terracotta"]
@@ -378,7 +386,7 @@ def _format_percent(
     if pd.isna(value):
         return "Unavailable"
 
-    return f"{float(value):+,.1f}%"
+    return f"{float(value):+,.2f}%"
 
 
 def _apply_chart_branding(
@@ -466,13 +474,18 @@ def _load_metric_pair_source(
     metric_b: str,
     temporal_bucket: str,
 ) -> pd.DataFrame:
-    return get_zone_pre_post_metric_summary(
+    source = get_zone_pre_post_metric_summary(
         metrics=[
             metric_a,
             metric_b,
         ],
         temporal_bucket=temporal_bucket,
     ).copy()
+
+    return attach_mobility_regime_cluster_context(
+        source,
+        assignment_period="post_cp",
+    )
 
 
 def _prepare_metric_pair_divergence(
@@ -486,6 +499,8 @@ def _prepare_metric_pair_divergence(
         "zone",
         "borough",
         "cbd_spatial_category",
+        "mobility_regime_cluster_label",
+        "mobility_regime_cluster_name",
         "metric",
         "pre_daily_average",
         "post_daily_average",
@@ -556,6 +571,8 @@ def _prepare_metric_pair_divergence(
                 "zone",
                 "borough",
                 "cbd_spatial_category",
+                "mobility_regime_cluster_label",
+                "mobility_regime_cluster_name",
             ]
         ]
         .drop_duplicates(
@@ -634,6 +651,11 @@ def _prepare_metric_pair_divergence(
         wide["cbd_spatial_category"]
         .map(_normalize_geo_policy)
     )
+
+    wide["mobility_regime_cluster_label"] = pd.to_numeric(
+        wide["mobility_regime_cluster_label"],
+        errors="coerce",
+    ).astype("Int64")
 
     complete_and_eligible = (
         wide["a_has_both_periods"]
@@ -754,6 +776,16 @@ def _filter_divergence_data(
             )
         ].copy()
 
+    elif (
+        geography_filter == "Mobility regime cluster"
+        and geography_value is not None
+    ):
+        filtered = filtered[
+            filtered[
+                "mobility_regime_cluster_label"
+            ].astype("Int64").eq(int(geography_value))
+        ].copy()
+
     if (
         direction_filter
         == "Metric A up · Metric B down"
@@ -863,6 +895,8 @@ def _prepare_metric_pair_evidence(
         "zone",
         "borough",
         "cbd_spatial_category",
+        "mobility_regime_cluster_label",
+        "mobility_regime_cluster_name",
         "metric",
         "pre_daily_average",
         "post_daily_average",
@@ -907,6 +941,8 @@ def _prepare_metric_pair_evidence(
                 "zone",
                 "borough",
                 "cbd_spatial_category",
+                "mobility_regime_cluster_label",
+                "mobility_regime_cluster_name",
             ]
         ]
         .drop_duplicates(
@@ -1165,6 +1201,12 @@ def _build_recurrence_evidence(
                 "zone": first["zone"],
                 "borough": first["borough"],
                 "geo_policy_group": first["geo_policy_group"],
+                "mobility_regime_cluster_label": first[
+                    "mobility_regime_cluster_label"
+                ],
+                "mobility_regime_cluster_name": first[
+                    "mobility_regime_cluster_name"
+                ],
                 "eligible_bucket_count": eligible_bucket_count,
                 "inverse_bucket_count": inverse_bucket_count,
                 "inverse_bucket_share": (
@@ -1259,6 +1301,16 @@ def _filter_recurrence_summary(
             )
         ].copy()
 
+    elif (
+        geography_filter == "Mobility regime cluster"
+        and geography_value is not None
+    ):
+        filtered = filtered[
+            filtered[
+                "mobility_regime_cluster_label"
+            ].astype("Int64").eq(int(geography_value))
+        ].copy()
+
     filtered = filtered[
         filtered["inverse_bucket_count"].ge(
             minimum_recurring_buckets
@@ -1325,6 +1377,9 @@ def build_recurrence_dot_plot(
             plot_data["zone"],
             plot_data["borough"],
             plot_data["geo_policy_group"],
+            plot_data["mobility_regime_cluster_label"].map(
+                format_mobility_regime_cluster_label
+            ),
             plot_data["inverse_bucket_count"],
             plot_data["eligible_bucket_count"],
             plot_data["median_inverse_divergence"].map(
@@ -1381,11 +1436,12 @@ def build_recurrence_dot_plot(
                 "<b>%{customdata[0]}</b><br>"
                 "Borough: %{customdata[1]}<br>"
                 "Geo-policy group: %{customdata[2]}<br>"
-                "Inverse buckets: %{customdata[3]} of %{customdata[4]}<br>"
-                "Median inverse divergence: %{customdata[5]}<br>"
-                "Maximum inverse divergence: %{customdata[6]}<br>"
-                "Scope: %{customdata[7]}<br>"
-                "Dominant pattern: %{customdata[8]}"
+                "Mobility regime cluster: %{customdata[3]}<br>"
+                "Inverse buckets: %{customdata[4]} of %{customdata[5]}<br>"
+                "Median inverse divergence: %{customdata[6]}<br>"
+                "Maximum inverse divergence: %{customdata[7]}<br>"
+                "Scope: %{customdata[8]}<br>"
+                "Dominant pattern: %{customdata[9]}"
                 "<extra></extra>"
             ),
             cliponaxis=False,
@@ -1664,6 +1720,7 @@ def _build_recurrence_detail_table(
             "zone",
             "borough",
             "geo_policy_group",
+            "mobility_regime_cluster_label",
             "inverse_bucket_count",
             "eligible_bucket_count",
             "inverse_bucket_share",
@@ -1685,6 +1742,7 @@ def _build_recurrence_detail_table(
             "zone": "Taxi Zone",
             "borough": "Borough",
             "geo_policy_group": "Geo-policy group",
+            "mobility_regime_cluster_label": "Mobility regime cluster",
             "inverse_bucket_count": "Inverse buckets",
             "eligible_bucket_count": "Eligible buckets",
             "inverse_bucket_share": "Inverse bucket share",
@@ -2463,7 +2521,7 @@ with geography_col1:
         on_change=_mark_saved_view_custom,
     )
 
-geography_value: str | None = None
+geography_value: object | None = None
 
 if geography_filter == "Borough":
     borough_options = _ordered_values(
@@ -2528,6 +2586,35 @@ elif geography_filter == "Geo-policy group":
             st.caption(
                 "No geo-policy values available"
             )
+
+elif geography_filter == "Mobility regime cluster":
+    cluster_options = MOBILITY_REGIME_CLUSTER_ORDER
+
+    if cluster_options:
+        if (
+            st.session_state.get(
+                "raw06_cluster_value"
+            )
+            not in cluster_options
+        ):
+            st.session_state[
+                "raw06_cluster_value"
+            ] = cluster_options[0]
+
+        with geography_col2:
+            geography_value = st.selectbox(
+                "Mobility regime cluster",
+                options=cluster_options,
+                index=0,
+                format_func=format_mobility_regime_cluster_label,
+                key="raw06_cluster_value",
+                on_change=_mark_saved_view_custom,
+            )
+    else:
+        with geography_col2:
+            st.caption(
+                "No mobility regime clusters available"
+            )
 else:
     with geography_col2:
         st.caption(
@@ -2570,7 +2657,11 @@ with threshold_col:
 geography_context = (
     "All Taxi Zones"
     if geography_filter == "All Taxi Zones"
-    else f"{geography_filter}: {geography_value}"
+    else (
+        f"{geography_filter}: {format_mobility_regime_cluster_label(geography_value)}"
+        if geography_filter == "Mobility regime cluster"
+        else f"{geography_filter}: {geography_value}"
+    )
 )
 
 largest_tab, recurrence_tab = st.tabs(

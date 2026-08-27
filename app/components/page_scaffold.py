@@ -54,7 +54,7 @@ def render_future_page(*, title: str, description: str) -> None:
     """Render a lightweight placeholder for future app layers."""
     inject_app_css()
 
-    st.caption("Future Layer")
+    st.caption("Planned Work")
     st.title(title)
     st.markdown(description)
     st.info(

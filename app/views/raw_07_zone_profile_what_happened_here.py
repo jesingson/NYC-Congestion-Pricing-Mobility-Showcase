@@ -8,8 +8,8 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from app.data_access.loaders import (
+    BASE_METRICS,
     CONGESTION_PRICING_START_DATE,
-    CORE_METRICS,
     METRIC_LABELS,
     TEMPORAL_BUCKET_ORDER,
 )
@@ -29,6 +29,10 @@ from app.data_access.zone_profiles import (
     get_zone_temporal_profile,
     summarize_daily_comparison,
 )
+from app.data_access.anomalies import (
+    get_zone_metric_driver_anomaly_events,
+)
+
 from app.utils.project_branding import (
     BRAND_COLORS,
     apply_branding,
@@ -108,6 +112,22 @@ SAVED_PROFILES = {
         "comparison": "Borough",
         "temporal_bucket": ALL_TEMPORAL_BUCKETS_LABEL,
         "trend_view": "Relative change",
+        "smoothing": "14-day rolling average",
+    },
+    "Jamaica Bay · Bus speed · Queens": {
+        "zone": "Jamaica Bay",
+        "metric": "avg_bus_speed",
+        "comparison": "Borough",
+        "temporal_bucket": ALL_TEMPORAL_BUCKETS_LABEL,
+        "trend_view": "Actual values",
+        "smoothing": "14-day rolling average",
+    },
+    "Breezy Point · Bus speed · Queens": {
+        "zone": "Breezy Point/Fort Tilden/Riis Beach",
+        "metric": "avg_bus_speed",
+        "comparison": "Borough",
+        "temporal_bucket": ALL_TEMPORAL_BUCKETS_LABEL,
+        "trend_view": "Actual values",
         "smoothing": "14-day rolling average",
     },
 }
@@ -255,6 +275,7 @@ def _build_trend_chart(
     metric_label: str,
     scale_mode: str,
     show_comparison: bool,
+    anomaly_events: pd.DataFrame | None = None,
 ) -> go.Figure:
     fig = go.Figure()
 
@@ -342,6 +363,51 @@ def _build_trend_chart(
         height=560,
     )
 
+    if (
+            anomaly_events is not None
+            and not anomaly_events.empty
+    ):
+        anomaly_points = anomaly_events.merge(
+            daily[
+                [
+                    "date",
+                    zone_column,
+                ]
+            ],
+            on="date",
+            how="inner",
+            validate="one_to_one",
+        )
+
+        if not anomaly_points.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=anomaly_points["date"],
+                    y=anomaly_points[zone_column],
+                    mode="markers",
+                    name="Anomaly",
+                    marker={
+                        "size": 12,
+                        "symbol": "circle",
+                        "color": BRAND_COLORS["terracotta"],
+                        "line": {
+                            "color": "white",
+                            "width": 1,
+                        },
+                    },
+                    customdata=anomaly_points[
+                        [
+                            "anomaly_event_count",
+                        ]
+                    ],
+                    hovertemplate=(
+                        "<b>Anomaly date</b><br>"
+                        "Date: %{x|%b %d, %Y}<br>"
+                        "Anomalous daypart events: %{customdata[0]:,}"
+                        "<extra></extra>"
+                    ),
+                )
+            )
     return _apply_chart_branding(fig)
 
 
@@ -350,7 +416,7 @@ def _build_multimetric_profile_chart(
     *,
     show_comparison: bool,
 ) -> go.Figure:
-    """Compare all core measures for the selected zone and optional geography."""
+    """Compare all ten base measures for the selected zone and geography."""
     plot_data = profile.copy()
 
     plot_data["eligible"] = (
@@ -1104,12 +1170,12 @@ def _format_timing_report(
     ordered_labels = [
         "Daily series",
         "Daily summary + smoothing",
-        "Six-metric profile",
+        "Ten-metric profile",
         "Temporal profile",
         "Rank context",
         "Pairwise divergences",
         "Trend chart",
-        "Six-metric chart",
+        "Ten-metric chart",
         "Temporal chart",
         "Rank chart",
         "Divergence chart",
@@ -1187,44 +1253,18 @@ default_zone_id = (
     else zone_options[0]
 )
 
-st.markdown(
-    "### Saved profiles"
-)
-
-saved1, saved2 = st.columns(
-    [3, 1]
-)
-
-with saved1:
-    saved_profile_name = st.selectbox(
-        "Start with a saved profile",
-        options=list(
-            SAVED_PROFILES
-        ),
-        index=0,
-        key="raw07_saved_profile",
-        help=(
-            "Saved profiles load a complete, preselected zone view. "
-            "Choose Custom to keep using the controls below."
-        ),
-    )
-
-with saved2:
-    st.write("")
-    st.write("")
-    load_saved_profile = st.button(
-        "Load profile",
-        use_container_width=True,
-        disabled=(
-            saved_profile_name
-            == "Custom"
-        ),
-    )
-
-if load_saved_profile:
-    profile = SAVED_PROFILES[
-        saved_profile_name
+def _apply_saved_profile() -> None:
+    """Apply the selected saved profile immediately."""
+    saved_profile_name = st.session_state[
+        "raw07_saved_profile"
     ]
+
+    profile = SAVED_PROFILES.get(
+        saved_profile_name
+    )
+
+    if profile is None:
+        return
 
     zone_match = catalog[
         catalog["zone"].eq(
@@ -1233,39 +1273,74 @@ if load_saved_profile:
     ]
 
     if zone_match.empty:
-        st.error(
-            f"The saved zone {profile['zone']} is not available."
-        )
-    else:
         st.session_state[
-            "raw07_zone"
-        ] = zone_match.iloc[0][
+            "raw07_saved_profile_error"
+        ] = (
+            f"The saved zone {profile['zone']} "
+            "is not available."
+        )
+        return
+
+    st.session_state.pop(
+        "raw07_saved_profile_error",
+        None,
+    )
+
+    st.session_state["raw07_zone"] = (
+        zone_match.iloc[0][
             "taxi_zone_id"
         ]
-        st.session_state[
-            "raw07_metric"
-        ] = profile["metric"]
-        st.session_state[
-            "raw07_comparison"
-        ] = profile["comparison"]
-        st.session_state[
-            "raw07_bucket"
-        ] = profile[
-            "temporal_bucket"
-        ]
-        st.session_state[
-            "raw07_scale"
-        ] = profile[
-            "trend_view"
-        ]
-        st.session_state[
-            "raw07_smoothing"
-        ] = profile["smoothing"]
-        st.rerun()
+    )
+    st.session_state["raw07_metric"] = (
+        profile["metric"]
+    )
+    st.session_state["raw07_comparison"] = (
+        profile["comparison"]
+    )
+    st.session_state["raw07_bucket"] = (
+        profile["temporal_bucket"]
+    )
+    st.session_state["raw07_scale"] = (
+        profile["trend_view"]
+    )
+    st.session_state["raw07_smoothing"] = (
+        profile["smoothing"]
+    )
+
+
+def _mark_profile_custom() -> None:
+    """Mark the view custom when an individual control changes."""
+    st.session_state[
+        "raw07_saved_profile"
+    ] = "Custom"
+
 
 st.markdown(
-    "### Zone and comparison"
+    "### Saved profiles"
 )
+
+st.selectbox(
+    "Start with a saved profile",
+    options=list(
+        SAVED_PROFILES
+    ),
+    index=0,
+    key="raw07_saved_profile",
+    on_change=_apply_saved_profile,
+    help=(
+        "Selecting a saved profile immediately updates all controls below. "
+        "Changing an individual control returns the view to Custom."
+    ),
+)
+
+saved_profile_error = st.session_state.get(
+    "raw07_saved_profile_error"
+)
+
+if saved_profile_error:
+    st.error(
+        saved_profile_error
+    )
 
 control1, control2 = st.columns(2)
 
@@ -1285,18 +1360,19 @@ with control1:
             ].iloc[0]
         ),
         key="raw07_zone",
+        on_change=_mark_profile_custom,
     )
 
 with control2:
     selected_metric = st.selectbox(
         "Primary metric",
-        options=CORE_METRICS,
+        options=BASE_METRICS,
         index=(
-            CORE_METRICS.index(
+            BASE_METRICS.index(
                 DEFAULT_METRIC
             )
             if DEFAULT_METRIC
-            in CORE_METRICS
+               in BASE_METRICS
             else 0
         ),
         format_func=lambda metric: (
@@ -1306,6 +1382,7 @@ with control2:
             )
         ),
         key="raw07_metric",
+        on_change=_mark_profile_custom,
     )
 
 control3, control4 = st.columns(2)
@@ -1316,6 +1393,7 @@ with control3:
         options=COMPARISON_LEVELS,
         index=1,
         key="raw07_comparison",
+        on_change=_mark_profile_custom,
         help=(
             "Comparison averages exclude the selected Taxi Zone. "
             "These are geographic benchmarks, not statistically matched peers."
@@ -1334,9 +1412,10 @@ with control4:
             )
         ),
         key="raw07_bucket",
+        on_change=_mark_profile_custom,
     )
 
-display1, display2 = st.columns(2)
+display1, display2, display3 = st.columns(3)
 
 with display1:
     scale_mode = st.selectbox(
@@ -1347,6 +1426,7 @@ with display1:
         ],
         index=0,
         key="raw07_scale",
+        on_change=_mark_profile_custom,
     )
 
 with display2:
@@ -1357,6 +1437,18 @@ with display2:
         ),
         index=2,
         key="raw07_smoothing",
+        on_change=_mark_profile_custom,
+    )
+
+with display3:
+    show_anomalies = st.checkbox(
+        "Show anomalies",
+        value=False,
+        key="raw07_show_anomalies",
+        help=(
+            "Overlay selected anomaly events where this metric "
+            "was identified as one of the event drivers."
+        ),
     )
 
 metadata = get_zone_metadata(
@@ -1390,6 +1482,39 @@ with st.spinner(
         temporal_bucket=temporal_bucket,
         comparison_level=comparison_level,
     )
+    anomaly_events = pd.DataFrame()
+
+    if show_anomalies:
+        anomaly_events = get_zone_metric_driver_anomaly_events(
+            selected_zone_id,
+            metric=selected_metric,
+            temporal_bucket=temporal_bucket,
+        )
+
+        if not anomaly_events.empty:
+            # Finalist anomalies are Taxi Zone × date × daypart events,
+            # while this chart displays one selected metric per day.
+            # Collapse multiple qualifying dayparts to one daily marker.
+            anomaly_events = (
+                anomaly_events[
+                    [
+                        "date",
+                        "comparison_event_id",
+                    ]
+                ]
+                .groupby(
+                    "date",
+                    observed=True,
+                    as_index=False,
+                )
+                .agg(
+                    anomaly_event_count=(
+                        "comparison_event_id",
+                        "nunique",
+                    ),
+                )
+            )
+
     _record_timing(
         page_timings,
         "Daily series",
@@ -1421,7 +1546,7 @@ with st.spinner(
     )
     _record_timing(
         page_timings,
-        "Six-metric profile",
+        "Ten-metric profile",
         stage_start,
     )
 
@@ -1512,12 +1637,22 @@ card3.metric(
     ),
 )
 
+comparison_metric_label = (
+    "Difference vs comparison"
+    if (
+        not show_comparison
+        or daily_summary[
+            "baseline_observations"
+        ]
+        > 0
+    )
+    else "Comparison unavailable"
+)
+
 card4.metric(
-    (
-        "Difference vs comparison"
-        if show_comparison
-        else "Observed days"
-    ),
+    comparison_metric_label
+    if show_comparison
+    else "Observed days",
     (
         _format_percent(
             daily_summary[
@@ -1556,6 +1691,7 @@ trend_fig = _build_trend_chart(
     metric_label=metric_label,
     scale_mode=scale_mode,
     show_comparison=show_comparison,
+    anomaly_events=anomaly_events,
 )
 _record_timing(
     page_timings,
@@ -1603,9 +1739,9 @@ st.markdown(
 )
 
 st.write(
-    "Compare the selected zone across all six core measures. Filled markers "
-    "show the main comparisons; open markers flag low-baseline changes that "
-    "should be interpreted cautiously."
+    "Compare the selected zone across all ten clean base measures. Filled "
+    "markers show threshold-supported comparisons; open markers flag "
+    "low-baseline changes that should be interpreted cautiously."
 )
 
 st.caption(
@@ -1620,7 +1756,7 @@ profile_fig = _build_multimetric_profile_chart(
 )
 _record_timing(
     page_timings,
-    "Six-metric chart",
+    "Ten-metric chart",
     chart_stage_start,
 )
 
@@ -1956,7 +2092,7 @@ page_timings[
     )
     for label in [
         "Trend chart",
-        "Six-metric chart",
+        "Ten-metric chart",
         "Temporal chart",
         "Rank chart",
         "Divergence chart",

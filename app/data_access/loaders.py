@@ -30,6 +30,7 @@ STUDY_START_DATE = pd.Timestamp("2023-01-01")
 STUDY_END_DATE = pd.Timestamp("2026-03-31")
 CONGESTION_PRICING_START_DATE = pd.Timestamp("2025-01-05")
 
+# Six trusted headline metrics used by the broad exploratory pages.
 CORE_METRICS = [
     "taxi_trip_count",
     "taxi_avg_trip_speed",
@@ -39,12 +40,32 @@ CORE_METRICS = [
     "avg_bus_speed",
 ]
 
+# Full set of clean base measures available to investigative views such as
+# the Taxi Zone Profile. Keeping this separate prevents Pages 01–06 from
+# expanding automatically when deeper diagnostic metrics are added.
+BASE_METRICS = [
+    "taxi_trip_count",
+    "taxi_avg_trip_speed",
+    "taxi_avg_trip_duration",
+    "fhvhv_trip_count",
+    "fhvhv_avg_trip_speed",
+    "fhvhv_avg_trip_duration",
+    "subway_ridership",
+    "subway_transfers",
+    "bus_trip_count",
+    "avg_bus_speed",
+]
+
 METRIC_LABELS = {
     "taxi_trip_count": "Taxi trips",
     "taxi_avg_trip_speed": "Taxi average speed",
+    "taxi_avg_trip_duration": "Taxi average trip duration",
     "fhvhv_trip_count": "FHVHV trips",
     "fhvhv_avg_trip_speed": "FHVHV average speed",
+    "fhvhv_avg_trip_duration": "FHVHV average trip duration",
     "subway_ridership": "Subway ridership",
+    "subway_transfers": "Subway transfers",
+    "bus_trip_count": "Bus trips",
     "avg_bus_speed": "Average bus speed",
 }
 
@@ -52,12 +73,19 @@ COUNT_METRICS = [
     "taxi_trip_count",
     "fhvhv_trip_count",
     "subway_ridership",
+    "subway_transfers",
+    "bus_trip_count",
 ]
 
 SPEED_METRICS = [
     "taxi_avg_trip_speed",
     "fhvhv_avg_trip_speed",
     "avg_bus_speed",
+]
+
+DURATION_METRICS = [
+    "taxi_avg_trip_duration",
+    "fhvhv_avg_trip_duration",
 ]
 
 DAYPART_ORDER = [

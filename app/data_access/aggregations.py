@@ -19,10 +19,15 @@ import pandas as pd
 import streamlit as st
 
 from app.data_access.loaders import (
+    BASE_METRICS,
     CONGESTION_PRICING_START_DATE,
     CORE_METRICS,
     METRIC_LABELS,
     load_analysis_panel,
+)
+from app.data_access.mobility_environments import (
+    attach_mobility_regime_cluster_context,
+    format_mobility_regime_cluster_label,
 )
 
 
@@ -30,6 +35,8 @@ COUNT_METRICS = [
     "taxi_trip_count",
     "fhvhv_trip_count",
     "subway_ridership",
+    "subway_transfers",
+    "bus_trip_count",
 ]
 
 SPEED_METRICS = [
@@ -38,13 +45,27 @@ SPEED_METRICS = [
     "avg_bus_speed",
 ]
 
+DURATION_METRICS = [
+    "taxi_avg_trip_duration",
+    "fhvhv_avg_trip_duration",
+]
+
+WEIGHTED_MEAN_METRICS = [
+    *SPEED_METRICS,
+    *DURATION_METRICS,
+]
+
 # Hidden support columns. These can be used for aggregation weights without
 # exposing them as primary app metrics.
 WEIGHT_COLUMNS = {
     "taxi_avg_trip_speed": "taxi_trip_count",
+    "taxi_avg_trip_duration": "taxi_trip_count",
     "fhvhv_avg_trip_speed": "fhvhv_trip_count",
+    "fhvhv_avg_trip_duration": "fhvhv_trip_count",
     "avg_bus_speed": "bus_trip_count",
 }
+
+
 
 BASE_FILTER_COLUMNS = [
     "date",
@@ -109,21 +130,30 @@ def get_metric_spec(metric: str) -> MetricAggregationSpec:
     if metric in COUNT_METRICS:
         return MetricAggregationSpec(
             metric=metric,
-            display_label=METRIC_LABELS.get(metric, metric),
+            display_label=METRIC_LABELS.get(
+                metric,
+                metric,
+            ),
             aggregation_type="sum",
             weight_column=None,
         )
 
-    if metric in SPEED_METRICS:
+    if metric in WEIGHTED_MEAN_METRICS:
         return MetricAggregationSpec(
             metric=metric,
-            display_label=METRIC_LABELS.get(metric, metric),
+            display_label=METRIC_LABELS.get(
+                metric,
+                metric,
+            ),
             aggregation_type="weighted_mean",
-            weight_column=WEIGHT_COLUMNS.get(metric),
+            weight_column=WEIGHT_COLUMNS.get(
+                metric
+            ),
         )
 
     raise ValueError(
-        f"Unsupported metric: {metric}. Expected one of: {CORE_METRICS}"
+        f"Unsupported metric: {metric}. "
+        f"Expected one of: {BASE_METRICS}"
     )
 
 
@@ -216,6 +246,7 @@ def apply_common_filters(
     temporal_bucket: str | None = None,
     borough: str | None = None,
     cbd_spatial_category: str | None = None,
+    mobility_regime_cluster_label: int | None = None,
     date_range: tuple[pd.Timestamp, pd.Timestamp] | None = None,
 ) -> pd.DataFrame:
     """Apply shared filters used by raw-data explorer pages."""
@@ -223,6 +254,57 @@ def apply_common_filters(
 
     if "date" in filtered.columns:
         filtered["date"] = pd.to_datetime(filtered["date"])
+
+    if mobility_regime_cluster_label is not None:
+        if "pre_post_cp" not in filtered.columns:
+            raise ValueError(
+                "mobility_regime_cluster_label requires pre_post_cp in the source dataframe"
+            )
+
+        pre_rows = filtered[
+            filtered["pre_post_cp"].astype(str).eq("pre_cp")
+        ].copy()
+        post_rows = filtered[
+            filtered["pre_post_cp"].astype(str).eq("post_cp")
+        ].copy()
+
+        attached_frames: list[pd.DataFrame] = []
+
+        if not pre_rows.empty:
+            attached_frames.append(
+                attach_mobility_regime_cluster_context(
+                    pre_rows,
+                    assignment_period="pre_cp",
+                )
+            )
+
+        if not post_rows.empty:
+            attached_frames.append(
+                attach_mobility_regime_cluster_context(
+                    post_rows,
+                    assignment_period="post_cp",
+                )
+            )
+
+        filtered = (
+            pd.concat(attached_frames, ignore_index=True)
+            if attached_frames
+            else filtered.iloc[0:0].copy()
+        )
+
+        if "mobility_regime_cluster_label" not in filtered.columns:
+            filtered["mobility_regime_cluster_label"] = pd.Series(
+                dtype="Int64"
+            )
+            filtered["mobility_regime_cluster_name"] = pd.Series(
+                dtype="string"
+            )
+
+        filtered = filtered[
+            filtered["mobility_regime_cluster_label"]
+            .astype("Int64")
+            .eq(int(mobility_regime_cluster_label))
+        ].copy()
 
     if temporal_bucket and temporal_bucket != "All temporal buckets":
         filtered = filtered[filtered["temporal_bucket"].astype(str) == temporal_bucket]
@@ -285,6 +367,7 @@ def get_daily_metric_trends(
     temporal_bucket: str | None = None,
     borough: str | None = None,
     cbd_spatial_category: str | None = None,
+    mobility_regime_cluster_label: int | None = None,
     date_range: tuple[pd.Timestamp, pd.Timestamp] | None = None,
 ) -> pd.DataFrame:
     """Return daily trend data for selected metrics.
@@ -300,6 +383,7 @@ def get_daily_metric_trends(
         temporal_bucket=temporal_bucket,
         borough=borough,
         cbd_spatial_category=cbd_spatial_category,
+        mobility_regime_cluster_label=mobility_regime_cluster_label,
         date_range=date_range,
     )
 
@@ -379,6 +463,7 @@ def get_indexed_daily_trends(
     temporal_bucket: str | None = None,
     borough: str | None = None,
     cbd_spatial_category: str | None = None,
+    mobility_regime_cluster_label: int | None = None,
     date_range: tuple[pd.Timestamp, pd.Timestamp] | None = None,
 ) -> pd.DataFrame:
     """Return daily trends indexed to each metric's pre-CP average."""
@@ -389,6 +474,7 @@ def get_indexed_daily_trends(
         temporal_bucket=temporal_bucket,
         borough=borough,
         cbd_spatial_category=cbd_spatial_category,
+        mobility_regime_cluster_label=mobility_regime_cluster_label,
         date_range=date_range,
     )
 
@@ -413,6 +499,7 @@ def get_pre_post_metric_summary(
     temporal_bucket: str | None = None,
     borough: str | None = None,
     cbd_spatial_category: str | None = None,
+    mobility_regime_cluster_label: int | None = None,
     date_range: tuple[pd.Timestamp, pd.Timestamp] | None = None,
 ) -> pd.DataFrame:
     """Return descriptive pre/post summaries for selected metrics.
@@ -427,6 +514,7 @@ def get_pre_post_metric_summary(
         temporal_bucket=temporal_bucket,
         borough=borough,
         cbd_spatial_category=cbd_spatial_category,
+        mobility_regime_cluster_label=mobility_regime_cluster_label,
         date_range=date_range,
     )
 
@@ -616,6 +704,7 @@ def build_selected_view_interpretation(
     temporal_bucket: str,
     borough: str | None = None,
     cbd_spatial_category: str | None = None,
+    mobility_regime_cluster_label: int | None = None,
 ) -> str:
     """Build a plain-English interpretation for the current interactive selection."""
     row = summary_df.loc[summary_df["metric"] == metric].iloc[0]
@@ -631,6 +720,13 @@ def build_selected_view_interpretation(
         geography_text = f"in {borough}"
     elif geography_scope == "CBD spatial category" and cbd_spatial_category:
         geography_text = f"for {format_cbd_spatial_category_label(cbd_spatial_category)} zones"
+    elif (
+        geography_scope == "Mobility regime cluster"
+        and mobility_regime_cluster_label is not None
+    ):
+        geography_text = (
+            f"for {format_mobility_regime_cluster_label(mobility_regime_cluster_label)} zones"
+        )
     else:
         geography_text = "for the selected geography"
 
@@ -774,6 +870,7 @@ def get_temporal_bucket_metric_summary(
     *,
     borough: str | None = None,
     cbd_spatial_category: str | None = None,
+    mobility_regime_cluster_label: int | None = None,
     week_part: str | None = None,
     date_range: tuple[pd.Timestamp, pd.Timestamp] | None = None,
 ) -> pd.DataFrame:
@@ -797,6 +894,7 @@ def get_temporal_bucket_metric_summary(
         temporal_bucket=None,
         borough=borough,
         cbd_spatial_category=cbd_spatial_category,
+        mobility_regime_cluster_label=mobility_regime_cluster_label,
         date_range=date_range,
     )
 

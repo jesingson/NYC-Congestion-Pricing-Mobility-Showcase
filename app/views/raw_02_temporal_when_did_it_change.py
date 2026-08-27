@@ -17,6 +17,10 @@ from app.data_access.aggregations import (
     get_temporal_bucket_metric_summary,
 )
 from app.data_access.loaders import METRIC_LABELS
+from app.data_access.mobility_environments import (
+    format_mobility_regime_cluster_label,
+    get_mobility_regime_cluster_options,
+)
 from app.utils.project_branding import (
     BRAND_COLORS,
     apply_branding,
@@ -114,14 +118,14 @@ def _format_percent(value: float) -> str:
     """Format a percent value for chart text."""
     if pd.isna(value):
         return ""
-    return f"{value:+.1f}%"
+    return f"{value:+.2f}%"
 
 
 def _format_value(value: float) -> str:
     """Format a numeric chart label."""
     if pd.isna(value):
         return ""
-    return f"{value:+,.0f}"
+    return f"{value:+,.2f}"
 
 
 def _build_multimodal_demand_chart(demand_df: pd.DataFrame, *, top_n: int = 20) -> go.Figure:
@@ -329,6 +333,7 @@ def _geography_text(
     geography_scope: str,
     borough: str | None,
     cbd_spatial_category: str | None,
+    mobility_regime_cluster_label: int | None = None,
 ) -> str:
     """Build a readable geography phrase."""
     if geography_scope == "Citywide":
@@ -337,6 +342,13 @@ def _geography_text(
         return f"in {borough}"
     if geography_scope == "CBD spatial category" and cbd_spatial_category:
         return f"for {format_cbd_spatial_category_label(cbd_spatial_category)} zones"
+    if (
+        geography_scope == "Mobility regime cluster"
+        and mobility_regime_cluster_label is not None
+    ):
+        return (
+            f"for {format_mobility_regime_cluster_label(mobility_regime_cluster_label)} zones"
+        )
     return "for the selected geography"
 
 
@@ -348,6 +360,7 @@ def _build_selected_view_interpretation(
     week_part: str,
     borough: str | None = None,
     cbd_spatial_category: str | None = None,
+    mobility_regime_cluster_label: int | None = None,
 ) -> str:
     """Build sign-aware interpretation for the selected temporal-bucket pattern."""
     if bucket_df.empty:
@@ -368,6 +381,7 @@ def _build_selected_view_interpretation(
         geography_scope=geography_scope,
         borough=borough,
         cbd_spatial_category=cbd_spatial_category,
+        mobility_regime_cluster_label=mobility_regime_cluster_label,
     )
 
     week_text = (
@@ -447,7 +461,7 @@ def _display_summary_table(summary_df: pd.DataFrame) -> None:
     """Display formatted temporal-bucket summary table."""
     st.dataframe(
         format_temporal_bucket_summary_for_display(summary_df),
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         column_config={
             "Pre-CP daily avg": st.column_config.NumberColumn(
@@ -493,7 +507,12 @@ def _build_mode_count_summary(demand_df: pd.DataFrame) -> dict[str, int]:
 
 RAW02_DEFAULT_SAVED_VIEW = "Multimodal demand shifts"
 RAW02_SAVED_VIEW_OPTIONS = ["None"] + list(INTERESTING_VIEWS.keys())
-RAW02_GEO_OPTIONS = ["Citywide", "Borough", "CBD spatial category"]
+RAW02_GEO_OPTIONS = [
+    "Citywide",
+    "Borough",
+    "CBD spatial category",
+    "Mobility regime cluster",
+]
 RAW02_WEEK_PART_OPTIONS = ["All buckets", "Weekday only", "Weekend only"]
 RAW02_SORT_MODE_OPTIONS = [
     "Temporal order",
@@ -574,7 +593,7 @@ summary_df = get_temporal_bucket_metric_summary(metrics=CORE_METRICS)
 demand_summary_df = summary_df[summary_df["metric"].isin(DEMAND_METRICS)].copy()
 
 fig = _build_multimodal_demand_chart(demand_summary_df, top_n=20)
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(fig, width="stretch")
 
 st.caption(
     "Bars compare post-CP daily averages against pre-CP daily averages within each temporal bucket. "
@@ -735,6 +754,7 @@ with control_col3:
 
 borough = None
 cbd_spatial_category = None
+mobility_regime_cluster_label = None
 
 if geography_scope == "Borough":
     borough = st.selectbox(
@@ -749,6 +769,14 @@ elif geography_scope == "CBD spatial category":
         "CBD spatial category",
         options=filter_values["cbd_spatial_categories"],
         key="raw02_cbd_spatial_category",
+        on_change=_mark_raw02_custom,
+    )
+elif geography_scope == "Mobility regime cluster":
+    mobility_regime_cluster_label = st.selectbox(
+        "Mobility regime cluster",
+        options=get_mobility_regime_cluster_options(),
+        format_func=format_mobility_regime_cluster_label,
+        key="raw02_mobility_regime_cluster",
         on_change=_mark_raw02_custom,
     )
 
@@ -778,6 +806,7 @@ selected_summary_df = get_temporal_bucket_metric_summary(
     metrics=CORE_METRICS,
     borough=borough,
     cbd_spatial_category=cbd_spatial_category,
+    mobility_regime_cluster_label=mobility_regime_cluster_label,
 )
 
 selected_bucket_df = filter_temporal_bucket_summary_for_metric(
@@ -802,7 +831,7 @@ selected_fig = _build_selected_bucket_chart(
     value_mode=value_mode,
 )
 
-st.plotly_chart(selected_fig, use_container_width=True)
+st.plotly_chart(selected_fig, width="stretch")
 
 st.markdown(
     f"""
@@ -815,6 +844,7 @@ st.markdown(
             week_part=week_part,
             borough=borough,
             cbd_spatial_category=cbd_spatial_category,
+            mobility_regime_cluster_label=mobility_regime_cluster_label,
         )}
     </div>
     """,

@@ -37,11 +37,26 @@ DEMAND_METRICS = [
 ]
 
 MEANINGFUL_BASELINE_THRESHOLDS = {
-    "taxi_trip_count": 25.0,
-    "taxi_avg_trip_speed": 100.0,
+    # Taxi-supported metrics:
+    # Retains ~87% of zones overall and ~49% even in the weakest bucket.
+    "taxi_trip_count": 1.0,
+    "taxi_avg_trip_speed": 1.0,
+    "taxi_avg_trip_duration": 1.0,
+
+    # FHVHV-supported metrics:
+    # Retains ~94% overall, with strong temporal-bucket coverage.
     "fhvhv_trip_count": 100.0,
-    "fhvhv_avg_trip_speed": 500.0,
+    "fhvhv_avg_trip_speed": 100.0,
+    "fhvhv_avg_trip_duration": 100.0,
+
+    # Subway metrics have different natural scales and therefore
+    # need separate thresholds.
     "subway_ridership": 500.0,
+    "subway_transfers": 25.0,
+
+    # Bus-supported metrics:
+    # The existing threshold retains essentially complete coverage.
+    "bus_trip_count": 25.0,
     "avg_bus_speed": 25.0,
 }
 
@@ -310,7 +325,7 @@ def build_agreement_map(
         )
     )
 
-    fig = px.choropleth_mapbox(
+    fig = px.choropleth_map(
         plot_df,
         geojson=get_zone_geojson(),
         locations="taxi_zone_id",
@@ -328,7 +343,7 @@ def build_agreement_map(
             "hover_subway",
             "hover_fhvhv",
         ],
-        mapbox_style="carto-positron",
+        map_style="carto-positron",
         center={"lat": 40.7128, "lon": -74.0060},
         zoom=9.0,
         opacity=0.84,
@@ -428,7 +443,7 @@ def build_continuous_zone_map(
             [1.0, BRAND_COLORS["dark_teal"]],
         ]
 
-    fig = px.choropleth_mapbox(
+    fig = px.choropleth_map(
         metric_df,
         geojson=get_zone_geojson(),
         locations="taxi_zone_id",
@@ -446,7 +461,7 @@ def build_continuous_zone_map(
             "hover_support",
             "hover_eligible",
         ],
-        mapbox_style="carto-positron",
+        map_style="carto-positron",
         center={"lat": 40.7128, "lon": -74.0060},
         zoom=9.0,
         opacity=0.84,
