@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 
 import numpy as np
 import pandas as pd
@@ -108,10 +109,10 @@ FEATURED_STORIES = {
         "cluster": None,
     },
     "Cluster 2 · Long-Trip Fast-Mobility Zones · Subway ridership": {
-        "headline": "Cluster 2 keeps the cycle but shifts its shape",
+        "headline": "Long-Trip Fast-Mobility Zones keep the cycle but shift its shape",
         "summary": (
-            "Cluster 2 still cycles annually, but the spiral shape shifts enough to show that "
-            "fast-mobility zones do not move like the citywide average."
+            "The annual cycle remains visible, but its shape differs enough to show that "
+            "Long-Trip Fast-Mobility Zones do not move like the citywide average."
         ),
         "metric": "subway_ridership",
         "geography_scope": "Mobility regime cluster",
@@ -132,10 +133,10 @@ FEATURED_STORIES = {
         "cluster": None,
     },
     "Cluster 4 · Staten Island Fast-Mobility · Taxi trips": {
-        "headline": "Staten Island is the compact cluster contrast",
+        "headline": "Staten Island offers a compact mobility-environment contrast",
         "summary": (
-            "A smaller but still legible mobility-regime example. It is useful when "
-            "we want a cluster-specific story that feels distinct from the citywide view."
+            "This smaller mobility environment still shows a legible annual pattern, "
+            "while remaining clearly distinct from the citywide view."
         ),
         "metric": "taxi_trip_count",
         "geography_scope": "Mobility regime cluster",
@@ -146,8 +147,8 @@ FEATURED_STORIES = {
     "EWR · FHVHV average trip duration": {
         "headline": "EWR makes the annual cycle look dramatic, but specific",
         "summary": (
-            "This is a very strong signal, though it is more diagnostic than general. "
-            "It is useful as a special-case view, not the page default."
+            "The annual pattern is pronounced, but it is clearly airport-specific, "
+            "so it should be interpreted as a local mobility pattern rather than a citywide one."
         ),
         "metric": "fhvhv_avg_trip_duration",
         "geography_scope": "Borough",
@@ -158,8 +159,8 @@ FEATURED_STORIES = {
     "EWR · FHVHV average speed": {
         "headline": "EWR speed is another strong special-case cycle",
         "summary": (
-            "Like the duration view, this gives a very strong annual pattern while "
-            "remaining clearly airport-specific."
+            "The annual speed pattern is pronounced while remaining clearly airport-specific, "
+            "which makes it a useful contrast with broader citywide cycles."
         ),
         "metric": "fhvhv_avg_trip_speed",
         "geography_scope": "Borough",
@@ -170,11 +171,18 @@ FEATURED_STORIES = {
 }
 
 FEATURED_STORY_OPTIONS = [
-    "Citywide - Subway transfers",
-    "Citywide - Subway ridership",
-    "Cluster 2 - Long-Trip Fast-Mobility Zones - Subway ridership",
-    "Gateway only - Taxi trips",
+    "Citywide transfers",
+    "Citywide ridership",
+    "Long-Trip Fast-Mobility",
+    "Gateway Taxi",
 ]
+
+FEATURED_STORY_LOOKUP = {
+    "Citywide transfers": "Citywide · Subway transfers",
+    "Citywide ridership": "Citywide · Subway ridership",
+    "Long-Trip Fast-Mobility": "Cluster 2 · Long-Trip Fast-Mobility Zones · Subway ridership",
+    "Gateway Taxi": "Gateway only · Taxi trips",
+}
 
 
 def _metric_label(metric: str) -> str:
@@ -185,6 +193,24 @@ def _metric_label(metric: str) -> str:
         metric,
         metric.replace("_", " ").title(),
     )
+
+
+def _format_mobility_environment_label(cluster_label: int) -> str:
+    """Return the named mobility environment without exposing cluster terminology."""
+    label = format_mobility_regime_cluster_label(cluster_label)
+    return re.sub(
+        r"^Cluster\s+\d+\s*[·\-:]\s*",
+        "",
+        label,
+        flags=re.IGNORECASE,
+    )
+
+
+def _format_raw11_geography_scope(value: str) -> str:
+    """Keep internal scope values stable while using app-facing terminology."""
+    if value == "Mobility regime cluster":
+        return "Mobility environment"
+    return value
 
 
 def _format_value(value: object) -> str:
@@ -213,7 +239,7 @@ def _scope_summary(
     if geography_scope == "Geo-policy group" and geo_policy:
         return geo_policy
     if geography_scope == "Mobility regime cluster" and cluster_label is not None:
-        return format_mobility_regime_cluster_label(cluster_label)
+        return _format_mobility_environment_label(cluster_label)
     return "Selected geography"
 
 
@@ -1321,20 +1347,23 @@ def _summary_cards(
     )
 
 
-st.caption("PAGE 11")
-st.title(f"{PAGE_TITLE}: Which mobility series repeat on a 365-day cycle, and does the rhythm shift after congestion pricing?")
+st.caption("CYCLICAL TIME")
+st.title("Which mobility patterns repeat each year — and did congestion pricing shift the rhythm?")
 st.write(
-    "The spiral compresses three years into a recurring loop so the viewer can see whether each series follows a stable seasonal rhythm, a meaningful post-CP shift, or both."
+    "The spiral folds three years into recurring annual loops so seasonal rhythm and longer-run "
+    "post-CP shifts can be compared in the same view."
 )
 
 hero_story_name = st.segmented_control(
-    "Featured story",
+    "Choose a cyclical story",
     options=FEATURED_STORY_OPTIONS,
     default=FEATURED_STORY_OPTIONS[0],
     key="raw11_featured_story",
 ) or FEATURED_STORY_OPTIONS[0]
 
-hero_profile = FEATURED_STORIES[hero_story_name.replace(" - ", " · ")]
+hero_profile = FEATURED_STORIES[
+    FEATURED_STORY_LOOKUP[hero_story_name]
+]
 
 hero_daily, hero_zones_in_scope = _build_metric_series(
     metric=hero_profile["metric"],
@@ -1437,6 +1466,7 @@ with controls[1]:
         "Geography",
         options=GEOGRAPHY_OPTIONS,
         index=0,
+        format_func=_format_raw11_geography_scope,
         key="raw11_geography_scope",
     )
 
@@ -1468,14 +1498,14 @@ with controls[2]:
     elif geography_scope == "Mobility regime cluster":
         if scope_options["clusters"]:
             cluster_choice = st.selectbox(
-                "Cluster",
+                "Mobility environment",
                 options=scope_options["clusters"],
                 index=0,
-                format_func=format_mobility_regime_cluster_label,
+                format_func=_format_mobility_environment_label,
                 key="raw11_cluster",
             )
         else:
-            st.info("No mobility regime clusters are available in the current data.")
+            st.info("No mobility environments are available in the current data.")
     else:
         st.markdown(
             "<div style='padding-top:1.75rem; color:#6b7d7f;'>No sub-selection needed.</div>",

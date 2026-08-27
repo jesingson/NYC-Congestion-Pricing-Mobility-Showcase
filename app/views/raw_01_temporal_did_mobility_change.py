@@ -65,8 +65,8 @@ INTERESTING_VIEWS = {
         "temporal_bucket": "All temporal buckets",
         "smoothing": "14-day rolling average",
         "interpretation": (
-            "One of the clearest saved views: gateway-to-CBD zones show a much larger post-CP taxi "
-            "activity difference than the citywide average."
+            "Gateway-to-CBD zones show a much larger post-CP Taxi activity difference than the "
+            "citywide average, making the geographic contrast easy to inspect."
         ),
     },
     "Citywide subway lift": {
@@ -555,6 +555,13 @@ RAW01_GEO_OPTIONS = [
     "CBD spatial category",
     "Mobility regime cluster",
 ]
+
+
+def _format_raw01_geography_scope(value: str) -> str:
+    """Keep internal geography keys stable while using app-facing terminology."""
+    if value == "Mobility regime cluster":
+        return "Mobility environment"
+    return value
 RAW01_SMOOTHING_OPTIONS = [
     "None",
     "7-day rolling average",
@@ -602,15 +609,12 @@ def _mark_raw01_custom() -> None:
 
 inject_app_css()
 
-st.caption("Raw Data Explorer")
-st.title("Temporal Explorer: Did mobility change?")
+st.caption("TEMPORAL OVERVIEW")
+st.title("Did mobility change after congestion pricing?")
 
-st.markdown(
-    """
-    This page looks at whether NYC's overall mobility pattern changed around the congestion-pricing
-    launch. The top view is fixed and interpretation-first. The lower section lets you explore the same
-    trend logic by changing the metric, geography, time window, and temporal bucket.
-    """
+st.write(
+    "Compare mobility before and after the January 2025 launch, then test whether the "
+    "observed pattern persists across metrics, geographies, time windows, and temporal buckets."
 )
 
 st.divider()
@@ -789,8 +793,8 @@ with st.expander("How to read this view", expanded=False):
         - Count metrics are aggregated by summing observed activity.
         - Speed metrics use weighted averages where possible: Taxi speed is weighted by Taxi trips,
           FHVHV speed is weighted by FHVHV trips, and Bus speed is weighted by Bus trip count.
-        - The **Gateway + adjacent** option combines gateway-to-CBD zones with zones adjacent to the CBD,
-          matching the broader geography framing used in the report.
+        - The **Gateway + adjacent** option combines gateway-to-CBD zones with zones immediately adjacent
+          to the CBD so the broader approach area can be evaluated together.
         - Trend guides in the Explore section are optional visual aids. A full-period fitted line summarizes
           the selected window with one simple direction; separate pre/post lines can reveal differences
           across the CP boundary, but they can also overstate discontinuity in noisy series.
@@ -805,7 +809,7 @@ st.divider()
 # Explore view
 # =============================================================================
 
-st.subheader("Explore the pattern yourself")
+st.subheader("Explore the pattern")
 
 st.markdown(
     """
@@ -856,6 +860,7 @@ with control_col1:
     geography_scope = st.selectbox(
         "Geography scope",
         options=RAW01_GEO_OPTIONS,
+        format_func=_format_raw01_geography_scope,
         key="raw01_geography_scope",
         on_change=_mark_raw01_custom,
     )
@@ -892,7 +897,7 @@ elif geography_scope == "CBD spatial category":
     )
 elif geography_scope == "Mobility regime cluster":
     mobility_regime_cluster_label = st.selectbox(
-        "Mobility regime cluster",
+        "Mobility environment",
         options=get_mobility_regime_cluster_options(),
         format_func=format_mobility_regime_cluster_label,
         key="raw01_mobility_regime_cluster",

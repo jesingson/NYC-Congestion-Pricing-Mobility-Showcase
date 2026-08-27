@@ -50,8 +50,8 @@ INTERESTING_VIEWS = {
         "sort_mode": "High to low",
         "value_mode": "Percent change",
         "interpretation": (
-            "Starts with the strongest overall pattern: the largest demand shifts are mostly Taxi, "
-            "especially overnight, evening, and weekend buckets."
+            "The largest demand shifts are concentrated in Taxi activity, especially overnight, "
+            "evening, and weekend buckets."
         ),
     },
     "Taxi late-night pattern": {
@@ -76,8 +76,8 @@ INTERESTING_VIEWS = {
         "sort_mode": "Temporal order",
         "value_mode": "Percent change",
         "interpretation": (
-            "Tests whether the taxi timing pattern is stronger in the combined gateway and adjacent geography "
-            "used in the report framing."
+            "Compares the Taxi timing pattern across gateway-to-CBD zones and the zones immediately "
+            "adjacent to the CBD."
         ),
     },
     "Subway steady lift": {
@@ -513,6 +513,13 @@ RAW02_GEO_OPTIONS = [
     "CBD spatial category",
     "Mobility regime cluster",
 ]
+
+
+def _format_raw02_geography_scope(value: str) -> str:
+    """Keep internal geography keys stable while using app-facing terminology."""
+    if value == "Mobility regime cluster":
+        return "Mobility environment"
+    return value
 RAW02_WEEK_PART_OPTIONS = ["All buckets", "Weekday only", "Weekend only"]
 RAW02_SORT_MODE_OPTIONS = [
     "Temporal order",
@@ -561,15 +568,12 @@ def _mark_raw02_custom() -> None:
 
 inject_app_css()
 
-st.caption("Raw Data Explorer")
-st.title("Temporal Patterns: When did it change?")
+st.caption("TIME-OF-DAY PATTERNS")
+st.title("When did mobility change most?")
 
-st.markdown(
-    """
-    This page looks at **when** post-CP mobility differences showed up across the project’s ordered
-    temporal buckets. Instead of asking whether mobility changed overall, this view compares the size
-    of the pre/post difference by mode, weekday/weekend, and time of day.
-    """
+st.write(
+    "Compare pre/post differences across weekday, weekend, and time-of-day buckets to see "
+    "when each mobility mode changed most."
 )
 
 st.divider()
@@ -578,7 +582,7 @@ st.divider()
 # Curated answer view
 # =============================================================================
 
-st.subheader("Where did the largest demand shifts appear?")
+st.subheader("When were the largest demand shifts?")
 
 st.markdown(
     """
@@ -675,8 +679,8 @@ with st.expander("How to read this view", expanded=False):
         - The hero chart uses demand/activity metrics only: Taxi trips, Subway ridership, and FHVHV trips.
         - Speed metrics are excluded from the hero because they answer a different question: service performance,
           not demand timing.
-        - The **Gateway + adjacent** option combines gateway-to-CBD zones with zones adjacent to the CBD,
-          matching the broader geography framing used in the report.
+        - The **Gateway + adjacent** option combines gateway-to-CBD zones with zones immediately adjacent
+          to the CBD so their timing patterns can be evaluated together.
         - The temporal buckets combine weekday/weekend with time-of-day windows.
         - Count metrics are aggregated by summing observed activity within each date and temporal bucket.
         - This page is descriptive. It shows when observed differences are largest, not why they happened.
@@ -689,7 +693,7 @@ st.divider()
 # Explore view
 # =============================================================================
 
-st.subheader("Explore the bucket pattern yourself")
+st.subheader("Explore the timing pattern")
 
 st.markdown(
     """
@@ -740,6 +744,7 @@ with control_col2:
     geography_scope = st.selectbox(
         "Geography scope",
         options=RAW02_GEO_OPTIONS,
+        format_func=_format_raw02_geography_scope,
         key="raw02_geography_scope",
         on_change=_mark_raw02_custom,
     )
@@ -773,7 +778,7 @@ elif geography_scope == "CBD spatial category":
     )
 elif geography_scope == "Mobility regime cluster":
     mobility_regime_cluster_label = st.selectbox(
-        "Mobility regime cluster",
+        "Mobility environment",
         options=get_mobility_regime_cluster_options(),
         format_func=format_mobility_regime_cluster_label,
         key="raw02_mobility_regime_cluster",
