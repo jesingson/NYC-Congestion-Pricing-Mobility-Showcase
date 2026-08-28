@@ -203,16 +203,30 @@ def load_anomaly_event_universe() -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False)
 def load_selected_anomaly_events() -> pd.DataFrame:
-    """Return only events retained in the canonical finalist surface."""
-    universe = load_anomaly_event_universe()
+    """Return only events retained in the canonical finalist surface.
 
-    selected = universe[
-        universe[
-            SELECTED_FINALIST_FLAG
-        ]
-        .fillna(False)
-        .astype(bool)
-    ].copy()
+    Read the finalist rows directly from Parquet instead of materializing the
+    full 1.56M-row anomaly universe first. This keeps the public API unchanged
+    while substantially reducing peak memory use on the hosted app.
+    """
+    _require_file(
+        ANOMALY_EVENT_UNIVERSE_PATH
+    )
+
+    selected = pd.read_parquet(
+        ANOMALY_EVENT_UNIVERSE_PATH,
+        filters=[
+            (
+                SELECTED_FINALIST_FLAG,
+                "==",
+                True,
+            )
+        ],
+    )
+
+    selected = _normalize_event_columns(
+        selected
+    )
 
     return (
         selected.sort_values(
