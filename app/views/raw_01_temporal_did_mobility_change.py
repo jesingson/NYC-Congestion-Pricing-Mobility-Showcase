@@ -33,6 +33,7 @@ from app.utils.project_branding import (
     BRAND_COLORS,
     apply_branding,
     inject_app_css,
+    render_chart_insight,
 )
 
 
@@ -320,6 +321,11 @@ def _build_adjustment_figure(
                 y=metric_df["index_value"],
                 mode="lines+markers",
                 name=METRIC_LABELS.get(metric_name, metric_name),
+                marker={
+                    "size": 7,
+                    "symbol": "circle-open",
+                    "line": {"width": 1.5},
+                },
                 customdata=metric_df[["period_value", "observed_days"]],
                 hovertemplate=(
                     "<b>%{fullData.name}</b><br>"
@@ -514,7 +520,7 @@ def _display_summary_table(summary_df: pd.DataFrame) -> None:
     """Display a formatted pre/post summary table."""
     st.dataframe(
         format_summary_for_display(summary_df),
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         column_config={
             "Pre-CP daily avg": st.column_config.NumberColumn(
@@ -623,7 +629,7 @@ st.divider()
 # Curated answer view
 # =============================================================================
 
-st.subheader("What changed at a glance")
+st.header("What changed at a glance")
 
 summary_df = get_pre_post_metric_summary(metrics=CORE_METRICS)
 trend_df = get_indexed_daily_trends(metrics=CORE_METRICS, smoothing_window=14)
@@ -688,21 +694,15 @@ fig.update_layout(
 fig = apply_branding(fig)
 fig = _apply_bottom_legend(fig, bottom_margin=115)
 
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(fig, width="stretch")
+
+render_chart_insight(
+    _build_hero_metric_insight(summary_df, metrics=hero_metrics)
+)
 
 st.caption(
     "Indexed values compare each selected metric against its own pre-CP average. "
     "Demand metrics are shown by default; speed metrics can be added with the selector."
-)
-
-st.markdown(
-    f"""
-    <div class="soft-callout">
-        <strong>So what?</strong><br>
-        {_build_hero_metric_insight(summary_df, metrics=hero_metrics)}
-    </div>
-    """,
-    unsafe_allow_html=True,
 )
 
 taxi_change = summary_df.loc[
@@ -740,7 +740,7 @@ with col3:
         delta="Post-CP vs pre-CP daily average",
     )
 
-st.markdown("### Did the change persist?")
+st.header("Did the change persist?")
 st.markdown(
     "A full pre/post average can hide whether a response appeared immediately, "
     "strengthened gradually, or faded. This view compares each selected metric with "
@@ -762,22 +762,16 @@ else:
     )
     st.plotly_chart(
         hero_adjustment_fig,
-        use_container_width=True,
+        width="stretch",
         key="raw01_curated_adjustment_path",
+    )
+    render_chart_insight(
+        _build_adjustment_overview(hero_adjustment_df, metrics=hero_metrics)
     )
     st.caption(
         f"Each line begins at 100 for the final {ADJUSTMENT_BASELINE_DAYS} days before "
         "congestion pricing. Monthly points are averages of the available daily values; "
         "the January 2025 point begins on the January 5 launch date."
-    )
-    st.markdown(
-        f"""
-        <div class="soft-callout">
-            <strong>So what?</strong><br>
-            {_build_adjustment_overview(hero_adjustment_df, metrics=hero_metrics)}
-        </div>
-        """,
-        unsafe_allow_html=True,
     )
 
 with st.expander("Show pre/post summary across core metrics", expanded=False):
@@ -809,7 +803,7 @@ st.divider()
 # Explore view
 # =============================================================================
 
-st.subheader("Explore the pattern")
+st.header("Explore temporal change")
 
 st.markdown(
     """
@@ -987,14 +981,14 @@ with daily_tab:
             _add_period_trend_line(chart, daily_df, metric_col=metric, label="Post-CP fitted line", period="post_cp", color=BRAND_COLORS["dark_teal"])
         chart.update_layout(title=f"{label} over time", xaxis_title="Date", yaxis_title=label, hovermode="x unified", height=500)
         chart = _apply_bottom_legend(apply_branding(chart), bottom_margin=105)
-        st.plotly_chart(chart, use_container_width=True, key="raw01_daily_timeline_chart")
+        st.plotly_chart(chart, width="stretch", key="raw01_daily_timeline_chart")
         insight = build_selected_view_interpretation(
             summary, metric=metric, geography_scope=geography_scope,
             temporal_bucket=temporal_bucket, borough=borough,
             cbd_spatial_category=cbd_spatial_category,
             mobility_regime_cluster_label=mobility_regime_cluster_label,
         )
-        st.markdown('<div class="soft-callout"><strong>What to notice:</strong><br>'+insight+'</div>', unsafe_allow_html=True)
+        render_chart_insight(insight)
         m1,m2,m3=st.columns(3)
         m1.metric("Pre-CP daily average", f"{summary['pre_daily_average'].iloc[0]:,.2f}")
         m2.metric("Post-CP daily average", f"{summary['post_daily_average'].iloc[0]:,.2f}")
@@ -1022,9 +1016,9 @@ with adjustment_tab:
     chart = _build_adjustment_figure(
         adjustment_df, title=f"{label}: monthly post-CP adjustment path", height=520,
     )
-    st.plotly_chart(chart, use_container_width=True, key="raw01_adjustment_path_chart")
+    st.plotly_chart(chart, width="stretch", key="raw01_adjustment_path_chart")
     insight = _build_adjustment_interpretation(adjustment_df, metric=metric)
-    st.markdown('<div class="soft-callout"><strong>What to notice:</strong><br>'+insight+'</div>', unsafe_allow_html=True)
+    render_chart_insight(insight)
     path = adjustment_df.loc[adjustment_df["metric"].eq(metric)].sort_values("period_order")
     if path.empty:
         baseline = first_idx = latest_idx = np.nan

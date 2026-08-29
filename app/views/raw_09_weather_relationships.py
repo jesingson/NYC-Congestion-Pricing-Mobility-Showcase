@@ -21,6 +21,7 @@ from app.data_access.weather_relationships import (
     load_relationship_date_bounds,
     load_zone_lookup,
 )
+from app.utils.project_branding import inject_app_css, render_chart_insight
 
 
 CP_START_DATE = pd.Timestamp("2025-01-05")
@@ -39,6 +40,9 @@ PRE_COLOR = BRAND_COLORS["dark_teal"]
 POST_COLOR = BRAND_COLORS["terracotta"]
 WEATHER_COLOR = BRAND_COLORS["dark_teal"]
 MOBILITY_COLOR = BRAND_COLORS["terracotta"]
+
+
+inject_app_css()
 
 
 @dataclass(frozen=True)
@@ -606,6 +610,36 @@ def _dynamic_interpretation(
     return headline, body
 
 
+def _time_series_takeaway(
+    pair_data: pd.DataFrame,
+    statistics: pd.DataFrame,
+    *,
+    weather_label: str,
+    mobility_label: str,
+) -> str:
+    """Summarize the paired chronology without implying causality."""
+    valid = pair_data.dropna(subset=["date", "weather_value", "mobility_value"])
+    all_row = _extract_period_row(statistics, "all")
+    if valid.empty or all_row is None:
+        return "There are not enough matched observations to summarize the chronology."
+
+    strongest_weather = valid.loc[valid["weather_value"].idxmax()]
+    correlation = float(all_row["spearman_correlation"])
+    correlation_text = (
+        f"Spearman **{correlation:+.3f}**"
+        if pd.notna(correlation)
+        else "an unavailable Spearman estimate"
+    )
+
+    return (
+        f"Across **{len(valid):,} matched observations**, {weather_label} and "
+        f"{mobility_label} have {correlation_text}. The highest observed "
+        f"{weather_label.lower()} occurs on **{pd.Timestamp(strongest_weather['date']):%b %d, %Y}**; "
+        f"the corresponding {mobility_label.lower()} value is "
+        f"**{float(strongest_weather['mobility_value']):,.1f}**."
+    )
+
+
 def _initialize_state(
     minimum_date: pd.Timestamp,
     maximum_date: pd.Timestamp,
@@ -741,7 +775,7 @@ st.write(
     "speed across the city and within individual Taxi Zones."
 )
 
-st.subheader("Bus speeds were lower on warmer weekday evenings")
+st.header("Bus speeds were lower on warmer weekday evenings")
 
 hero_pair = build_weather_relationship_pair_data(
     mobility_metric="avg_bus_speed",
@@ -823,6 +857,15 @@ st.plotly_chart(
         "displayModeBar": False,
     },
 )
+
+hero_headline, hero_body = _dynamic_interpretation(
+    hero_statistics,
+    weather_label="Temperature",
+    mobility_label="Bus Average Speed",
+    temporal_label="Weekday evening",
+    geography_label="Citywide",
+)
+render_chart_insight(f"**{hero_headline}.** {hero_body}")
 
 st.info(
     "This view shows association, not causation. Seasonal travel patterns, "
@@ -1072,8 +1115,6 @@ with relationship_tab:
         },
     )
 
-    st.subheader("What stands out")
-
     insight_headline, insight_body = _dynamic_interpretation(
         statistics,
         weather_label=weather_label,
@@ -1082,10 +1123,7 @@ with relationship_tab:
         geography_label=selected_zone_label,
     )
 
-    st.info(
-        f"**{insight_headline}**  \n"
-        f"{insight_body}"
-    )
+    render_chart_insight(f"**{insight_headline}.** {insight_body}")
 
 with time_tab:
     st.write(
@@ -1107,6 +1145,14 @@ with time_tab:
         config={
             "displayModeBar": False,
         },
+    )
+    render_chart_insight(
+        _time_series_takeaway(
+            pair_data,
+            statistics,
+            weather_label=weather_label,
+            mobility_label=mobility_label,
+        )
     )
 
 with st.expander("View matched observations"):

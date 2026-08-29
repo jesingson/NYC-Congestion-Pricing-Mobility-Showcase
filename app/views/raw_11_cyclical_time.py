@@ -36,6 +36,7 @@ from app.utils.project_branding import (
     BRAND_DIVERGING_SEQUENCE,
     apply_branding,
     inject_app_css,
+    render_chart_insight,
 )
 
 
@@ -187,7 +188,7 @@ FEATURED_STORY_LOOKUP = {
 
 def _metric_label(metric: str) -> str:
     if metric == ANOMALY_RATE_METRIC:
-        return "Anomaly zone rate"
+        return "Stress-anomaly zone rate"
 
     return METRIC_LABELS.get(
         metric,
@@ -1407,8 +1408,7 @@ hero_latest = (
 
 hero_story_col, hero_stats_col = st.columns([1.4, 1.1], gap="large")
 with hero_story_col:
-    st.markdown(f"#### {hero_shape_headline}")
-    st.write(hero_shape_insight)
+    st.header(hero_shape_headline)
 
 with hero_stats_col:
     hero_stat_cols = st.columns(2)
@@ -1424,26 +1424,15 @@ with hero_stats_col:
         f"{hero_observed_days} observed days - latest indexed value {_format_value(hero_latest)}"
     )
 
-st.markdown(
-    f"""
-    <div class="soft-callout" style="margin-top:1rem;">
-        <strong>What to notice:</strong> the annual swing is {_format_percent_text(hero_shape['seasonality_swing_pct'])}
-        of the mean. The post-CP shift is {_format_percent_text(hero_shape['post_cp_shift_pct'], signed=True)}
-        and the most recent 12-month average is {_format_percent_text(hero_shape['latest_12m_change_pct'], signed=True)}
-        versus the prior 12 months.
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
 hero_spiral_figure = _build_spiral_hero_figure(hero_daily)
-st.markdown("#### Annual spiral")
+st.subheader("Annual spiral")
 st.caption(
     "Each loop is one year. The bars grow from the spiral itself, and the year-start markers keep the cycle anchored."
 )
 st.plotly_chart(hero_spiral_figure, width="stretch", key="raw11_hero_spiral")
+render_chart_insight(hero_shape_insight)
 
-st.markdown("### Explorer")
+st.header("Explore cyclical patterns")
 st.write(
     "Use the explorer below to change the metric and geography. The spiral-bar geometry stays fixed so the comparison is always made on the same visual language."
 )
@@ -1566,24 +1555,6 @@ explorer_shape_text = _shape_insight_text(
     shape=explorer_shape,
 )
 
-st.markdown(
-    """
-    <div class="soft-callout">
-        <strong>What to notice:</strong> look for recurring calendar peaks, whether the annual swing is actually large or just decorative, and whether the latest 12-month average is moving faster than the long-run seasonal loop.
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-st.markdown(
-    f"""
-    <div class="soft-callout">
-        <strong>Selection insight:</strong> {explorer_shape_text}
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
 shape_cols = st.columns(4)
 shape_cols[0].metric("Seasonality swing", _format_percent_text(explorer_shape["seasonality_swing_pct"]))
 shape_cols[1].metric("Post-CP shift", _format_percent_text(explorer_shape["post_cp_shift_pct"], signed=True))
@@ -1600,10 +1571,18 @@ timeline_fig = _build_timeline_figure(
     spiral_style="Sparkline + value dots",
 )
 
-st.markdown("#### Explorer spiral")
+st.subheader("Annual spiral")
 st.plotly_chart(spiral_fig, width="stretch", key="raw11_spiral")
-st.markdown("#### Chronological sparkline")
+render_chart_insight(explorer_shape_text)
+st.subheader("Chronological trend")
 st.plotly_chart(timeline_fig, width="stretch", key="raw11_timeline")
+render_chart_insight(
+    f"Across the chronology, **{metric_label}** in **{scope_label}** shifts "
+    f"**{_format_percent_text(explorer_shape['post_cp_shift_pct'], signed=True)} "
+    "after congestion pricing**. The most recent 12-month average is "
+    f"**{_format_percent_text(explorer_shape['latest_12m_change_pct'], signed=True)}** "
+    "versus the prior 12 months."
+)
 
 show_data_table = st.checkbox(
     "Show data table",
@@ -1641,7 +1620,7 @@ with st.expander("How to read these numbers", expanded=False):
         """
     )
 
-st.markdown("### Useful questions")
+st.header("Questions this view can answer")
 st.write(
-    "Do anomalies recur in the same calendar positions? Did the post-CP period alter an established seasonal rhythm? Are some modes more cyclical than others?"
+    "Do stress anomalies recur in the same calendar positions? Did the post-CP period alter an established seasonal rhythm? Are some modes more cyclical than others?"
 )

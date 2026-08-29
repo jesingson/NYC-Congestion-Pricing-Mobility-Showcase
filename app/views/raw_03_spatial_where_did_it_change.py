@@ -25,12 +25,12 @@ from app.data_access.spatial_visuals import (
     get_continuous_map_kpis,
     get_kpi_labels,
 )
-from app.utils.project_branding import inject_app_css
+from app.utils.project_branding import inject_app_css, render_chart_insight
 
 
 inject_app_css()
 
-st.caption("SPATIAL EXPLORER")
+st.caption("SPATIAL PATTERNS")
 st.title("Where did mobility change?")
 st.write(
     "Mobility shifted differently across the city. Start with a curated "
@@ -70,6 +70,8 @@ STORY_CONFIGS = {
     },
 }
 
+st.header("Where the largest spatial shifts appeared")
+
 hero_story = st.segmented_control(
     "Choose a spatial story",
     options=list(STORY_CONFIGS),
@@ -81,6 +83,10 @@ hero_summary = get_zone_pre_post_metric_summary(
     metrics=DEMAND_METRICS,
 )
 hero_config = STORY_CONFIGS[hero_story]
+hero_insight = build_hero_interpretation(
+    hero_summary,
+    story=hero_story,
+)
 
 if hero_story == "All modes":
     agreement = build_demand_agreement_table(hero_summary)
@@ -90,9 +96,10 @@ if hero_story == "All modes":
     )
     st.plotly_chart(
         fig,
-        use_container_width=True,
+        width="stretch",
         config=MAP_CONFIG,
     )
+    render_chart_insight(hero_insight)
 
     counts = get_agreement_category_counts(agreement)
     lookup = dict(
@@ -126,9 +133,10 @@ else:
     )
     st.plotly_chart(
         fig,
-        use_container_width=True,
+        width="stretch",
         config=MAP_CONFIG,
     )
+    render_chart_insight(hero_insight)
 
     kpis = get_continuous_map_kpis(
         hero_summary,
@@ -156,15 +164,6 @@ else:
         help=kpis["largest_zone"],
     )
 
-hero_insight = build_hero_interpretation(
-    hero_summary,
-    story=hero_story,
-)
-st.markdown(
-    f'<div class="insight-callout">{hero_insight}</div>',
-    unsafe_allow_html=True,
-)
-
 with st.expander("How to read this view", expanded=False):
     st.markdown(
         """
@@ -186,7 +185,7 @@ with st.expander("How to read this view", expanded=False):
 
 if hero_story != "All modes":
     st.divider()
-    st.subheader("Did the demand modes move together?")
+    st.header("Did the demand modes move together?")
     st.write(
         "**Divergent demand pattern** means Taxi and Subway increased while "
         "FHVHV declined."
@@ -200,12 +199,15 @@ if hero_story != "All modes":
     )
     st.plotly_chart(
         fig,
-        use_container_width=True,
+        width="stretch",
         config=MAP_CONFIG,
+    )
+    render_chart_insight(
+        build_hero_interpretation(hero_summary, story="All modes")
     )
 
 st.divider()
-st.header("Explore the spatial pattern")
+st.header("Explore spatial patterns")
 
 SAVED_VIEWS = {
     "None": None,
@@ -396,9 +398,18 @@ fig = build_continuous_zone_map(
 )
 st.plotly_chart(
     fig,
-    use_container_width=True,
+    width="stretch",
     config=MAP_CONFIG,
 )
+
+explorer_insight = build_explorer_interpretation(
+    explore_summary,
+    metric=selected_metric,
+    value_column=value_column,
+    temporal_bucket=selected_bucket,
+    apply_threshold=threshold_active,
+)
+render_chart_insight(explorer_insight)
 
 kpis = get_continuous_map_kpis(
     explore_summary,
@@ -436,18 +447,6 @@ c3.metric(
     help=kpis["largest_zone"],
 )
 
-explorer_insight = build_explorer_interpretation(
-    explore_summary,
-    metric=selected_metric,
-    value_column=value_column,
-    temporal_bucket=selected_bucket,
-    apply_threshold=threshold_active,
-)
-st.markdown(
-    f'<div class="insight-callout">{explorer_insight}</div>',
-    unsafe_allow_html=True,
-)
-
 with st.expander("Explore zone rankings", expanded=False):
     sort_mode = st.selectbox(
         "Sort",
@@ -477,7 +476,7 @@ with st.expander("Explore zone rankings", expanded=False):
 
     st.dataframe(
         format_zone_summary_for_display(rankings),
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
 

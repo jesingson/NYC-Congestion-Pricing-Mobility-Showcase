@@ -20,6 +20,7 @@ from app.utils.project_branding import (
     BRAND_COLORS,
     apply_branding,
     inject_app_css,
+    render_chart_insight,
 )
 from app.data_access.mobility_environments import (
     attach_mobility_environment,
@@ -2005,7 +2006,7 @@ available_metrics = [
 # ---------------------------------------------------------------------
 # Editorial hero
 # ---------------------------------------------------------------------
-st.header("Where the biggest changes appeared")
+st.header("Where the largest changes appeared")
 
 st.write(
     "Each panel shows the five largest reliable increases and decreases "
@@ -2047,9 +2048,7 @@ for row_start in range(0, len(available_metrics), 2):
                 key=f"hero_metric_{metric}",
             )
 
-st.markdown("#### What stands out")
-
-st.info(
+render_chart_insight(
     _build_editorial_insight(
         hero_ranking_base,
         metric_labels,
@@ -2079,13 +2078,6 @@ st.plotly_chart(
     key="raw04_manhattan_distribution_grid",
 )
 
-st.caption(
-    "Each violin shows the complete spread of eligible Manhattan Taxi Zones. "
-    "Points are individual zones; the dotted line marks the median zone, the "
-    "solid teal line marks the Manhattan aggregate, and the dashed terracotta "
-    "line marks the citywide aggregate."
-)
-
 taxi_manhattan = hero_ranking_base[
     hero_ranking_base["metric"].eq("taxi_trip_count")
     & hero_ranking_base["borough"].astype(str).eq("Manhattan")
@@ -2103,7 +2095,7 @@ if not taxi_manhattan.empty:
         metric="taxi_trip_count",
         measure_column="percent_change",
     )
-    st.info(
+    render_chart_insight(
         f"For Taxi trips, the median eligible Manhattan zone changed "
         f"**{taxi_median:+,.1f}%**, compared with a "
         f"**{taxi_manhattan_aggregate:+,.1f}% Manhattan aggregate** and a "
@@ -2111,13 +2103,25 @@ if not taxi_manhattan.empty:
         "between the typical zone and the broad summaries shows why rankings "
         "and aggregate results should be interpreted together."
     )
+else:
+    render_chart_insight(
+        "No eligible Manhattan Taxi-trip rows were available to calculate "
+        "the highlighted median-versus-aggregate comparison."
+    )
+
+st.caption(
+    "Each violin shows the complete spread of eligible Manhattan Taxi Zones. "
+    "Points are individual zones; the dotted line marks the median zone, the "
+    "solid teal line marks the Manhattan aggregate, and the dashed terracotta "
+    "line marks the citywide aggregate."
+)
 
 
 # ---------------------------------------------------------------------
 # Interactive explorer
 # ---------------------------------------------------------------------
 st.divider()
-st.header("Explore the rankings")
+st.header("Explore zone rankings")
 
 st.write(
     "Choose a mobility measure, geographic scope, and time context, then use "
@@ -2247,13 +2251,10 @@ with largest_tab:
     explorer_summary = _build_explorer_summary(explorer_base)
     _render_explorer_summary_cards(explorer_summary)
 
-    st.markdown("#### What stands out in this view")
-    st.info(
-        _build_explorer_insight(
-            explorer_base,
-            metric_label=metric_labels[selected_metric],
-            context_label=context_label,
-        )
+    explorer_takeaway = _build_explorer_insight(
+        explorer_base,
+        metric_label=metric_labels[selected_metric],
+        context_label=context_label,
     )
 
     explorer_increases, explorer_decreases = _get_metric_leaders(
@@ -2282,6 +2283,7 @@ with largest_tab:
                 f"{time_context}_{temporal_bucket}"
             ),
         )
+        render_chart_insight(explorer_takeaway)
         st.caption(
             "The chart shows up to ten increases and ten decreases. Hover over "
             "a zone to compare its pre-CP average, post-CP average, "
@@ -2361,17 +2363,14 @@ with distribution_tab:
         measure_column=measure_column,
     )
 
-    st.markdown("#### What the full spread tells us")
-    st.info(
-        _build_distribution_insight(
-            explorer_base,
-            citywide_base=citywide_explorer_base,
-            metric=selected_metric,
-            metric_label=metric_labels[selected_metric],
-            context_label=context_label,
-            measure_column=measure_column,
-            active_reference_label=active_reference_label,
-        )
+    distribution_takeaway = _build_distribution_insight(
+        explorer_base,
+        citywide_base=citywide_explorer_base,
+        metric=selected_metric,
+        metric_label=metric_labels[selected_metric],
+        context_label=context_label,
+        measure_column=measure_column,
+        active_reference_label=active_reference_label,
     )
 
     if int(summary["eligible"]) == 0:
@@ -2398,6 +2397,7 @@ with distribution_tab:
                 f"{time_context}_{temporal_bucket}_{measure_column}"
             ),
         )
+        render_chart_insight(distribution_takeaway)
         st.caption(
             "The violin shows the full eligible-zone distribution. Points are "
             "individual Taxi Zones; the dotted line marks the median zone, the "

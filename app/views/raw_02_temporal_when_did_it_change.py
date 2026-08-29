@@ -25,6 +25,7 @@ from app.utils.project_branding import (
     BRAND_COLORS,
     apply_branding,
     inject_app_css,
+    render_chart_insight,
 )
 
 
@@ -426,6 +427,31 @@ def _build_selected_view_interpretation(
     )
 
 
+def _build_hero_takeaway(demand_summary: pd.DataFrame) -> str:
+    """Summarize the leading demand shift directly from the hero data."""
+    valid = demand_summary.dropna(subset=["percent_change"]).copy()
+    if valid.empty:
+        return "The hero view does not contain enough reliable pre/post data to summarize."
+
+    leader = valid.sort_values("percent_change", ascending=False).iloc[0]
+    top_five = valid.nlargest(5, "percent_change")
+    taxi_top_five = int(top_five["metric"].eq("taxi_trip_count").sum())
+    positive_buckets = (
+        valid.groupby("metric", observed=True)["percent_change"]
+        .apply(lambda values: int((values > 0).sum()))
+        .to_dict()
+    )
+
+    return (
+        f"**{METRIC_LABELS.get(leader['metric'], leader['metric'])} during "
+        f"{leader['temporal_bucket_label']}** had the largest displayed demand "
+        f"shift at **{float(leader['percent_change']):+.1f}%**. Taxi accounts for "
+        f"**{taxi_top_five} of the five largest shifts**; Subway is higher in "
+        f"**{positive_buckets.get('subway_ridership', 0)} of 10 buckets**, while "
+        f"FHVHV is higher in **{positive_buckets.get('fhvhv_trip_count', 0)} of 10**."
+    )
+
+
 def _selected_metric_card_labels(bucket_df: pd.DataFrame) -> dict[str, str]:
     """Return card labels that match all-positive, all-negative, or mixed selections."""
     valid_df = bucket_df.dropna(subset=["percent_change"])
@@ -582,7 +608,7 @@ st.divider()
 # Curated answer view
 # =============================================================================
 
-st.subheader("When were the largest demand shifts?")
+st.header("When were the largest demand shifts?")
 
 st.markdown(
     """
@@ -598,6 +624,7 @@ demand_summary_df = summary_df[summary_df["metric"].isin(DEMAND_METRICS)].copy()
 
 fig = _build_multimodal_demand_chart(demand_summary_df, top_n=20)
 st.plotly_chart(fig, width="stretch")
+render_chart_insight(_build_hero_takeaway(demand_summary_df))
 
 st.caption(
     "Bars compare post-CP daily averages against pre-CP daily averages within each temporal bucket. "
@@ -641,20 +668,6 @@ with col3:
         delta=f"Top: {fhvhv_top_row['temporal_bucket_label']} ({fhvhv_top_row['percent_change']:.1f}%)",
     )
 
-st.markdown(
-    """
-    <div class="soft-callout">
-        <strong>What to notice:</strong><br>
-        Taxi dominates the highest-ranked demand shifts, but this is not only a taxi story.
-        Subway ridership rose across all temporal buckets with a steadier pattern, while FHVHV activity
-        was more uneven. The key timing signal is that the sharpest proportional taxi gains appear
-        outside the classic weekday commute core: weekend overnight, weekday overnight, weekend evening,
-        and weekend AM peak.
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
 with st.expander("Show supporting data tables", expanded=False):
     st.markdown("**Top ranked demand shifts**")
     top_demand_display_df = demand_summary_df.sort_values(
@@ -693,7 +706,7 @@ st.divider()
 # Explore view
 # =============================================================================
 
-st.subheader("Explore the timing pattern")
+st.header("Explore time-of-day patterns")
 
 st.markdown(
     """
@@ -838,22 +851,16 @@ selected_fig = _build_selected_bucket_chart(
 
 st.plotly_chart(selected_fig, width="stretch")
 
-st.markdown(
-    f"""
-    <div class="soft-callout">
-        <strong>What to notice:</strong><br>
-        {_build_selected_view_interpretation(
-            selected_bucket_df,
-            metric_label=selected_metric_label,
-            geography_scope=geography_scope,
-            week_part=week_part,
-            borough=borough,
-            cbd_spatial_category=cbd_spatial_category,
-            mobility_regime_cluster_label=mobility_regime_cluster_label,
-        )}
-    </div>
-    """,
-    unsafe_allow_html=True,
+render_chart_insight(
+    _build_selected_view_interpretation(
+        selected_bucket_df,
+        metric_label=selected_metric_label,
+        geography_scope=geography_scope,
+        week_part=week_part,
+        borough=borough,
+        cbd_spatial_category=cbd_spatial_category,
+        mobility_regime_cluster_label=mobility_regime_cluster_label,
+    )
 )
 
 valid_selected_df = selected_bucket_df.dropna(subset=["percent_change"])

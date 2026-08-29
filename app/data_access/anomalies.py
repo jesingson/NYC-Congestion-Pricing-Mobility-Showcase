@@ -54,8 +54,17 @@ ANOMALY_ZONE_FREQUENCY_PATH = (
     / "finalist_prepost_zone_frequency.parquet"
 )
 
+ANOMALY_METRIC_HISTORY_DIR = (
+    APP_ROOT
+    / "data"
+    / "processed"
+    / "app_tables"
+    / "stress_anomaly_metric_history"
+)
+
 EVENT_ID_COLUMN = "comparison_event_id"
 SELECTED_FINALIST_FLAG = "selected_finalist_flag"
+METRIC_HISTORY_SCALE_FACTOR = 1_000
 
 
 # ---------------------------------------------------------------------
@@ -501,6 +510,105 @@ def get_zone_metric_diagnostics(
         )
         .reset_index(drop=True)
     )
+
+
+# ---------------------------------------------------------------------
+# Lazy-loaded full-universe metric history
+# ---------------------------------------------------------------------
+def _metric_history_path(metric: str) -> Path:
+    """Return the compact history-file path for one canonical metric."""
+    safe_metric = re.sub(r"[^A-Za-z0-9_]+", "_", str(metric)).strip("_").lower()
+    if not safe_metric:
+        raise ValueError("Metric history requires a non-empty metric name.")
+    return ANOMALY_METRIC_HISTORY_DIR / f"{safe_metric}.parquet"
+
+
+@st.cache_data(show_spinner=False)
+def load_metric_history(
+    metric: str,
+    taxi_zone_id: int | float | str,
+    daypart: str,
+) -> pd.DataFrame:
+    """Load one Zone × daypart history from one metric partition.
+
+    The compact app files store observed and expected values as three-decimal
+    scaled integers. Residual values and standardized residuals are reconstructed
+    only after predicate pushdown has reduced the read to one series. Daypart is
+    encoded inside temporal_bucket in these compact files, so both weekday and
+    weekend variants are loaded for the requested canonical daypart.
+    """
+    path = _metric_history_path(metric)
+    _require_file(path)
+
+    try:
+        normalized_zone_id = int(float(taxi_zone_id))
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"Invalid Taxi Zone ID: {taxi_zone_id!r}") from error
+
+    columns = [
+        "taxi_zone_id",
+        "date",
+        "temporal_bucket",
+        "metric",
+        "observed_milli",
+        "expected_milli",
+        "residual_center",
+        "residual_scale",
+        "support_status",
+        "support_reason",
+        "eligibility_pathway",
+        "scale_source",
+        "scale_method",
+        "scale_reference_window",
+        "scale_reference_count",
+    ]
+    normalized_daypart = str(daypart).strip().lower().replace(" ", "_")
+    temporal_buckets = [
+        f"weekday_{normalized_daypart}",
+        f"weekend_{normalized_daypart}",
+    ]
+
+    frame = pd.read_parquet(
+        path,
+        columns=columns,
+        filters=[
+            ("taxi_zone_id", "==", normalized_zone_id),
+            ("temporal_bucket", "in", temporal_buckets),
+        ],
+    )
+    if frame.empty:
+        return frame
+
+    required_columns = set(columns)
+    missing = sorted(required_columns.difference(frame.columns))
+    if missing:
+        raise ValueError(
+            f"Metric-history partition {path.name} is missing required columns: "
+            + ", ".join(missing)
+        )
+
+    frame = frame.copy()
+    frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
+    frame["daypart"] = normalized_daypart
+    frame["observed_value"] = (
+        pd.to_numeric(frame["observed_milli"], errors="coerce")
+        / METRIC_HISTORY_SCALE_FACTOR
+    )
+    frame["expected_value"] = (
+        pd.to_numeric(frame["expected_milli"], errors="coerce")
+        / METRIC_HISTORY_SCALE_FACTOR
+    )
+    frame["residual_value"] = (
+        frame["observed_value"] - frame["expected_value"]
+    )
+    valid_scale = frame["residual_scale"].notna() & frame["residual_scale"].gt(0)
+    frame["residual_zscore"] = float("nan")
+    frame.loc[valid_scale, "residual_zscore"] = (
+        frame.loc[valid_scale, "residual_value"]
+        - frame.loc[valid_scale, "residual_center"]
+    ) / frame.loc[valid_scale, "residual_scale"]
+
+    return frame.sort_values("date").reset_index(drop=True)
 
 
 # ---------------------------------------------------------------------

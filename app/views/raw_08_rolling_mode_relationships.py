@@ -21,6 +21,7 @@ from app.utils.project_branding import (
     BRAND_COLORS,
     apply_branding,
     inject_app_css,
+    render_chart_insight,
 )
 
 
@@ -265,8 +266,9 @@ def build_rolling_relationship_chart(
                 line={"color": color, "width": 3},
                 marker={
                     "size": 7,
+                    "symbol": "circle-open",
                     "color": color,
-                    "line": {"color": "white", "width": 0.8},
+                    "line": {"color": color, "width": 1.5},
                 },
                 customdata=customdata,
                 hovertemplate=(
@@ -686,16 +688,15 @@ st.plotly_chart(
     key="raw08_static_hero",
 )
 
+render_chart_insight(_build_hero_takeaway(hero_data))
+
 st.caption(
     f"Each overall window requires at least {DEFAULT_MIN_MATCHED_DAYS} "
     f"matched days within the {DEFAULT_WINDOW_DAYS}-day period."
 )
 
-st.markdown("#### What stands out")
-st.info(_build_hero_takeaway(hero_data))
-
 st.divider()
-st.header("Explore another rolling relationship")
+st.header("Explore rolling relationships")
 
 st.write(
     "Choose two measures, select a time-of-week context, and compare how "
@@ -891,15 +892,11 @@ else:
             "dates eligible for the selected bucket."
         )
 
-    st.markdown("#### What stands out in this view")
-
-    st.info(
-        _build_explorer_takeaway(
-            explorer_data,
-            metric_a_label=metric_a_label,
-            metric_b_label=metric_b_label,
-            temporal_bucket_label=temporal_bucket_label,
-        )
+    explorer_takeaway = _build_explorer_takeaway(
+        explorer_data,
+        metric_a_label=metric_a_label,
+        metric_b_label=metric_b_label,
+        temporal_bucket_label=temporal_bucket_label,
     )
 
     explorer_fig = build_rolling_relationship_chart(
@@ -916,6 +913,7 @@ else:
             f"{temporal_bucket}_{rolling_window_days}"
         ),
     )
+    render_chart_insight(explorer_takeaway)
 
     with st.expander(
         "View rolling-window details",

@@ -37,6 +37,7 @@ from app.utils.project_branding import (
     BRAND_COLORS,
     apply_branding,
     inject_app_css,
+    render_chart_insight,
 )
 
 
@@ -44,6 +45,15 @@ inject_app_css()
 
 DEFAULT_ZONE_NAME = "Alphabet City"
 DEFAULT_METRIC = "taxi_trip_count"
+HERO_ZONE_NAME = "Alphabet City"
+HERO_METRICS = [
+    "taxi_trip_count",
+    "taxi_avg_trip_speed",
+    "fhvhv_trip_count",
+    "fhvhv_avg_trip_speed",
+    "subway_ridership",
+    "avg_bus_speed",
+]
 
 TEMPORAL_BUCKET_OPTIONS = [
     ALL_TEMPORAL_BUCKETS_LABEL,
@@ -385,14 +395,14 @@ def _build_trend_chart(
                     x=anomaly_points["date"],
                     y=anomaly_points[zone_column],
                     mode="markers",
-                    name="Anomaly",
+                    name="Stress anomaly",
                     marker={
                         "size": 12,
-                        "symbol": "circle",
+                        "symbol": "circle-open",
                         "color": BRAND_COLORS["terracotta"],
                         "line": {
-                            "color": "white",
-                            "width": 1,
+                            "color": BRAND_COLORS["terracotta"],
+                            "width": 2,
                         },
                     },
                     customdata=anomaly_points[
@@ -401,13 +411,79 @@ def _build_trend_chart(
                         ]
                     ],
                     hovertemplate=(
-                        "<b>Anomaly date</b><br>"
+                        "<b>Stress-anomaly date</b><br>"
                         "Date: %{x|%b %d, %Y}<br>"
-                        "Anomalous daypart events: %{customdata[0]:,}"
+                        "Stress-anomaly dayparts: %{customdata[0]:,}"
                         "<extra></extra>"
                     ),
                 )
             )
+    return _apply_chart_branding(fig)
+
+
+def _build_zone_hero_chart(profile: pd.DataFrame) -> go.Figure:
+    """Show the frozen hero zone's reliable multimodal Pre/Post changes."""
+    plot_data = profile.loc[
+        profile["metric"].isin(HERO_METRICS)
+        & profile["zone_percent_change"].notna()
+    ].copy()
+    plot_data["eligible"] = plot_data["zone_eligible_for_percent_change"].fillna(False)
+    plot_data["direction"] = np.select(
+        [
+            ~plot_data["eligible"],
+            plot_data["zone_percent_change"].ge(0),
+        ],
+        ["Low baseline", "Increased"],
+        default="Decreased",
+    )
+    plot_data = plot_data.sort_values("zone_percent_change")
+    color_map = {
+        "Increased": BRAND_COLORS["dark_teal"],
+        "Decreased": BRAND_COLORS["terracotta"],
+        "Low baseline": BRAND_COLORS["seafoam"],
+    }
+
+    fig = go.Figure()
+    for direction in ["Decreased", "Increased", "Low baseline"]:
+        subset = plot_data.loc[plot_data["direction"].eq(direction)]
+        if subset.empty:
+            continue
+        fig.add_trace(
+            go.Bar(
+                x=subset["zone_percent_change"],
+                y=subset["metric_label"],
+                orientation="h",
+                name=direction,
+                marker_color=color_map[direction],
+                customdata=np.column_stack(
+                    [
+                        subset["zone_pre_daily_average"].map(_format_number),
+                        subset["zone_post_daily_average"].map(_format_number),
+                    ]
+                ),
+                hovertemplate=(
+                    "<b>%{y}</b><br>"
+                    "Change: %{x:+.1f}%<br>"
+                    "Pre-CP daily average: %{customdata[0]}<br>"
+                    "Post-CP daily average: %{customdata[1]}"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+    fig.add_vline(x=0, line_color="rgba(50,50,50,0.55)", line_width=1.2)
+    fig.update_xaxes(
+        title_text="Change from Pre-CP to Post-CP",
+        ticksuffix="%",
+        showgrid=True,
+        gridcolor="rgba(0,109,119,0.10)",
+    )
+    fig.update_yaxes(title_text="", automargin=True)
+    fig.update_layout(
+        height=390,
+        barmode="overlay",
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0},
+    )
     return _apply_chart_branding(fig)
 
 
@@ -1215,8 +1291,9 @@ st.title(
 )
 
 st.write(
-    "Choose a Taxi Zone once, then follow its mobility story across time, "
-    "metrics, temporal buckets, rankings, and mode divergences."
+    "A neighborhood can gain activity in one mode while losing it in another. "
+    "Follow those local changes across time, mobility measures, dayparts, rankings, "
+    "and mode disagreements."
 )
 
 catalog = get_recommended_zone_catalog()
@@ -1252,6 +1329,91 @@ default_zone_id = (
     if not default_matches.empty
     else zone_options[0]
 )
+
+hero_matches = catalog.loc[catalog["zone"].eq(HERO_ZONE_NAME)]
+if not hero_matches.empty:
+    hero_zone_id = int(hero_matches.iloc[0]["taxi_zone_id"])
+    hero_profile = get_zone_pre_post_profile(
+        taxi_zone_id=hero_zone_id,
+        comparison_level="Citywide",
+        temporal_bucket=ALL_TEMPORAL_BUCKETS_LABEL,
+    )
+    hero_core = hero_profile.loc[
+        hero_profile["metric"].isin(HERO_METRICS)
+        & hero_profile["zone_percent_change"].notna()
+    ].copy()
+    hero_reliable = hero_core.loc[
+        hero_core["zone_eligible_for_percent_change"].fillna(False)
+    ].copy()
+
+    if not hero_reliable.empty:
+        hero_increases = hero_reliable.loc[hero_reliable["zone_percent_change"].gt(0)]
+        hero_decreases = hero_reliable.loc[hero_reliable["zone_percent_change"].lt(0)]
+        hero_largest_increase = (
+            hero_increases.loc[hero_increases["zone_percent_change"].idxmax()]
+            if not hero_increases.empty
+            else hero_reliable.loc[hero_reliable["zone_percent_change"].idxmax()]
+        )
+        hero_largest_decrease = (
+            hero_decreases.loc[hero_decreases["zone_percent_change"].idxmin()]
+            if not hero_decreases.empty
+            else hero_reliable.loc[hero_reliable["zone_percent_change"].idxmin()]
+        )
+
+        st.header("Alphabet City moved in different directions across modes")
+        st.write(
+            "No single measure captures what happened here. These six core mobility "
+            "measures show which parts of Alphabet City’s transportation profile grew "
+            "after congestion pricing began—and which moved the other way."
+        )
+
+        hero_card_1, hero_card_2, hero_card_3, hero_card_4 = st.columns(4)
+        hero_card_1.metric(
+            f"Largest increase · {hero_largest_increase['metric_label']}",
+            _format_percent(hero_largest_increase["zone_percent_change"]),
+        )
+        hero_card_2.metric(
+            f"Largest decrease · {hero_largest_decrease['metric_label']}",
+            _format_percent(hero_largest_decrease["zone_percent_change"]),
+        )
+        hero_card_3.metric(
+            "Core metrics increasing",
+            f"{int(hero_reliable['zone_percent_change'].gt(0).sum())} of {len(hero_reliable)}",
+        )
+        hero_card_4.metric(
+            "Core metrics decreasing",
+            f"{int(hero_reliable['zone_percent_change'].lt(0).sum())} of {len(hero_reliable)}",
+        )
+
+        st.subheader("How the six core mobility measures changed")
+        st.plotly_chart(
+            _build_zone_hero_chart(hero_profile),
+            width="stretch",
+            config={"displayModeBar": False, "responsive": True},
+            key="raw07_frozen_alphabet_city_hero",
+        )
+        if not hero_increases.empty and not hero_decreases.empty:
+            render_chart_insight(
+                f"**{hero_largest_increase['metric_label']} increased "
+                f"{abs(float(hero_largest_increase['zone_percent_change'])):.1f}%**, "
+                f"while **{hero_largest_decrease['metric_label']} decreased "
+                f"{abs(float(hero_largest_decrease['zone_percent_change'])):.1f}%**. "
+                "Alphabet City therefore did not experience one uniform mobility shift: "
+                "different modes tell different parts of its Post-CP story."
+            )
+        else:
+            dominant_direction = "increased" if not hero_increases.empty else "decreased"
+            render_chart_insight(
+                f"All reliable displayed core metrics moved in the same direction: "
+                f"they **{dominant_direction}**. The explorer below shows whether this "
+                "pattern holds across other metrics, time windows, and comparison groups."
+            )
+        st.caption(
+            "Dark-teal and terracotta bars meet the profile’s percentage-change "
+            "eligibility rule. Seafoam bars, if present, have a low Pre-CP baseline "
+            "and should be read cautiously."
+        )
+        st.divider()
 
 def _apply_saved_profile() -> None:
     """Apply the selected saved profile immediately."""
@@ -1316,7 +1478,17 @@ def _mark_profile_custom() -> None:
 
 
 st.markdown(
-    "### Saved profiles"
+    "## Explore any Taxi Zone"
+)
+
+st.write(
+    "Choose a saved starting point or build a custom profile. One selection then "
+    "coordinates the timeline, multimetric comparison, temporal pattern, rankings, "
+    "and mode-divergence views below."
+)
+
+st.markdown(
+    "### Choose a starting point"
 )
 
 st.selectbox(
@@ -1442,11 +1614,11 @@ with display2:
 
 with display3:
     show_anomalies = st.checkbox(
-        "Show anomalies",
+        "Show stress anomalies",
         value=False,
         key="raw07_show_anomalies",
         help=(
-            "Overlay selected anomaly events where this metric "
+            "Overlay selected stress anomalies where this metric "
             "was identified as one of the event drivers."
         ),
     )
@@ -1701,7 +1873,7 @@ _record_timing(
 
 st.plotly_chart(
     trend_fig,
-    use_container_width=True,
+    width="stretch",
     config={
         "displayModeBar": False,
         "responsive": True,
@@ -1714,7 +1886,7 @@ st.plotly_chart(
     ),
 )
 
-st.info(
+render_chart_insight(
     _build_trend_takeaway(
         zone_name=str(
             metadata["zone"]
@@ -1762,7 +1934,7 @@ _record_timing(
 
 st.plotly_chart(
     profile_fig,
-    use_container_width=True,
+    width="stretch",
     config={
         "displayModeBar": False,
         "responsive": True,
@@ -1798,10 +1970,15 @@ if (
             .idxmax()
         ]
 
-        st.info(
+        render_chart_insight(
             f"The largest displayed zone-versus-comparison gap is "
             f"**{strongest['metric_label']}** at "
             f"**{strongest['change_gap']:+.1f} percentage points**."
+        )
+    else:
+        render_chart_insight(
+            "No comparison gap met the baseline and data-quality requirements "
+            "needed to identify a reliable largest change in this view."
         )
 
 elif not reliable_profile.empty:
@@ -1813,10 +1990,16 @@ elif not reliable_profile.empty:
         .idxmax()
     ]
 
-    st.info(
+    render_chart_insight(
         f"The largest displayed selected-zone change is "
         f"**{strongest['metric_label']}** at "
         f"**{strongest['zone_percent_change']:+.1f}%**."
+    )
+
+else:
+    render_chart_insight(
+        "No metric met the baseline and data-quality requirements needed "
+        "to identify a reliable largest change in this view."
     )
 
 if selected_metric == "subway_ridership":
@@ -1854,7 +2037,7 @@ _record_timing(
 
 st.plotly_chart(
     temporal_fig,
-    use_container_width=True,
+    width="stretch",
     config={
         "displayModeBar": False,
         "responsive": True,
@@ -1901,11 +2084,16 @@ if (
             )
         )
 
-        st.info(
+        render_chart_insight(
             f"The largest displayed temporal gap occurred during "
             f"**{strongest_bucket_label}**, at "
             f"**{strongest_bucket['change_gap']:+.1f} "
             "percentage points**."
+        )
+    else:
+        render_chart_insight(
+            "No comparison-period gap met the baseline and data-quality "
+            "requirements needed to identify a reliable temporal leader."
         )
 
 elif not reliable_temporal.empty:
@@ -1928,10 +2116,16 @@ elif not reliable_temporal.empty:
         )
     )
 
-    st.info(
+    render_chart_insight(
         f"The largest displayed temporal change occurred during "
         f"**{strongest_bucket_label}**, at "
         f"**{strongest_bucket['zone_percent_change']:+.1f}%**."
+    )
+
+else:
+    render_chart_insight(
+        "No temporal bucket met the baseline and data-quality requirements "
+        "needed to identify a reliable largest change in this view."
     )
 
 st.divider()
@@ -2011,7 +2205,7 @@ else:
 
     st.plotly_chart(
         rank_fig,
-        use_container_width=True,
+        width="stretch",
         config={
             "displayModeBar": False,
             "responsive": True,
@@ -2020,6 +2214,19 @@ else:
             f"raw07_rank_{selected_zone_id}_"
             f"{temporal_bucket}"
         ),
+    )
+
+    percentile_leader = eligible_rank_context.loc[
+        eligible_rank_context["citywide_percentile"].idxmax()
+    ]
+    percentile_laggard = eligible_rank_context.loc[
+        eligible_rank_context["citywide_percentile"].idxmin()
+    ]
+    render_chart_insight(
+        f"**{percentile_leader['metric_label']}** is this zone's highest "
+        f"citywide standing at the **{float(percentile_leader['citywide_percentile']):.1f}th "
+        f"percentile**; **{percentile_laggard['metric_label']}** is lowest at "
+        f"the **{float(percentile_laggard['citywide_percentile']):.1f}th percentile**."
     )
 
 st.divider()
@@ -2060,7 +2267,7 @@ else:
 
     st.plotly_chart(
         divergence_fig,
-        use_container_width=True,
+        width="stretch",
         config={
             "displayModeBar": False,
             "responsive": True,
@@ -2073,7 +2280,7 @@ else:
 
     top_divergence = divergences.iloc[0]
 
-    st.info(
+    render_chart_insight(
         f"The strongest disagreement is "
         f"**{top_divergence['metric_a_label']} "
         f"({_format_percent(top_divergence['metric_a_change'])})** "
@@ -2111,47 +2318,6 @@ page_timings[
     ]
 )
 
-with st.expander(
-    "Phase 5A performance profile",
-    expanded=True,
-):
-    st.caption(
-        "Run the page once after clearing Streamlit's data cache, then change "
-        "one analytical control and capture a second report. Display-only "
-        "changes such as trend view and smoothing should also be tested."
-    )
-
-    st.code(
-        _format_timing_report(
-            page_timings
-        ),
-        language=None,
-    )
-
-    st.caption(
-        "These measurements cover Python-side data preparation and Plotly "
-        "figure construction. They do not include browser rendering time."
-    )
-
-
-with st.expander(
-    "Saved-profile and display QA",
-    expanded=False,
-):
-    st.markdown(
-        """
-- Saved profiles load the zone, metric, comparison geography, temporal bucket,
-  trend view, and smoothing setting together.
-- The selected Taxi Zone is excluded from every geographic comparison average.
-- `No comparison` removes the benchmark from the trend and comparison-dependent
-  callouts.
-- Relative-change and actual-value views use the same underlying daily series.
-- Low-baseline observations remain visible as open markers but are excluded from
-  highlighted largest-gap statements.
-- Subway Ridership may be unavailable for zones without mapped subway activity,
-  including Staten Island.
-        """
-    )
 
 with st.expander(
     "How to read this zone profile",

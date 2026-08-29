@@ -21,6 +21,7 @@ from app.utils.project_branding import (
     BRAND_COLORS,
     apply_branding,
     inject_app_css,
+    render_chart_insight,
 )
 from app.data_access.mobility_environments import (
     attach_mobility_regime_cluster_context,
@@ -2577,7 +2578,7 @@ else:
 
     st.plotly_chart(
         hero_fig,
-        use_container_width=True,
+        width="stretch",
         config={
             "displayModeBar": False,
             "responsive": True,
@@ -2585,18 +2586,12 @@ else:
         key="raw05_static_hero",
     )
 
+    render_chart_insight(hero_summary["takeaway"])
+
     st.caption(
         "Bubble area—not radius—is proportional to Subway Ridership. "
         "Open markers show pre-CP values; filled markers show post-CP "
         "values. Axes use logarithmic scales."
-    )
-
-    st.markdown(
-        "#### What stands out"
-    )
-
-    st.info(
-        hero_summary["takeaway"]
     )
 
     st.caption(
@@ -2665,7 +2660,7 @@ else:
         ]
     )
 
-st.markdown("##### Shared measures")
+st.markdown("**Shared measures**")
 
 measure_col1, measure_col2 = st.columns(2)
 
@@ -2717,7 +2712,7 @@ with measure_col2:
         on_change=_mark_saved_view_custom,
     )
 
-st.markdown("##### Shared geography")
+st.markdown("**Shared geography**")
 
 geography_col1, geography_col2 = st.columns(2)
 
@@ -2870,7 +2865,7 @@ with across_tab:
         "geography moved from the pre-CP to post-CP period."
     )
 
-    st.markdown("##### Chart-specific measures")
+    st.markdown("**Chart-specific measures**")
 
     bubble_metric = st.selectbox(
         "Bubble-area measure",
@@ -3140,20 +3135,14 @@ with across_tab:
                 "Island cannot appear when this measure is required."
             )
 
-        st.markdown(
-            "#### What stands out in this view"
-        )
-
-        st.info(
-            _build_explorer_insight(
-                comparison,
-                correlations,
-                x_label=x_label,
-                y_label=y_label,
-                geography_label=geography_label,
-                bubble_label=bubble_label,
-                bubble_metric=bubble_metric,
-            )
+        explorer_takeaway = _build_explorer_insight(
+            comparison,
+            correlations,
+            x_label=x_label,
+            y_label=y_label,
+            geography_label=geography_label,
+            bubble_label=bubble_label,
+            bubble_metric=bubble_metric,
         )
 
         relationship_fig = (
@@ -3169,7 +3158,7 @@ with across_tab:
 
         st.plotly_chart(
             relationship_fig,
-            use_container_width=True,
+            width="stretch",
             config={
                 "displayModeBar": False,
                 "responsive": True,
@@ -3187,6 +3176,7 @@ with across_tab:
                 f"{period_view}"
             ),
         )
+        render_chart_insight(explorer_takeaway)
 
         if bubble_metric is not None:
             st.caption(
@@ -3277,7 +3267,7 @@ with across_tab:
 
             st.dataframe(
                 detail,
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
                 column_config=column_config,
             )
@@ -3314,17 +3304,11 @@ with temporal_tab:
         "Pearson correlations across displayed geographies"
     )
 
-    st.markdown(
-        "#### What the time-of-week comparison adds"
-    )
-
-    st.info(
-        _build_heatmap_insight(
-            temporal_matrix,
-            x_label=x_label,
-            y_label=y_label,
-            geography_context=geography_context,
-        )
+    heatmap_takeaway = _build_heatmap_insight(
+        temporal_matrix,
+        x_label=x_label,
+        y_label=y_label,
+        geography_context=geography_context,
     )
 
     temporal_fig = build_temporal_relationship_heatmap(
@@ -3333,7 +3317,7 @@ with temporal_tab:
 
     st.plotly_chart(
         temporal_fig,
-        use_container_width=True,
+        width="stretch",
         config={
             "displayModeBar": False,
             "responsive": True,
@@ -3345,6 +3329,7 @@ with temporal_tab:
             f"{filter_scope}_{filter_value}"
         ),
     )
+    render_chart_insight(heatmap_takeaway)
 
     st.caption(
         "Teal indicates a positive relationship or strengthening; terracotta "
@@ -3390,7 +3375,7 @@ with temporal_tab:
 
         st.dataframe(
             heatmap_table,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             column_config={
                 "Pre-CP correlation": st.column_config.NumberColumn(

@@ -43,6 +43,11 @@ pages = {
             title="Zone Profile",
             icon=":material/location_on:",
         ),
+        st.Page(
+            "views/raw_16_mobility_environment_profiler.py",
+            title="Mobility Environment Profiler",
+            icon=":material/account_tree:",
+        ),
     ],
 
     "Relationships & Dynamics": [
@@ -80,9 +85,24 @@ pages = {
 
     "Diagnostics": [
         st.Page(
-            "views/raw_12_anomaly_explorer.py",
-            title="Anomaly Explorer",
-            icon=":material/warning:",
+            "views/raw_12_stress_anomalies_over_time.py",
+            title="Stress Anomaly Temporal Explorer",
+            icon=":material/monitoring:",
+        ),
+        st.Page(
+            "views/raw_13_stress_anomaly_spatial_explorer.py",
+            title="Stress Anomaly Spatial Explorer",
+            icon=":material/location_searching:",
+        ),
+        st.Page(
+            "views/raw_14_mobility_stress_patterns.py",
+            title="Stress Anomaly Patterns",
+            icon=":material/analytics:",
+        ),
+        st.Page(
+            "views/raw_15_stress_anomaly_event_profiler.py",
+            title="Stress Anomaly Deep Dive",
+            icon=":material/troubleshoot:",
         ),
     ],
 

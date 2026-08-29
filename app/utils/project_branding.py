@@ -144,3 +144,21 @@ def inject_app_css() -> None:
         """,
         unsafe_allow_html=True,
     )
+
+
+def render_chart_insight(text: str) -> None:
+    """Render the standard data-derived takeaway directly below a visual."""
+    import streamlit as st
+
+    cleaned_text = (
+        str(text)
+        .replace("<strong>", "**")
+        .replace("</strong>", "**")
+        .replace("<br>", "  \n")
+        .replace("<br/>", "  \n")
+        .strip()
+    )
+    if not cleaned_text:
+        return
+
+    st.info(f"**Takeaway —** {cleaned_text}")

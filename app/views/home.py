@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-from app.data_access.loaders import CORE_METRICS, get_data_inventory
+from app.data_access.loaders import get_data_inventory
 from app.utils.project_branding import inject_app_css
 
 inject_app_css()
@@ -11,58 +11,71 @@ st.title("NYC Congestion Pricing Mobility Showcase")
 
 st.markdown(
     """
-    A question-led mobility showcase exploring how NYC travel patterns changed around the
-    January 2025 congestion-pricing launch.
-
-    The current release focuses on the **Raw Data Explorer**: temporal patterns, spatial patterns,
-    zone-level profiles, and multimodal relationships built from the processed 1.3.1 mobility tables.
+    Explore how travel across New York City changed around the January 2025
+    congestion-pricing launch. The Showcase connects citywide trends, Taxi Zone
+    patterns, mobility environments, relationships among transportation modes, and
+    stress anomalies in one question-led experience.
     """
 )
 
-st.subheader("How to use this app")
+st.subheader("Choose an investigative path")
 
 st.markdown(
     """
-    Each page follows the same pattern:
+    **Mobility patterns** — See when and where demand, speed, and travel duration
+    changed; compare Taxi Zones; or investigate the mobility environment that best
+    describes a neighborhood.
 
-    **Frozen answer view** — a curated default visualization that answers the page question.  
-    **Explore this view** — controls that let you vary the metric, geography, period, or temporal bucket.
+    **Relationships and dynamics** — Examine whether modes move together, where they
+    diverge, how those relationships evolve, and how mobility varies with weather and
+    recurring time cycles.
+
+    **Stress-anomaly diagnostics** — Find when and where mobility stress appeared,
+    understand which modes combined, and inspect the observed-versus-expected evidence
+    behind an individual event.
     """
 )
 
-st.subheader("Current raw-data questions")
+st.subheader("How to use the pages")
 
 st.markdown(
     """
-    - **Did mobility change?**
-    - **When did it change?**
-    - **Where did it change?**
-    - **Which zones changed most?**
-    - **Do modes move together?**
-    - **Where do modes disagree?**
-    - **What happened in this Taxi Zone?**
+    Most pages begin with a curated view that answers the page’s central question.
+    Continue into the explorer to change the metric, geography, period, daypart, or
+    comparison. Insight cards and interpretation boxes update with the current
+    selection.
+
+    Start broad with a temporal or spatial overview, then move to a Taxi Zone,
+    mobility-environment, or anomaly deep dive when something warrants closer review.
     """
 )
 
-st.subheader("Core metrics")
+st.subheader("Mobility evidence in the Showcase")
 
 st.markdown(
     """
-    The app currently centers on six trusted core metrics:
+    The analysis covers **Taxi, high-volume for-hire vehicles, Subway, and Bus** using
+    trip activity, ridership, transfers, average speed, and average trip duration where
+    each measure is available. Weather, policy geography, borough, and learned mobility
+    environments provide context rather than interchangeable transportation measures.
+
+    A **stress anomaly** is an observation with stress-aligned evidence: unusually high
+    demand, slower movement, or longer travel duration relative to its modeled
+    expectation. It identifies an unusual pattern—not its cause.
     """
 )
-
-for metric in CORE_METRICS:
-    st.markdown(f"- `{metric}`")
 
 with st.expander("Local data inventory / app diagnostics", expanded=False):
-    st.dataframe(get_data_inventory(), use_container_width=True)
+    st.dataframe(get_data_inventory(), width="stretch")
 
 with st.expander("Notes on excluded or contextual signals", expanded=False):
     st.markdown(
         """
-        - `bus_trip_count` is not part of the core app backbone because it is heavily tied to scheduled service structure.
-        - `traffic_volume` is not part of the core app backbone because traffic observations are sparse and uneven.
-        - Bridge/Tunnel and Weather are contextual layers, not primary raw-data explorer metrics.
+        - Bus trip activity is interpreted alongside scheduled-service structure rather
+          than treated as interchangeable with for-hire demand.
+        - Traffic-volume observations remain too sparse and uneven for the primary
+          citywide mobility comparisons.
+        - Weather and policy geography provide context; they do not by themselves
+          explain why a mobility pattern occurred.
         """
     )

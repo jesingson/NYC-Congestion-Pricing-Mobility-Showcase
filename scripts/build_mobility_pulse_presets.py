@@ -1236,7 +1236,7 @@ def render_preset(
         markeredgecolor="white",
         markeredgewidth=1.2,
         markersize=8,
-        label="Metric-linked anomaly",
+        label="Metric-linked stress anomaly",
     )
 
     ax.legend(

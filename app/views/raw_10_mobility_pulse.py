@@ -37,7 +37,7 @@ from app.data_access.zone_profile_app_tables import (
 from app.data_access.zone_profiles import (
     get_zone_catalog,
 )
-from app.utils.project_branding import inject_app_css
+from app.utils.project_branding import inject_app_css, render_chart_insight
 
 
 # ---------------------------------------------------------------------
@@ -70,9 +70,9 @@ DEFAULT_METRIC = "taxi_trip_count"
 
 # Saved MP4s use every available observation date.
 #
-# Custom Plotly animations remain capped until their frame-generation
-# path receives a dedicated performance optimization pass.
-CUSTOM_MAX_FRAMES = 120
+# Custom Plotly animations use sparse frame updates and remain bounded
+# so long windows stay responsive in the browser.
+CUSTOM_MAX_FRAMES = 240
 DEFAULT_CUSTOM_WINDOW_DAYS = 120
 
 DATA_WINDOW_START = pd.Timestamp(
@@ -83,10 +83,6 @@ DATA_WINDOW_END = pd.Timestamp(
     "2026-03-31"
 ).date()
 
-MAP_FOCUS_OPTIONS = [
-    "Citywide",
-    "Borough",
-]
 
 
 # ---------------------------------------------------------------------
@@ -136,7 +132,7 @@ PRESET_STORY_COPY = {
         "what_to_watch": (
             "Follow weekend-evening high-volume for-hire activity across Brooklyn. "
             "Some neighborhoods move farther from their pre-CP norms than others, "
-            "and the anomaly markers help identify dates when those changes were "
+            "and the stress-anomaly markers help identify dates when those changes were "
             "especially unusual for the displayed metric."
         ),
     },
@@ -723,9 +719,7 @@ def _render_saved_story(
         preset
     )
 
-    st.markdown(
-        f"#### {heading}"
-    )
+    st.subheader(heading)
 
     st.caption(
         (
@@ -761,15 +755,13 @@ def _render_saved_story(
         format="video/mp4",
     )
 
-    st.markdown(
-        f"**What to watch:** {what_to_watch}"
-    )
+    render_chart_insight(what_to_watch)
 
     st.caption(
         (
             "Map color shows change from each Taxi Zone's own pre-CP "
-            "reference. Orange dots identify selected-finalist anomaly "
-            "events where the displayed metric was one of the event drivers."
+            "reference. Orange dots mark stress anomalies where the displayed "
+            "metric was one of the event drivers."
         )
     )
 
@@ -820,6 +812,35 @@ def _build_animation_figure(
         [0.65, BRAND_COLORS["seafoam"]],
         [1.00, BRAND_COLORS["dark_teal"]],
     ]
+
+    def _date_annotation(
+        date_value: pd.Timestamp,
+    ) -> dict:
+        """Return the in-map date badge used during animation playback."""
+        return {
+            "text": pd.Timestamp(
+                date_value
+            ).strftime(
+                "%b %d, %Y"
+            ),
+            "x": 0.97,
+            "y": 0.97,
+            "xref": "paper",
+            "yref": "paper",
+            "xanchor": "right",
+            "yanchor": "top",
+            "showarrow": False,
+            "font": {
+                "size": 18,
+                "color": BRAND_COLORS[
+                    "dark_teal"
+                ],
+            },
+            "bgcolor": (
+                "rgba(255,255,255,0.88)"
+            ),
+            "borderpad": 6,
+        }
 
     # Group once so the frame loop does not rescan the full dataframe for
     # every animation date.
@@ -964,7 +985,7 @@ def _build_animation_figure(
             pd.Series(dtype=float),
         ),
         mode="markers",
-        name="Anomaly",
+        name="Stress anomaly",
         marker={
             "size": 10,
             "color": BRAND_COLORS["terracotta"],
@@ -978,9 +999,9 @@ def _build_animation_figure(
             first_anomalies
         ),
         hovertemplate=(
-            "<b>Anomaly</b><br>"
+            "<b>Stress anomaly</b><br>"
             "Zone: %{text}<br>"
-            "Anomalous daypart events: "
+            "Stress-anomaly dayparts: "
             "%{customdata[0]:,}"
             "<extra></extra>"
         ),
@@ -1045,6 +1066,13 @@ def _build_animation_figure(
                         ),
                     ),
                 ],
+                layout=go.Layout(
+                    annotations=[
+                        _date_annotation(
+                            frame_date
+                        )
+                    ]
+                ),
             )
         )
 
@@ -1088,6 +1116,11 @@ def _build_animation_figure(
         title={
             "text": focus_title
         },
+        annotations=[
+            _date_annotation(
+                first_date
+            )
+        ],
         map={
             "style": "carto-positron",
             "center": center,
@@ -1191,9 +1224,10 @@ def _build_timeline_figure(
     anomalies: pd.DataFrame,
     focus_label: str,
     metric_column: str,
+    pre_cp_baseline: float,
     show_anomalies: bool,
 ) -> go.Figure:
-    """Build the compact focus-group timeline."""
+    """Build the compact selected-geography timeline."""
     if panel.empty:
         return go.Figure()
 
@@ -1217,22 +1251,13 @@ def _build_timeline_figure(
         .sort_values("date")
     )
 
-    pre_reference = (
-        daily.loc[
-            daily["date"]
-            < CONGESTION_PRICING_START_DATE,
-            "focus_value",
-        ]
-        .mean()
-    )
-
     daily["focus_index"] = np.where(
         (
-            pd.notna(pre_reference)
-            and pre_reference != 0
+            pd.notna(pre_cp_baseline)
+            and pre_cp_baseline != 0
         ),
         daily["focus_value"]
-        / pre_reference
+        / pre_cp_baseline
         * 100,
         np.nan,
     )
@@ -1294,21 +1319,22 @@ def _build_timeline_figure(
                         "focus_index"
                     ],
                     mode="markers",
-                    name="Anomaly",
+                    name="Stress anomaly",
                     marker={
                         "size": 10,
+                        "symbol": "circle-open",
                         "color": (
                             BRAND_COLORS[
                                 "terracotta"
                             ]
                         ),
                         "line": {
-                            "color": "white",
-                            "width": 1,
+                            "color": BRAND_COLORS["terracotta"],
+                            "width": 2,
                         },
                     },
                     hovertemplate=(
-                        "<b>Anomaly activity</b><br>"
+                        "<b>Stress-anomaly activity</b><br>"
                         "Date: %{x|%b %d, %Y}"
                         "<extra></extra>"
                     ),
@@ -1338,10 +1364,10 @@ def _build_timeline_figure(
                 marker_color=(
                     "rgba(231,111,81,0.30)"
                 ),
-                name="Zones with anomalies",
+                name="Zones with stress anomalies",
                 hovertemplate=(
                     "<b>%{x|%b %d, %Y}</b><br>"
-                    "Zones with anomalies: %{y:,}"
+                    "Zones with stress anomalies: %{y:,}"
                     "<extra></extra>"
                 ),
             ),
@@ -1375,12 +1401,12 @@ def _build_timeline_figure(
     )
 
     fig.update_yaxes(
-        title_text="Focus-group index",
+        title_text="Index (pre-CP = 100)",
         secondary_y=False,
     )
 
     fig.update_yaxes(
-        title_text="Zones with anomalies",
+        title_text="Zones with stress anomalies",
         secondary_y=True,
     )
 
@@ -1420,10 +1446,7 @@ def _render_custom_view(
     )
 
     with st.status(
-        (
-            "Building your custom Mobility Pulse… "
-            "This can take several minutes on the hosted app."
-        ),
+        "Building your custom Mobility Pulse…",
         expanded=True,
     ) as status:
 
@@ -1454,6 +1477,31 @@ def _render_custom_view(
                 ]
                 .copy()
             )
+
+        pre_cp_daily = (
+            focus_scope_panel.loc[
+                focus_scope_panel["date"]
+                < CONGESTION_PRICING_START_DATE
+            ]
+            .groupby(
+                "date",
+                observed=True,
+                dropna=False,
+            )
+            .agg(
+                focus_value=(
+                    selected_metric,
+                    "mean",
+                ),
+            )
+            .reset_index()
+        )
+
+        focus_pre_baseline = (
+            pre_cp_daily["focus_value"].mean()
+            if not pre_cp_daily.empty
+            else np.nan
+        )
 
         focus_panel = (
             focus_scope_panel[
@@ -1489,7 +1537,7 @@ def _render_custom_view(
 
         if show_anomalies:
             st.write(
-                "Loading metric-linked anomaly events."
+                "Loading metric-linked stress anomalies."
             )
 
             anomalies = (
@@ -1545,7 +1593,7 @@ def _render_custom_view(
 
         else:
             st.write(
-                "Anomaly overlay disabled for this custom view."
+                "Stress-anomaly overlay disabled for this custom view."
             )
 
             anomalies = pd.DataFrame(
@@ -1640,15 +1688,22 @@ def _render_custom_view(
         )
 
         st.write(
-            "Building the supporting focus-group timeline."
+            "Building the supporting timeline."
         )
         timeline_fig = (
             _build_timeline_figure(
                 panel=focus_panel,
                 anomalies=anomalies,
-                focus_label=focus_title,
+                focus_label=(
+                    selected_borough
+                    if map_focus == "Borough"
+                    else "Citywide"
+                ),
                 metric_column=(
                     selected_metric
+                ),
+                pre_cp_baseline=(
+                    focus_pre_baseline
                 ),
                 show_anomalies=(
                     show_anomalies
@@ -1668,22 +1723,6 @@ def _render_custom_view(
     # Supporting summary values
     # -----------------------------------------------------------------
 
-    full_scope_daily = (
-        focus_scope_panel.groupby(
-            "date",
-            observed=True,
-            dropna=False,
-        )
-        .agg(
-            focus_value=(
-                selected_metric,
-                "mean",
-            ),
-        )
-        .reset_index()
-        .sort_values("date")
-    )
-
     window_daily = (
         focus_panel.groupby(
             "date",
@@ -1700,35 +1739,23 @@ def _render_custom_view(
         .sort_values("date")
     )
 
-    focus_pre = (
-        full_scope_daily.loc[
-            full_scope_daily["date"]
-            < CONGESTION_PRICING_START_DATE,
-            "focus_value",
-        ]
-        .mean()
-    )
-
-    focus_post = (
-        full_scope_daily.loc[
-            full_scope_daily["date"]
-            >= CONGESTION_PRICING_START_DATE,
-            "focus_value",
-        ]
-        .mean()
+    focus_window_avg = (
+        window_daily["focus_value"].mean()
+        if not window_daily.empty
+        else np.nan
     )
 
     focus_change = (
         (
-            focus_post
-            - focus_pre
+            focus_window_avg
+            - focus_pre_baseline
         )
-        / focus_pre
+        / focus_pre_baseline
         * 100
         if (
-            pd.notna(focus_pre)
-            and pd.notna(focus_post)
-            and focus_pre != 0
+            pd.notna(focus_pre_baseline)
+            and pd.notna(focus_window_avg)
+            and focus_pre_baseline != 0
         )
         else np.nan
     )
@@ -1768,6 +1795,12 @@ def _render_custom_view(
         latest_value = np.nan
         latest_date = pd.NaT
 
+    geography_label = (
+        selected_borough
+        if map_focus == "Borough"
+        else "Citywide"
+    )
+
     # -----------------------------------------------------------------
     # Custom output
     # -----------------------------------------------------------------
@@ -1790,6 +1823,13 @@ def _render_custom_view(
                 "mobility_pulse_custom_map"
             ),
         )
+        render_chart_insight(
+            f"The map contains **{zones_in_view:,} Taxi Zones** in "
+            f"**{geography_label}**. Their selected-window {metric_label.lower()} "
+            f"average is **{_format_percent(focus_change)} versus the pre-CP "
+            f"baseline**, with **{focus_anomaly_days:,} metric-linked "
+            "stress-anomaly days** in the focus geography."
+        )
 
         st.plotly_chart(
             timeline_fig,
@@ -1802,15 +1842,23 @@ def _render_custom_view(
                 "mobility_pulse_custom_timeline"
             ),
         )
+        render_chart_insight(
+            f"The latest displayed {metric_label.lower()} value is "
+            f"**{_format_number(latest_value)} on "
+            f"{latest_date.strftime('%b %d, %Y') if pd.notna(latest_date) else 'an unavailable date'}**; "
+            f"the selected-window average is **{_format_number(focus_window_avg)}** "
+            f"versus a pre-CP baseline of **{_format_number(focus_pre_baseline)}**."
+        )
 
     with right_col:
         st.subheader(
-            "Focus quick view"
+            "Custom view summary"
         )
 
         st.caption(
             (
-                "This panel stays compact and points to deeper diagnosis."
+                "The selected window is compared with the same geography's "
+                "pre-CP baseline."
             )
         )
 
@@ -1842,16 +1890,16 @@ def _render_custom_view(
         )
 
         quick_card3.metric(
-            "Pre-CP avg.",
+            "Pre-CP baseline",
             _format_number(
-                focus_pre
+                focus_pre_baseline
             ),
         )
 
         quick_card4.metric(
-            "Post-CP avg.",
+            "Window avg.",
             _format_number(
-                focus_post
+                focus_window_avg
             ),
         )
 
@@ -1860,14 +1908,14 @@ def _render_custom_view(
         )
 
         quick_card5.metric(
-            "Change",
+            "Vs baseline",
             _format_percent(
                 focus_change
             ),
         )
 
         quick_card6.metric(
-            "Anomaly days",
+            "Stress-anomaly days",
             f"{focus_anomaly_days:,}",
         )
 
@@ -1877,9 +1925,8 @@ def _render_custom_view(
 
         st.caption(
             (
-                f"{map_focus} · "
-                f"{zones_in_view:,} zones "
-                "in the focus group"
+                f"{geography_label} · "
+                f"{zones_in_view:,} zones"
             )
         )
 
@@ -1929,9 +1976,7 @@ st.write(
     )
 )
 
-st.markdown(
-    "**Choose a mobility story**"
-)
+st.header("Featured mobility stories")
 
 
 # ---------------------------------------------------------------------
@@ -2011,9 +2056,7 @@ else:
 
 st.divider()
 
-st.markdown(
-    "### Build your own Mobility Pulse"
-)
+st.header("Explore Mobility Pulse patterns")
 
 st.write(
     (
@@ -2025,9 +2068,9 @@ st.write(
 st.info(
     (
         "Custom interactive animations are generated only after you click "
-        "**Build custom animation**. Broad views are computationally much "
-        "more expensive than the saved videos and may take several minutes "
-        "on the hosted app."
+        "**Build custom animation**. Long windows are sampled to keep the "
+        "interactive view responsive; the curated stories use every available "
+        "observation date."
     )
 )
 
@@ -2129,14 +2172,14 @@ with st.expander(
         with control3:
             custom_show_anomalies = (
                 st.checkbox(
-                    "Show anomalies",
+                    "Show stress anomalies",
                     value=True,
                     key=(
                         "mobility_pulse_custom_anomalies"
                     ),
                     help=(
-                        "Show selected-finalist anomaly events where the "
-                        "displayed metric was identified as an event driver."
+                        "Show stress anomalies where the displayed metric "
+                        "was identified as one of the event drivers."
                     ),
                 )
             )
@@ -2256,15 +2299,13 @@ if custom_submitted:
 
 st.divider()
 
-st.markdown(
-    "### How to read this page"
-)
+st.header("How to read this page")
 
 st.markdown(
     """
     - **Map color:** teal means the displayed metric is above that Taxi Zone's own pre-CP reference; terracotta means it is below.
-    - **Orange dot:** at least one selected-finalist anomaly occurred on that date where the displayed metric was identified as an event driver.
+    - **Orange dot:** at least one stress anomaly occurred on that date where the displayed metric was identified as an event driver. The production stress-anomaly surface retains events identified by all three anomaly-detection methods.
     - **Curated stories:** pre-rendered and use every available observation date in the selected period.
-    - **Custom animations:** interactive, generated only when requested, and currently capped at roughly 120 frames for responsiveness.
+    - **Custom animations:** interactive and generated only when requested. Long windows are sampled to keep playback responsive.
     """
 )

@@ -22,6 +22,7 @@ from app.utils.project_branding import (
     BRAND_COLORS,
     apply_branding,
     inject_app_css,
+    render_chart_insight,
 )
 
 
@@ -2335,7 +2336,7 @@ hero_fig = build_dumbbell_chart(
 
 st.plotly_chart(
     hero_fig,
-    use_container_width=True,
+    width="stretch",
     config={
         "displayModeBar": False,
         "responsive": True,
@@ -2343,20 +2344,12 @@ st.plotly_chart(
     key="raw06_static_hero",
 )
 
+render_chart_insight(_build_hero_takeaway(hero_data))
+
 st.caption(
     "Includes only zones with meaningful pre-period activity for both "
     "measures. Hover for pre-CP and post-CP daily averages and absolute "
     "changes."
-)
-
-st.markdown(
-    "#### What stands out"
-)
-
-st.info(
-    _build_hero_takeaway(
-        hero_data
-    )
 )
 
 
@@ -2664,6 +2657,35 @@ geography_context = (
     )
 )
 
+
+def _build_selected_zone_takeaway(
+    zone_evidence: pd.DataFrame,
+    *,
+    zone_name: str,
+    metric_a_label: str,
+    metric_b_label: str,
+) -> str:
+    """Summarize the strongest time-bucket disagreement for one zone."""
+    if zone_evidence.empty:
+        return "No eligible time-bucket evidence is available for this zone."
+
+    opposite = zone_evidence[zone_evidence["opposite_direction"]].copy()
+    source = opposite if not opposite.empty else zone_evidence
+    strongest = source.loc[source["absolute_divergence"].idxmax()]
+    relationship = _direction_label(
+        str(strongest["direction_relationship"]),
+        metric_a_label=metric_a_label,
+        metric_b_label=metric_b_label,
+    )
+    opposite_count = int(opposite["temporal_bucket"].nunique())
+
+    return (
+        f"**{zone_name}** shows opposite movement in **{opposite_count} of "
+        f"{zone_evidence['temporal_bucket'].nunique()} eligible buckets**. The "
+        f"largest displayed gap occurs during **{strongest['temporal_bucket_label']}**: "
+        f"**{relationship}**, separated by "
+        f"**{float(strongest['absolute_divergence']):.1f} percentage points**."
+    )
 largest_tab, recurrence_tab = st.tabs(
     [
         "Largest divergences",
@@ -2795,16 +2817,10 @@ with largest_tab:
                 "Island cannot appear when Subway Ridership is selected."
             )
 
-        st.markdown(
-            "#### What stands out in this view"
-        )
-
-        st.info(
-            _build_explorer_takeaway(
-                filtered_data,
-                metric_a_label=metric_a_label,
-                metric_b_label=metric_b_label,
-            )
+        explorer_takeaway = _build_explorer_takeaway(
+            filtered_data,
+            metric_a_label=metric_a_label,
+            metric_b_label=metric_b_label,
         )
 
         explorer_fig = build_dumbbell_chart(
@@ -2825,7 +2841,7 @@ with largest_tab:
 
         st.plotly_chart(
             explorer_fig,
-            use_container_width=True,
+            width="stretch",
             config={
                 "displayModeBar": False,
                 "responsive": True,
@@ -2841,6 +2857,7 @@ with largest_tab:
                 f"{top_n}"
             ),
         )
+        render_chart_insight(explorer_takeaway)
 
         st.caption(
             "Longer connectors indicate a larger percentage-point gap. "
@@ -2860,7 +2877,7 @@ with largest_tab:
 
             st.dataframe(
                 detail,
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
 
@@ -2936,16 +2953,10 @@ with recurrence_tab:
             f"{minimum_divergence:.0f} pp"
         )
 
-        st.markdown(
-            "#### What recurrence adds"
-        )
-
-        st.info(
-            _build_recurrence_takeaway(
-                filtered_recurrence,
-                metric_a_label=metric_a_label,
-                metric_b_label=metric_b_label,
-            )
+        recurrence_takeaway = _build_recurrence_takeaway(
+            filtered_recurrence,
+            metric_a_label=metric_a_label,
+            metric_b_label=metric_b_label,
         )
 
         recurrence_fig = build_recurrence_dot_plot(
@@ -2963,7 +2974,7 @@ with recurrence_tab:
 
         st.plotly_chart(
             recurrence_fig,
-            use_container_width=True,
+            width="stretch",
             config={
                 "displayModeBar": False,
                 "responsive": True,
@@ -2978,6 +2989,7 @@ with recurrence_tab:
                 f"{recurrence_top_n}"
             ),
         )
+        render_chart_insight(recurrence_takeaway)
 
         st.caption(
             "Horizontal position is the share of eligible temporal buckets "
@@ -3026,7 +3038,7 @@ with recurrence_tab:
 
         st.plotly_chart(
             selected_zone_fig,
-            use_container_width=True,
+            width="stretch",
             config={
                 "displayModeBar": False,
                 "responsive": True,
@@ -3036,6 +3048,15 @@ with recurrence_tab:
                 f"{selected_zone_id}_"
                 f"{metric_a}_{metric_b}"
             ),
+        )
+
+        render_chart_insight(
+            _build_selected_zone_takeaway(
+                selected_zone_evidence,
+                zone_name=selected_zone_name,
+                metric_a_label=metric_a_label,
+                metric_b_label=metric_b_label,
+            )
         )
 
         st.caption(
@@ -3053,7 +3074,7 @@ with recurrence_tab:
 
             st.dataframe(
                 recurrence_detail,
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
                 column_config={
                     "Inverse bucket share": (
