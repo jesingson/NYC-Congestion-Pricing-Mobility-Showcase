@@ -959,15 +959,42 @@ with daily_tab:
         display_col = f"{metric}_display"
         chart = go.Figure()
         if smoothing_window is not None:
-            chart.add_trace(go.Scatter(
-                x=daily_df["date"], y=daily_df[metric], mode="lines",
-                name="Daily value", line={"color": "rgba(0,109,119,0.25)"},
-            ))
-        chart.add_trace(go.Scatter(
-            x=daily_df["date"], y=daily_df[display_col], mode="lines",
-            name=smoothing_window_label if smoothing_window else "Daily value",
-            line={"color": BRAND_COLORS["dark_teal"], "width": 3},
-        ))
+            chart.add_trace(
+                go.Scatter(
+                    x=daily_df["date"],
+                    y=daily_df[metric],
+                    mode="lines",
+                    name="Daily value",
+                    line={"color": "rgba(0,109,119,0.25)"},
+                    hovertemplate=(
+                        "Date: %{x|%b %d, %Y}<br>"
+                        f"{label}: %{{y:,.1f}}"
+                        "<extra>%{fullData.name}</extra>"
+                    ),
+                )
+            )
+
+        chart.add_trace(
+            go.Scatter(
+                x=daily_df["date"],
+                y=daily_df[display_col],
+                mode="lines",
+                name=(
+                    smoothing_window_label
+                    if smoothing_window
+                    else "Daily value"
+                ),
+                line={
+                    "color": BRAND_COLORS["dark_teal"],
+                    "width": 3,
+                },
+                hovertemplate=(
+                    "Date: %{x|%b %d, %Y}<br>"
+                    f"{label}: %{{y:,.1f}}"
+                    "<extra>%{fullData.name}</extra>"
+                ),
+            )
+        )
         if date_range[0] <= CONGESTION_PRICING_START_DATE <= date_range[1]:
             chart.add_vline(
                 x=CONGESTION_PRICING_START_DATE, line_dash="dash",

@@ -2875,10 +2875,43 @@ with largest_tab:
                 metric_b_label=metric_b_label,
             )
 
+            detail_column_config = {}
+
+            for column in detail.columns:
+                if column.endswith(" · Pre") or column.endswith(" · Post"):
+                    detail_column_config[column] = (
+                        st.column_config.NumberColumn(
+                            column,
+                            format="%,.1f",
+                        )
+                    )
+                elif column.endswith(" · Daily-average change"):
+                    detail_column_config[column] = (
+                        st.column_config.NumberColumn(
+                            column,
+                            format="%+,.1f",
+                        )
+                    )
+                elif column.endswith(" · Percent change"):
+                    detail_column_config[column] = (
+                        st.column_config.NumberColumn(
+                            column,
+                            format="%+.1f%%",
+                        )
+                    )
+                elif column == "Divergence":
+                    detail_column_config[column] = (
+                        st.column_config.NumberColumn(
+                            column,
+                            format="%.1f pp",
+                        )
+                    )
+
             st.dataframe(
                 detail,
                 width="stretch",
                 hide_index=True,
+                column_config=detail_column_config,
             )
 
 with recurrence_tab:

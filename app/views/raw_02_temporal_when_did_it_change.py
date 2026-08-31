@@ -484,35 +484,39 @@ def _selected_metric_card_labels(bucket_df: pd.DataFrame) -> dict[str, str]:
 
 
 def _display_summary_table(summary_df: pd.DataFrame) -> None:
-    """Display formatted temporal-bucket summary table."""
+    """Display the temporal-bucket summary with controlled precision."""
+    display_table = format_temporal_bucket_summary_for_display(
+        summary_df
+    )
+
     st.dataframe(
-        format_temporal_bucket_summary_for_display(summary_df),
+        display_table,
         width="stretch",
         hide_index=True,
         column_config={
             "Pre-CP daily avg": st.column_config.NumberColumn(
                 "Pre-CP daily avg",
-                format="localized",
+                format="%,.1f",
             ),
             "Post-CP daily avg": st.column_config.NumberColumn(
                 "Post-CP daily avg",
-                format="localized",
+                format="%,.1f",
             ),
             "Abs. change": st.column_config.NumberColumn(
                 "Abs. change",
-                format="localized",
+                format="%+,.1f",
             ),
             "% change": st.column_config.NumberColumn(
                 "% change",
-                format="%.2f%%",
+                format="%+.1f%%",
             ),
             "Pre observed days": st.column_config.NumberColumn(
                 "Pre observed days",
-                format="localized",
+                format="%d",
             ),
             "Post observed days": st.column_config.NumberColumn(
                 "Post observed days",
-                format="localized",
+                format="%d",
             ),
         },
     )

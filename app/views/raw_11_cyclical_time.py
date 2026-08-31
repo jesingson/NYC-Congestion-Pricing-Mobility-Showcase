@@ -1608,8 +1608,48 @@ if show_data_table:
             "display_index",
         ])
     display_table = daily[table_columns].copy()
-    display_table["date"] = pd.to_datetime(display_table["date"]).dt.strftime("%Y-%m-%d")
-    st.dataframe(display_table, width="stretch", hide_index=True, height=320)
+    display_table["date"] = (
+        pd.to_datetime(display_table["date"])
+        .dt.strftime("%Y-%m-%d")
+    )
+
+    float_columns = display_table.select_dtypes(
+        include=["floating"]
+    ).columns.tolist()
+
+    integer_columns = display_table.select_dtypes(
+        include=["integer"]
+    ).columns.tolist()
+
+    display_table[float_columns] = display_table[
+        float_columns
+    ].round(1)
+
+    table_column_config = {
+        column: st.column_config.NumberColumn(
+            column,
+            format="%,.1f",
+        )
+        for column in float_columns
+    }
+
+    table_column_config.update(
+        {
+            column: st.column_config.NumberColumn(
+                column,
+                format="%,d",
+            )
+            for column in integer_columns
+        }
+    )
+
+    st.dataframe(
+        display_table,
+        width="stretch",
+        hide_index=True,
+        height=320,
+        column_config=table_column_config,
+    )
 
 with st.expander("How to read these numbers", expanded=False):
     st.markdown(
