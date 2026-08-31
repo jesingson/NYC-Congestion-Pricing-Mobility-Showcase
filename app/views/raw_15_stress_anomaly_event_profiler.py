@@ -1426,11 +1426,39 @@ st.write(
 )
 
 all_events, all_diagnostics = _load_profiler_data()
-zone_options = sorted(all_events["zone_label"].dropna().unique().tolist())
-default_zone_label = next(
-    (label for label in zone_options if label.startswith("Brooklyn Navy Yard ·")),
-    zone_options[0],
+
+# Honor an event handed off from Raw 13 before initializing the controls.
+# The event ID is the canonical key; its zone and date determine the initial
+# context shown by this page.
+handoff_event_id = str(
+    st.session_state.get("raw15_selected_event_id", "")
 )
+handoff_rows = all_events.loc[
+    all_events[EVENT_ID_COLUMN].astype(str).eq(handoff_event_id)
+]
+handoff_event = (
+    handoff_rows.iloc[0]
+    if not handoff_rows.empty
+    else None
+)
+
+zone_options = sorted(all_events["zone_label"].dropna().unique().tolist())
+if handoff_event is not None and handoff_event["zone_label"] in zone_options:
+    default_zone_label = handoff_event["zone_label"]
+else:
+    default_zone_label = next(
+        (
+            label
+            for label in zone_options
+            if label.startswith("Brooklyn Navy Yard ·")
+        ),
+        zone_options[0],
+    )
+
+# Set the widget state only when arriving from another page. This avoids
+# overwriting a user's later selections on ordinary Streamlit reruns.
+if handoff_event is not None:
+    st.session_state["raw15_zone"] = default_zone_label
 
 control_1, control_2 = st.columns([1, 1.35])
 with control_1:
@@ -1441,12 +1469,30 @@ with control_1:
         key="raw15_zone",
     )
 
-zone_events = all_events.loc[all_events["zone_label"].eq(selected_zone_label)].copy()
+zone_events = all_events.loc[
+    all_events["zone_label"].eq(selected_zone_label)
+].copy()
 zone_min_date = zone_events["date"].min().date()
 zone_max_date = zone_events["date"].max().date()
-if selected_zone_label == default_zone_label:
-    default_start = max(zone_min_date, (pd.Timestamp("2025-03-02") - pd.DateOffset(months=6)).date())
-    default_end = min(zone_max_date, (pd.Timestamp("2025-03-02") + pd.DateOffset(months=6)).date())
+if handoff_event is not None and selected_zone_label == default_zone_label:
+    handoff_date = pd.Timestamp(handoff_event["date"]).date()
+    default_start = max(
+        zone_min_date,
+        handoff_date - pd.Timedelta(days=90),
+    )
+    default_end = min(
+        zone_max_date,
+        handoff_date + pd.Timedelta(days=90),
+    )
+elif selected_zone_label == default_zone_label:
+    default_start = max(
+        zone_min_date,
+        (pd.Timestamp("2025-03-02") - pd.DateOffset(months=6)).date(),
+    )
+    default_end = min(
+        zone_max_date,
+        (pd.Timestamp("2025-03-02") + pd.DateOffset(months=6)).date(),
+    )
 else:
     default_end = zone_max_date
     default_start = max(zone_min_date, (pd.Timestamp(default_end) - pd.DateOffset(months=12)).date())
@@ -1520,12 +1566,17 @@ else:
     label_to_id = dict(
         zip(filtered_events["event_label"], filtered_events[EVENT_ID_COLUMN])
     )
-    default_event_id = (
-        FROZEN_HERO_EVENT_ID
-        if FROZEN_HERO_EVENT_ID in set(filtered_events[EVENT_ID_COLUMN])
-        else str(filtered_events.iloc[0][EVENT_ID_COLUMN])
-    )
     valid_event_ids = set(filtered_events[EVENT_ID_COLUMN].astype(str))
+    handed_off_event_is_visible = handoff_event_id in valid_event_ids
+    default_event_id = (
+        handoff_event_id
+        if handed_off_event_is_visible
+        else (
+            FROZEN_HERO_EVENT_ID
+            if FROZEN_HERO_EVENT_ID in valid_event_ids
+            else str(filtered_events.iloc[0][EVENT_ID_COLUMN])
+        )
+    )
     if str(st.session_state.get("raw15_selected_event_id", "")) not in valid_event_ids:
         st.session_state["raw15_selected_event_id"] = default_event_id
     selected_event_id = str(st.session_state["raw15_selected_event_id"])

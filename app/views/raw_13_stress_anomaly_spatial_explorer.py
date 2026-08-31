@@ -104,8 +104,8 @@ MAP_CENTER = {
     "lon": -74.0060,
 }
 
-EVENT_DIAGNOSIS_PAGE = Path(__file__).with_name(
-    "raw_15_stress_anomaly_event_diagnosis.py"
+EVENT_PROFILER_PAGE = Path(__file__).with_name(
+    "raw_15_stress_anomaly_event_profiler.py"
 )
 
 ALL_TEMPORAL_BUCKETS = "All temporal buckets"
@@ -2228,22 +2228,22 @@ else:
         )
         st.session_state["raw15_selected_event_id"] = selected_event_id
 
-        if EVENT_DIAGNOSIS_PAGE.exists():
+        if EVENT_PROFILER_PAGE.exists():
             st.page_link(
-                "views/raw_15_stress_anomaly_event_diagnosis.py",
-                label="Open this event in Stress Anomaly Event Diagnosis",
+                "views/raw_15_stress_anomaly_event_profiler.py",
+                label="Open this event in Stress Anomaly Event Profiler",
                 icon=":material/troubleshoot:",
             )
         else:
             st.button(
-                "Open this event in Stress Anomaly Event Diagnosis",
+                "Open this event in Stress Anomaly Event Profiler",
                 disabled=True,
                 help=(
-                    "Page 15 is now scoped but has not yet been built. The "
-                    "selected event ID is already stored for the future handoff."
+                    "The selected event ID has been saved, but Page 15 "
+                    "could not be found at the expected path."
                 ),
             )
             st.caption(
-                "Page 15 is planned. This selection is already wired to pass "
-                "the chosen event into that future diagnostic page."
+                "The selected event is ready to pass to Stress Anomaly "
+                "Event Profiler once the page is available."
             )

@@ -1,4 +1,4 @@
-"""Raw 17 — Weather and Stress Episodes."""
+"""Raw 17 — Weather and Stress Episodes with clarified temporal-bucket analysis."""
 
 from __future__ import annotations
 
@@ -22,7 +22,68 @@ HANDOFF_PATH = (
 )
 MIN_ZONE_EXPOSED_CONTEXTS = 25
 MIN_ZONE_EXPOSED_DATES = 10
+MIN_DAILY_CONDITION_CONTEXTS = 25
 HERO_LABEL = "Unusually cold"
+CP_START_DATE = pd.Timestamp("2025-01-05")
+STRESS_TYPE_OPTIONS = [
+    "All stress anomalies",
+    "Congestion-related",
+    "Demand-related",
+    "Combined congestion + demand",
+]
+MODALITY_OPTIONS = ["All modes", "Taxi", "FHVHV", "Subway", "Bus"]
+METRIC_TO_MODE = {
+    "taxi_trip_count": "Taxi",
+    "taxi_avg_trip_speed": "Taxi",
+    "taxi_avg_trip_duration": "Taxi",
+    "fhvhv_trip_count": "FHVHV",
+    "fhvhv_avg_trip_speed": "FHVHV",
+    "fhvhv_avg_trip_duration": "FHVHV",
+    "subway_ridership": "Subway",
+    "subway_transfers": "Subway",
+    "bus_trip_count": "Bus",
+    "avg_bus_speed": "Bus",
+}
+METRIC_LABELS = {
+    "taxi_trip_count": "Taxi trips",
+    "taxi_avg_trip_speed": "Taxi average speed",
+    "taxi_avg_trip_duration": "Taxi average duration",
+    "fhvhv_trip_count": "FHVHV trips",
+    "fhvhv_avg_trip_speed": "FHVHV average speed",
+    "fhvhv_avg_trip_duration": "FHVHV average duration",
+    "subway_ridership": "Subway ridership",
+    "subway_transfers": "Subway transfers",
+    "bus_trip_count": "Bus trips",
+    "avg_bus_speed": "Bus average speed",
+}
+DEMAND_METRICS = {
+    "taxi_trip_count",
+    "fhvhv_trip_count",
+    "subway_ridership",
+    "subway_transfers",
+    "bus_trip_count",
+}
+CONGESTION_METRICS = {
+    "taxi_avg_trip_speed",
+    "taxi_avg_trip_duration",
+    "fhvhv_avg_trip_speed",
+    "fhvhv_avg_trip_duration",
+    "avg_bus_speed",
+}
+MODALITIES_BY_STRESS_TYPE = {
+    "All stress anomalies": MODALITY_OPTIONS,
+    "Congestion-related": ["All modes", "Taxi", "FHVHV", "Bus"],
+    "Demand-related": ["All modes", "Taxi", "FHVHV", "Subway"],
+    "Combined congestion + demand": ["All modes", "Taxi", "FHVHV"],
+}
+STRESS_TYPES_BY_MODALITY = {
+    "All modes": STRESS_TYPE_OPTIONS,
+    "Taxi": STRESS_TYPE_OPTIONS,
+    "FHVHV": STRESS_TYPE_OPTIONS,
+    "Subway": ["All stress anomalies", "Demand-related"],
+    "Bus": ["All stress anomalies", "Congestion-related"],
+}
+TIME_SCOPE_OPTIONS = ["Full period", "Pre-CP", "Post-CP", "Custom dates"]
 
 CONDITIONS = {
     "Measurable precipitation": {
@@ -66,22 +127,40 @@ CONDITIONS = {
         "definition": "The highest 10% of absolute three-hour pressure changes.",
     },
 }
+WEATHER_METRIC_LABELS = {
+    "precipitation": "precipitation",
+    "visibility": "visibility",
+    "wind_speed": "sustained-wind",
+    "wind_gust": "wind-gust",
+    "temperature": "temperature",
+    "pressure_3hr_change": "pressure-change",
+}
 
 
-@st.cache_data(show_spinner="Loading weather and stress-anomaly contexts...")
+@st.cache_data(show_spinner="Loading weather and stress-anomaly observations...")
 def load_weather_stress_surface() -> pd.DataFrame:
     """Enrich the 3.4.2 handoff with weather eligibility and readable geography."""
-    flag_columns = [spec["flag"] for spec in CONDITIONS.values()]
-    handoff_columns = [
+    # Read the complete compact handoff so approved cluster, policy-geography,
+    # and stress-family fields remain available to the investigation controls.
+    frame = pd.read_parquet(HANDOFF_PATH)
+    required_columns = {
         "comparison_event_id", "taxi_zone_id", "date", "temporal_bucket",
         "selected_finalist_flag", "weather_available_flag",
-        "policy_geography_label", *flag_columns,
-    ]
-    frame = pd.read_parquet(HANDOFF_PATH, columns=handoff_columns)
+    }
+    missing_columns = required_columns.difference(frame.columns)
+    if missing_columns:
+        raise ValueError(
+            "The weather/stress handoff is missing required columns: "
+            f"{sorted(missing_columns)}"
+        )
     frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
     frame["selected_finalist_flag"] = (
         frame["selected_finalist_flag"].fillna(False).astype(bool)
     )
+    # Preserve an immutable copy of the complete stress-anomaly outcome. Every
+    # interactive stress-family view is derived from this field so changing a
+    # filter can never overwrite the source outcome used by a later rerun.
+    frame["all_stress_anomaly_flag"] = frame["selected_finalist_flag"]
     frame = frame.loc[frame["weather_available_flag"].fillna(False).astype(bool)].copy()
 
     # The 1.3.1 mobility panel preserves the authoritative raw-to-canonical
@@ -100,7 +179,27 @@ def load_weather_stress_surface() -> pd.DataFrame:
     frame["taxi_zone_id"] = pd.to_numeric(
         frame["taxi_zone_id"], errors="coerce"
     ).astype("Int64")
-    frame = frame.merge(zone_bridge, on="taxi_zone_id", how="left", validate="many_to_one")
+    existing_zone = "zone" in frame.columns
+    existing_borough = "borough" in frame.columns
+    existing_canonical_id = "canonical_location_id" in frame.columns
+    frame = frame.merge(
+        zone_bridge,
+        on="taxi_zone_id",
+        how="left",
+        suffixes=("", "_bridge"),
+        validate="many_to_one",
+    )
+    if existing_zone:
+        frame["zone"] = frame["zone"].fillna(frame["zone_bridge"])
+        frame = frame.drop(columns="zone_bridge")
+    if existing_borough:
+        frame["borough"] = frame["borough"].fillna(frame["borough_bridge"])
+        frame = frame.drop(columns="borough_bridge")
+    if existing_canonical_id:
+        frame["canonical_location_id"] = frame["canonical_location_id"].fillna(
+            frame["canonical_location_id_bridge"]
+        )
+        frame = frame.drop(columns="canonical_location_id_bridge")
 
     # Actual weather measures distinguish a condition that is absent from a
     # condition that cannot be evaluated because its source measure is missing.
@@ -124,15 +223,211 @@ def load_weather_stress_surface() -> pd.DataFrame:
     if len(frame) != row_count:
         raise ValueError("The canonical weather join changed the event-context grain.")
 
+    # Pull the established Showcase anomaly-family and modality contracts from
+    # the canonical selected-event export. This avoids reconstructing them from
+    # weather-handoff fields that may be absent or encoded differently.
+    selected_events = load_selected_anomaly_events()
+    anomaly_detail_columns = [
+        column
+        for column in [
+            "has_congestion_oriented",
+            "has_positive_demand_shock",
+            "stress_family_exclusive",
+            "event_modality_driver_list",
+            "event_metric_driver_list",
+        ]
+        if column in selected_events.columns
+    ]
+    if anomaly_detail_columns:
+        event_details = selected_events[
+            ["comparison_event_id", *anomaly_detail_columns]
+        ].drop_duplicates("comparison_event_id")
+        frame = frame.merge(
+            event_details,
+            on="comparison_event_id",
+            how="left",
+            suffixes=("", "_event"),
+            validate="one_to_one",
+        )
+        for column in anomaly_detail_columns:
+            event_column = f"{column}_event"
+            if event_column in frame.columns:
+                frame[column] = frame[event_column].combine_first(frame[column])
+                frame = frame.drop(columns=event_column)
+
     frame["calendar_month"] = frame["date"].dt.month
     frame["weekday_weekend"] = np.where(
         frame["date"].dt.dayofweek.ge(5), "Weekend", "Weekday"
     )
-    frame["policy_geography_label"] = frame["policy_geography_label"].fillna("Unknown")
+    frame["zone"] = frame["zone"].fillna("Unknown")
+    frame["borough"] = frame["borough"].fillna("Unknown")
+    frame["policy_geography_label"] = frame.get(
+        "policy_geography_label",
+        pd.Series(index=frame.index, dtype="object"),
+    ).fillna("Unknown")
+    frame["canonical_cluster_name"] = frame.get(
+        "canonical_cluster_name",
+        pd.Series(index=frame.index, dtype="object"),
+    ).fillna("Unassigned")
     return frame
 
 
-def condition_comparison(frame: pd.DataFrame, condition_label: str) -> dict[str, float]:
+def stress_type_flag(frame: pd.DataFrame, stress_type: str) -> pd.Series:
+    """Identify the requested stress-anomaly family without removing denominator rows."""
+    selected = frame["all_stress_anomaly_flag"].fillna(False).astype(bool)
+    if stress_type == "All stress anomalies":
+        return selected
+
+    # Use the same authoritative event-family flags as the existing stress-
+    # anomaly Showcase pages. Older handoffs fall back to the exclusive label,
+    # followed only as a last resort by the attribution counts.
+    has_family_flags = {
+        "has_congestion_oriented",
+        "has_positive_demand_shock",
+    }.issubset(frame.columns)
+    if has_family_flags:
+        congestion_driver = frame["has_congestion_oriented"].fillna(False).astype(bool)
+        demand_driver = frame["has_positive_demand_shock"].fillna(False).astype(bool)
+    elif "stress_family_exclusive" in frame.columns:
+        exclusive_family = frame["stress_family_exclusive"].fillna("").astype(str)
+        congestion_driver = exclusive_family.isin(["Congestion-only", "Both"])
+        demand_driver = exclusive_family.isin(["Demand-only", "Both"])
+    elif {
+        "stress_congestion_metric_count",
+        "stress_positive_demand_metric_count",
+    }.issubset(frame.columns):
+        congestion_driver = pd.to_numeric(
+            frame["stress_congestion_metric_count"], errors="coerce"
+        ).fillna(0).gt(0)
+        demand_driver = pd.to_numeric(
+            frame["stress_positive_demand_metric_count"], errors="coerce"
+        ).fillna(0).gt(0)
+    else:
+        family_column = next(
+            (
+                column
+                for column in ["stress_family", "positive_direction_profile"]
+                if column in frame.columns
+            ),
+            None,
+        )
+        if family_column is None:
+            return pd.Series(False, index=frame.index)
+        stress_family = frame[family_column].fillna("").astype(str).str.lower()
+        congestion_driver = stress_family.str.contains("congestion")
+        demand_driver = stress_family.str.contains("demand")
+
+    if stress_type == "Congestion-related":
+        family_match = congestion_driver
+    elif stress_type == "Demand-related":
+        family_match = demand_driver
+    else:
+        family_match = congestion_driver & demand_driver
+    return selected & family_match
+
+
+def modality_flag(frame: pd.DataFrame, modality: str) -> pd.Series:
+    """Identify stress anomalies attributed to the selected mobility mode."""
+    selected = frame["all_stress_anomaly_flag"].fillna(False).astype(bool)
+    if modality == "All modes":
+        return selected
+
+    driver_column = next(
+        (
+            column
+            for column in [
+                "event_modality_driver_list",
+                "stress_modality_driver_list",
+            ]
+            if column in frame.columns
+        ),
+        None,
+    )
+    if driver_column is None:
+        return pd.Series(False, index=frame.index)
+
+    normalized_drivers = (
+        frame[driver_column]
+        .fillna("")
+        .astype(str)
+        .str.split(",")
+        .apply(lambda values: {value.strip() for value in values if value.strip()})
+    )
+    return selected & normalized_drivers.apply(lambda values: modality in values)
+
+
+def apply_analysis_scope(
+    frame: pd.DataFrame,
+    geography_dimension: str,
+    geography_segment: str,
+    stress_type: str,
+    modality: str,
+    temporal_bucket: str,
+    start_date: pd.Timestamp,
+    end_date: pd.Timestamp,
+) -> pd.DataFrame:
+    """Apply one geography segmentation and preserve the full denominator."""
+    scoped = frame.copy()
+    geography_column = {
+        "Borough": "borough",
+        "Policy geography": "policy_geography_label",
+        "Mobility environment": "canonical_cluster_name",
+    }.get(geography_dimension)
+    if geography_column is not None and geography_segment != "All segments":
+        scoped = scoped.loc[scoped[geography_column].eq(geography_segment)]
+
+    if temporal_bucket != "All temporal buckets":
+        scoped = scoped.loc[scoped["temporal_bucket"].eq(temporal_bucket)]
+
+    scoped = scoped.loc[
+        scoped["date"].between(start_date, end_date, inclusive="both")
+    ].copy()
+
+    family_outcome = stress_type_flag(scoped, stress_type)
+    mode_outcome = modality_flag(scoped, modality)
+    scoped["selected_finalist_flag"] = family_outcome & mode_outcome
+    return scoped
+
+
+def format_temporal_bucket(value: str) -> str:
+    """Convert the stored temporal-bucket key into a reader-facing label."""
+    if value == "All temporal buckets":
+        return value
+    replacements = {"am": "AM", "pm": "PM"}
+    return " ".join(
+        replacements.get(token, token.title())
+        for token in str(value).split("_")
+    )
+
+
+def analysis_scope_label(
+    geography_dimension: str,
+    geography_segment: str,
+    stress_type: str,
+    modality: str,
+    temporal_bucket: str,
+    time_scope: str,
+) -> str:
+    """Build a plain-language label for the active investigation scope."""
+    selected_values = []
+    if geography_dimension != "All NYC" and geography_segment != "All segments":
+        selected_values.append(geography_segment)
+    if stress_type != "All stress anomalies":
+        selected_values.append(stress_type)
+    if modality != "All modes":
+        selected_values.append(modality)
+    if temporal_bucket != "All temporal buckets":
+        selected_values.append(format_temporal_bucket(temporal_bucket))
+    if time_scope != "Full period":
+        selected_values.append(time_scope)
+    return " · ".join(selected_values) if selected_values else "All NYC mobility observations"
+
+
+def condition_comparison(
+    frame: pd.DataFrame,
+    condition_label: str,
+    policy_geography_fixed: bool = False,
+) -> dict[str, float]:
     """Return overall and like-for-like anomaly incidence for one condition."""
     spec = CONDITIONS[condition_label]
     eligible = frame[spec["metric"]].notna()
@@ -142,13 +437,33 @@ def condition_comparison(frame: pd.DataFrame, condition_label: str) -> dict[str,
     )
 
     present = condition_frame["condition_present"]
-    present_rate = 100 * condition_frame.loc[present, "selected_finalist_flag"].mean()
-    absent_rate = 100 * condition_frame.loc[~present, "selected_finalist_flag"].mean()
+    present_contexts = int(present.sum())
+    present_dates = int(condition_frame.loc[present, "date"].nunique())
+    if present_contexts == 0 or not (~present).any():
+        return {
+            "eligible_contexts": len(condition_frame),
+            "present_contexts": present_contexts,
+            "present_share": np.nan,
+            "present_dates": present_dates,
+            "overall_present": np.nan,
+            "overall_absent": np.nan,
+            "overall_difference": np.nan,
+            "adjusted_present": np.nan,
+            "adjusted_absent": np.nan,
+            "adjusted_difference": np.nan,
+            "contributing_strata": 0,
+        }
 
-    strata = [
-        "temporal_bucket", "weekday_weekend", "calendar_month",
-        "policy_geography_label",
-    ]
+    present_rate = 100 * condition_frame.loc[
+        present, "selected_finalist_flag"
+    ].mean()
+    absent_rate = 100 * condition_frame.loc[
+        ~present, "selected_finalist_flag"
+    ].mean()
+
+    strata = ["temporal_bucket", "weekday_weekend", "calendar_month"]
+    if not policy_geography_fixed:
+        strata.append("policy_geography_label")
     grouped = (
         condition_frame.groupby(strata + ["condition_present"], dropna=False)
         .agg(
@@ -164,15 +479,23 @@ def condition_comparison(frame: pd.DataFrame, condition_label: str) -> dict[str,
         how="inner",
         suffixes=("_present", "_absent"),
     )
-    paired["weight"] = paired["contexts_present"] + paired["contexts_absent"]
-    adjusted_present = np.average(paired["incidence_present"], weights=paired["weight"])
-    adjusted_absent = np.average(paired["incidence_absent"], weights=paired["weight"])
+    if paired.empty:
+        adjusted_present = np.nan
+        adjusted_absent = np.nan
+    else:
+        paired["weight"] = paired["contexts_present"] + paired["contexts_absent"]
+        adjusted_present = np.average(
+            paired["incidence_present"], weights=paired["weight"]
+        )
+        adjusted_absent = np.average(
+            paired["incidence_absent"], weights=paired["weight"]
+        )
 
     return {
         "eligible_contexts": len(condition_frame),
-        "present_contexts": int(present.sum()),
+        "present_contexts": present_contexts,
         "present_share": 100 * present.mean(),
-        "present_dates": condition_frame.loc[present, "date"].nunique(),
+        "present_dates": present_dates,
         "overall_present": present_rate,
         "overall_absent": absent_rate,
         "overall_difference": present_rate - absent_rate,
@@ -211,16 +534,27 @@ def daily_condition_summary(frame: pd.DataFrame, condition_label: str) -> pd.Dat
     return daily
 
 
-def zone_condition_summary(frame: pd.DataFrame, condition_label: str) -> pd.DataFrame:
-    """Rank supported zones across the full study for one condition."""
+def zone_condition_summary(
+    frame: pd.DataFrame,
+    condition_label: str,
+    episode_date: object | None = None,
+) -> pd.DataFrame:
+    """Rank zones for the full study or a selected weather-active date."""
     spec = CONDITIONS[condition_label]
     zone_frame = frame.loc[frame[spec["metric"]].notna()].copy()
+    if episode_date is not None:
+        zone_frame = zone_frame.loc[
+            zone_frame["date"].dt.date.eq(episode_date)
+        ].copy()
     zone_frame["condition_present"] = zone_frame[spec["flag"]].fillna(False).astype(bool)
     zone_frame["present_anomaly"] = (
         zone_frame["condition_present"] & zone_frame["selected_finalist_flag"]
     )
     zone_frame["absent_anomaly"] = (
         ~zone_frame["condition_present"] & zone_frame["selected_finalist_flag"]
+    )
+    zone_frame["present_date"] = zone_frame["date"].where(
+        zone_frame["condition_present"]
     )
     zones = (
         zone_frame.groupby(["taxi_zone_id", "zone", "borough"], dropna=False)
@@ -229,7 +563,7 @@ def zone_condition_summary(frame: pd.DataFrame, condition_label: str) -> pd.Data
             present_anomalies=("present_anomaly", "sum"),
             absent_contexts=("condition_present", lambda values: (~values).sum()),
             absent_anomalies=("absent_anomaly", "sum"),
-            present_dates=("date", lambda values: values[zone_frame.loc[values.index, "condition_present"]].nunique()),
+            present_dates=("present_date", "nunique"),
         )
         .reset_index()
     )
@@ -243,10 +577,16 @@ def zone_condition_summary(frame: pd.DataFrame, condition_label: str) -> pd.Data
         zones["Condition-present anomaly incidence %"]
         - zones["Condition-absent anomaly incidence %"]
     )
-    return zones.loc[
-        zones["present_contexts"].ge(MIN_ZONE_EXPOSED_CONTEXTS)
-        & zones["present_dates"].ge(MIN_ZONE_EXPOSED_DATES)
+    zones = zones.loc[
+        zones["present_contexts"].gt(0)
+        & zones["absent_contexts"].gt(0)
     ].copy()
+    if episode_date is None:
+        zones = zones.loc[
+            zones["present_contexts"].ge(MIN_ZONE_EXPOSED_CONTEXTS)
+            & zones["present_dates"].ge(MIN_ZONE_EXPOSED_DATES)
+        ].copy()
+    return zones
 
 
 def normalize_modality_drivers(value: object) -> list[str]:
@@ -305,9 +645,101 @@ def modality_composition(condition_label: str) -> pd.DataFrame:
     return summary
 
 
+def scoped_driver_composition(
+    frame: pd.DataFrame,
+    condition_label: str,
+    stress_type: str,
+    episode_date: object | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Summarize only drivers compatible with the selected anomaly family."""
+    spec = CONDITIONS[condition_label]
+    condition_events = frame.loc[
+        frame[spec["metric"]].notna() & frame["selected_finalist_flag"],
+        ["comparison_event_id", "date", spec["flag"]],
+    ].copy()
+    if episode_date is not None:
+        condition_events = condition_events.loc[
+            condition_events["date"].dt.date.eq(episode_date)
+        ].copy()
+    condition_events["Condition group"] = np.where(
+        condition_events[spec["flag"]].fillna(False),
+        "Present",
+        "Absent",
+    )
+
+    selected_events = load_selected_anomaly_events()
+    metric_column = next(
+        (
+            column
+            for column in [
+                "event_metric_driver_list",
+                "stress_metric_driver_list",
+            ]
+            if column in selected_events.columns
+        ),
+        None,
+    )
+    if condition_events.empty or metric_column is None:
+        return pd.DataFrame(), pd.DataFrame()
+
+    drivers = selected_events[["comparison_event_id", metric_column]].merge(
+        condition_events[["comparison_event_id", "Condition group"]],
+        on="comparison_event_id",
+        how="inner",
+        validate="one_to_one",
+    )
+
+    metric_drivers = drivers[["Condition group", metric_column]].copy()
+    metric_drivers["Metric driver"] = metric_drivers[metric_column].apply(
+        normalize_modality_drivers
+    )
+    metric_drivers = metric_drivers.explode("Metric driver").dropna(
+        subset=["Metric driver"]
+    )
+    metric_drivers = metric_drivers.loc[
+        metric_drivers["Metric driver"].isin(METRIC_TO_MODE)
+    ].copy()
+
+    if stress_type == "Congestion-related":
+        metric_drivers = metric_drivers.loc[
+            metric_drivers["Metric driver"].isin(CONGESTION_METRICS)
+        ].copy()
+    elif stress_type == "Demand-related":
+        metric_drivers = metric_drivers.loc[
+            metric_drivers["Metric driver"].isin(DEMAND_METRICS)
+        ].copy()
+
+    if metric_drivers.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    metric_summary = (
+        metric_drivers.groupby(["Condition group", "Metric driver"])
+        .size()
+        .reset_index(name="Driver records")
+    )
+    metric_summary["Composition share %"] = (
+        100
+        * metric_summary["Driver records"]
+        / metric_summary.groupby("Condition group")["Driver records"].transform("sum")
+    )
+
+    metric_drivers["Modality"] = metric_drivers["Metric driver"].map(METRIC_TO_MODE)
+    modality_summary = (
+        metric_drivers.groupby(["Condition group", "Modality"])
+        .size()
+        .reset_index(name="Driver records")
+    )
+    modality_summary["Composition share %"] = (
+        100
+        * modality_summary["Driver records"]
+        / modality_summary.groupby("Condition group")["Driver records"].transform("sum")
+    )
+    return modality_summary, metric_summary
+
+
 def comparison_chart(summary: dict[str, float], title: str) -> go.Figure:
     """Show incidence in comparable contexts with visible values."""
-    labels = ["Weather condition present", "Similar contexts without it"]
+    labels = ["Weather condition present", "Similar observations without it"]
     values = [summary["adjusted_present"], summary["adjusted_absent"]]
     figure = go.Figure(go.Bar(
         x=labels,
@@ -336,20 +768,17 @@ def stability_message(summary: dict[str, float]) -> str:
     adjusted = summary["adjusted_difference"]
     if np.sign(overall) != np.sign(adjusted):
         return (
-            f"The initial comparison shows a **{overall:+.1f} pp** difference, but "
-            f"after comparing similar contexts it changes direction to "
-            f"**{adjusted:+.1f} pp**. The initial direction is not dependable."
+            "The direction reverses after comparing like-for-like observations, so "
+            "the unadjusted pattern is not dependable."
         )
     if abs(adjusted) < 0.5 * abs(overall):
         return (
-            f"The initial difference is **{overall:+.1f} pp** and falls to "
-            f"**{adjusted:+.1f} pp** after comparing similar contexts. When and "
-            "where the weather occurred explains much of the initial difference."
+            "The gap becomes much smaller after the like-for-like comparison, so "
+            "timing and geography explain much of the initial pattern."
         )
     return (
-        f"The initial difference is **{overall:+.1f} pp** and remains "
-        f"**{adjusted:+.1f} pp** after comparing similar contexts. The relationship "
-        "is not explained by the condition simply occurring at different times or places."
+        "The gap remains similar after the like-for-like comparison, so it is not "
+        "explained by when or where the condition occurred."
     )
 
 
@@ -369,34 +798,36 @@ weather_stress_df = load_weather_stress_surface()
 st.caption("WEATHER RELATIONSHIPS")
 st.title("Do recurring weather conditions coincide with more stress anomalies?")
 st.write(
-    "Compare the share of mobility contexts containing a stress anomaly when a "
-    "weather condition is present with otherwise similar contexts where it is "
-    "absent. A mobility context is one Taxi Zone on one date during one time bucket."
+    "Compare how often stress anomalies appear when a weather condition is present "
+    "versus absent. Each observation represents one Taxi Zone during one temporal bucket "
+    "on one date."
 )
 
 hero = condition_comparison(weather_stress_df, HERO_LABEL)
 
 st.divider()
 st.header("What does the full study show?")
-st.markdown(
-    f"**Stress anomalies are more common during unusually cold weather.** After "
-    f"comparing contexts from the same months, day types, time buckets, and policy "
-    f"geographies, anomaly incidence is **{hero['adjusted_present']:.1f}%** when "
-    f"unusually cold conditions are present and **{hero['adjusted_absent']:.1f}%** "
-    f"when they are absent—a **{hero['adjusted_difference']:+.1f} percentage-point "
-    f"difference**."
+st.write(
+    "The fixed view compares unusually cold observations with observations from "
+    "similar months, day types, temporal buckets, and policy geographies."
 )
 st.caption(CONDITIONS[HERO_LABEL]["definition"])
 
 hero_cards = st.columns(4)
 hero_cards[0].metric("During cold weather", f"{hero['adjusted_present']:.1f}%")
-hero_cards[1].metric("Similar contexts without cold", f"{hero['adjusted_absent']:.1f}%")
-hero_cards[2].metric("Difference after matching", f"{hero['adjusted_difference']:+.1f} pp")
+hero_cards[1].metric("Without cold weather", f"{hero['adjusted_absent']:.1f}%")
+hero_cards[2].metric("Difference", f"{hero['adjusted_difference']:+.1f} pp")
 hero_cards[3].metric("Cold-weather dates", f"{hero['present_dates']:,}")
 
 st.plotly_chart(
-    comparison_chart(hero, "Stress anomalies in similar contexts with and without cold weather"),
+    comparison_chart(hero, "Stress anomalies in similar observations with and without cold weather"),
     use_container_width=True,
+)
+st.markdown(
+    f"Stress anomalies were **{hero['adjusted_difference']:+.1f} percentage points** "
+    f"more common during unusually cold weather (**{hero['adjusted_present']:.1f}%**) "
+    f"than in otherwise similar observations without it "
+    f"(**{hero['adjusted_absent']:.1f}%**)."
 )
 
 # ---------------------------------------------------------------------
@@ -404,202 +835,562 @@ st.plotly_chart(
 # ---------------------------------------------------------------------
 
 st.divider()
-st.header("Compare another weather condition")
+st.header("Investigate a weather pattern")
 st.write(
-    "Choose a condition to compare anomaly incidence when that condition is present "
-    "with incidence at similar times and places where the condition is absent."
+    "Focus the comparison by weather, anomaly family, mobility mode, temporal bucket, "
+    "geography, and study period. Every chart and result below uses the same active scope."
 )
 
-selected_label = st.selectbox(
-    "Weather condition",
-    list(CONDITIONS),
+filter_row_one = st.columns(4)
+selected_label = filter_row_one[0].selectbox(
+    "Weather pattern to compare", list(CONDITIONS),
     index=list(CONDITIONS).index("Heavier precipitation"),
 )
-selected = condition_comparison(weather_stress_df, selected_label)
-st.caption(f"**Condition definition:** {CONDITIONS[selected_label]['definition']}")
 
-selected_cards = st.columns(4)
-selected_cards[0].metric("When present", f"{selected['adjusted_present']:.1f}%")
-selected_cards[1].metric("Similar contexts without it", f"{selected['adjusted_absent']:.1f}%")
-selected_cards[2].metric("Difference after matching", f"{selected['adjusted_difference']:+.1f} pp")
-selected_cards[3].metric("Mobility surface affected", f"{selected['present_share']:.1f}%")
+# Both controls read the other control's current session-state value before
+# rendering. This prevents invalid combinations regardless of which selector
+# the user changes first.
+st.session_state.setdefault("raw17_stress_type", "All stress anomalies")
+st.session_state.setdefault("raw17_modality", "All modes")
+current_modality = st.session_state["raw17_modality"]
+allowed_stress_types = STRESS_TYPES_BY_MODALITY.get(
+    current_modality, STRESS_TYPE_OPTIONS
+)
+if st.session_state["raw17_stress_type"] not in allowed_stress_types:
+    st.session_state["raw17_stress_type"] = "All stress anomalies"
+selected_stress_type = filter_row_one[1].selectbox(
+    "Stress-anomaly type",
+    allowed_stress_types,
+    key="raw17_stress_type",
+)
+allowed_modalities = MODALITIES_BY_STRESS_TYPE[selected_stress_type]
+if st.session_state["raw17_modality"] not in allowed_modalities:
+    st.session_state["raw17_modality"] = "All modes"
+selected_modality = filter_row_one[2].selectbox(
+    "Mobility mode",
+    allowed_modalities,
+    key="raw17_modality",
+)
+temporal_bucket_options = [
+    "All temporal buckets",
+    *sorted(weather_stress_df["temporal_bucket"].dropna().astype(str).unique()),
+]
+selected_temporal_bucket = filter_row_one[3].selectbox(
+    "Temporal bucket",
+    temporal_bucket_options,
+    format_func=format_temporal_bucket,
+)
+st.caption(
+    "The selected weather pattern defines the during-condition group. Observations "
+    "without that pattern remain in the comparison group."
+)
 
-st.markdown(stability_message(selected))
+filter_row_two = st.columns(3)
+selected_geography_dimension = filter_row_two[0].selectbox(
+    "Geography lens",
+    ["All NYC", "Borough", "Policy geography", "Mobility environment"],
+)
+
+geography_column = {
+    "Borough": "borough",
+    "Policy geography": "policy_geography_label",
+    "Mobility environment": "canonical_cluster_name",
+}.get(selected_geography_dimension)
+if geography_column is None:
+    selected_geography_segment = "All segments"
+else:
+    excluded_values = {"Unknown", "Unassigned"}
+    geography_segments = sorted(
+        value
+        for value in weather_stress_df[geography_column].dropna().unique()
+        if value not in excluded_values
+    )
+    selected_geography_segment = filter_row_two[1].selectbox(
+        f"{selected_geography_dimension} segment",
+        ["All segments", *geography_segments],
+    )
+if geography_column is None:
+    filter_row_two[1].selectbox(
+        "Geography segment", ["All NYC"], disabled=True
+    )
+
+selected_time_scope = filter_row_two[2].selectbox(
+    "Time period", TIME_SCOPE_OPTIONS
+)
+study_start = weather_stress_df["date"].min().normalize()
+study_end = weather_stress_df["date"].max().normalize()
+if selected_time_scope == "Full period":
+    selected_start_date = study_start
+    selected_end_date = study_end
+elif selected_time_scope == "Pre-CP":
+    selected_start_date = study_start
+    selected_end_date = min(study_end, CP_START_DATE - pd.Timedelta(days=1))
+elif selected_time_scope == "Post-CP":
+    selected_start_date = max(study_start, CP_START_DATE)
+    selected_end_date = study_end
+else:
+    custom_date_columns = st.columns(2)
+    selected_start_date = pd.Timestamp(custom_date_columns[0].date_input(
+        "Start date", value=study_start.date(),
+        min_value=study_start.date(), max_value=study_end.date(),
+    ))
+    selected_end_date = pd.Timestamp(custom_date_columns[1].date_input(
+        "End date", value=study_end.date(),
+        min_value=study_start.date(), max_value=study_end.date(),
+    ))
+    if selected_start_date > selected_end_date:
+        st.error("Start date must be on or before end date.")
+        st.stop()
+
+scoped_weather_stress_df = apply_analysis_scope(
+    weather_stress_df,
+    selected_geography_dimension,
+    selected_geography_segment,
+    selected_stress_type,
+    selected_modality,
+    selected_temporal_bucket,
+    selected_start_date,
+    selected_end_date,
+)
+active_scope = analysis_scope_label(
+    selected_geography_dimension,
+    selected_geography_segment,
+    selected_stress_type,
+    selected_modality,
+    selected_temporal_bucket,
+    selected_time_scope,
+)
+selected = condition_comparison(
+    scoped_weather_stress_df,
+    selected_label,
+    policy_geography_fixed=(
+        selected_geography_dimension == "Policy geography"
+        and selected_geography_segment != "All segments"
+    ),
+)
+st.caption(
+    f"**Active scope:** {active_scope}. "
+    f"**Condition definition:** {CONDITIONS[selected_label]['definition']}"
+)
+
+filtered_anomaly_count = int(
+    scoped_weather_stress_df["selected_finalist_flag"].sum()
+)
+st.caption(
+    f"This scope contains **{filtered_anomaly_count:,} stress anomalies** among "
+    f"**{selected['eligible_contexts']:,} evaluated zone–temporal-bucket observations**. The weather "
+    f"condition was present in **{selected['present_contexts']:,} observations** across "
+    f"**{selected['present_dates']:,} dates**."
+)
+
+if not np.isfinite(selected["adjusted_difference"]):
+    st.warning(
+        "This scope does not contain enough comparable zone–temporal-bucket observations with and without "
+        "the selected condition. Broaden a filter or choose another condition."
+    )
+    st.stop()
+
+selected_cards = st.columns(3)
+selected_cards[0].metric("During condition", f"{selected['adjusted_present']:.1f}%")
+selected_cards[1].metric("Without condition", f"{selected['adjusted_absent']:.1f}%")
+selected_cards[2].metric("Difference", f"{selected['adjusted_difference']:+.1f} pp")
+
+st.plotly_chart(
+    comparison_chart(selected, f"{selected_label}: comparison within the active scope"),
+    use_container_width=True,
+)
+selected_direction = "more" if selected["adjusted_difference"] >= 0 else "less"
+st.markdown(
+    f"Within **{active_scope}**, {selected_stress_type.lower()} were "
+    f"**{abs(selected['adjusted_difference']):.1f} percentage points {selected_direction} common** during "
+    f"**{selected_label.lower()}**. {stability_message(selected)}"
+)
+
+geography_is_filtered = (
+    selected_geography_dimension != "All NYC"
+    and selected_geography_segment != "All segments"
+)
+if geography_is_filtered:
+    citywide_reference_df = apply_analysis_scope(
+        weather_stress_df,
+        "All NYC",
+        "All segments",
+        selected_stress_type,
+        selected_modality,
+        selected_temporal_bucket,
+        selected_start_date,
+        selected_end_date,
+    )
+    citywide_reference = condition_comparison(
+        citywide_reference_df,
+        selected_label,
+    )
+    scope_comparison_figure = go.Figure(go.Bar(
+        x=[active_scope, "All NYC"],
+        y=[
+            selected["adjusted_difference"],
+            citywide_reference["adjusted_difference"],
+        ],
+        marker_color=[
+            BRAND_COLORS["dark_teal"],
+            BRAND_COLORS["seafoam"],
+        ],
+        text=[
+            f"{selected['adjusted_difference']:+.1f} pp",
+            f"{citywide_reference['adjusted_difference']:+.1f} pp",
+        ],
+        textposition="outside",
+        cliponaxis=False,
+        hovertemplate=(
+            "<b>%{x}</b><br>Weather-associated difference: %{y:+.1f} pp"
+            "<extra></extra>"
+        ),
+    ))
+    scope_comparison_figure.update_layout(
+        title="How does the focused result compare with the citywide pattern?",
+        xaxis_title="",
+        yaxis_title="Weather-associated difference (percentage points)",
+        showlegend=False,
+        height=390,
+        margin=dict(t=75, r=30, b=75, l=70),
+    )
+    scope_comparison_figure.add_hline(
+        y=0,
+        line_dash="dash",
+        line_color="#66747A",
+    )
+    st.plotly_chart(
+        apply_branding(scope_comparison_figure),
+        use_container_width=True,
+    )
+    scope_gap = (
+        selected["adjusted_difference"]
+        - citywide_reference["adjusted_difference"]
+    )
+    st.markdown(
+        f"The weather-associated difference in **{selected_geography_segment}** was "
+        f"**{selected['adjusted_difference']:+.1f} pp**, compared with "
+        f"**{citywide_reference['adjusted_difference']:+.1f} pp** citywide—a "
+        f"**{scope_gap:+.1f} pp** gap."
+    )
+
+temporal_tab, spatial_tab, modes_tab = st.tabs([
+    "When did it happen?",
+    "Where did rates differ?",
+    "Which modes were involved?",
+])
 
 # ---------------------------------------------------------------------
 # Temporal concentration
 # ---------------------------------------------------------------------
 
-st.subheader("When was the condition most widespread?")
-st.write(
-    "The upper panel shows how much of the city’s eligible mobility surface met the "
-    "selected condition each day. The lower panel shows anomaly incidence only within "
-    "the contexts where that condition was present."
+temporal_tab.subheader("When and how widely did the condition occur?")
+temporal_tab.write(
+    "For each date, the upper panel measures the share of evaluated Taxi Zone × "
+    "temporal-bucket observations that met the selected weather definition. Its denominator "
+    "includes every observation with the underlying weather measure available. On any one "
+    "date, only the five weekday or five weekend buckets applicable to that date are present. "
+    "The lower panel "
+    "measures how many of those observations contained a stress anomaly "
+    f"matching the active filters and shows only dates with at least "
+    f"{MIN_DAILY_CONDITION_CONTEXTS} weather-present observations. Dot size reflects "
+    "the number of observations behind the daily anomaly rate."
 )
 
-selected_daily = daily_condition_summary(weather_stress_df, selected_label)
+selected_daily = daily_condition_summary(scoped_weather_stress_df, selected_label)
 available_dates = selected_daily.loc[selected_daily["present_contexts"].gt(0)].copy()
-available_dates = available_dates.sort_values(
-    ["Condition coverage %", "Anomaly incidence when present %"], ascending=False
+available_dates = available_dates.sort_values("date").reset_index(drop=True)
+supported_incidence_dates = available_dates.loc[
+    available_dates["present_contexts"].ge(MIN_DAILY_CONDITION_CONTEXTS)
+].copy()
+median_supported_daily_incidence = (
+    supported_incidence_dates["Anomaly incidence when present %"].median()
+    if not supported_incidence_dates.empty
+    else np.nan
 )
-date_options = available_dates["date"].dt.date.tolist()
-date_labels = {
-    row.date.date(): (
-        f"{row.date:%b %d, %Y} · {row['Condition coverage %']:.1f}% affected · "
-        f"{row['Anomaly incidence when present %']:.1f}% anomaly incidence"
-    )
-    for _, row in available_dates.iterrows()
-}
-selected_date = st.selectbox(
-    "Weather-active date to inspect", date_options, format_func=lambda value: date_labels[value]
-)
-selected_date_row = available_dates.loc[
-    available_dates["date"].dt.date.eq(selected_date)
-].iloc[0]
 
 timeline = make_subplots(
     rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.10,
-    subplot_titles=("Share of the mobility surface affected", "Anomaly incidence during the condition"),
+    subplot_titles=(
+        "Share of zone–temporal-bucket observations with the selected weather pattern",
+        "Stress-anomaly rate when the weather condition was present",
+    ),
 )
-timeline.add_trace(go.Scatter(
-    x=selected_daily["date"], y=selected_daily["Condition coverage %"],
-    mode="lines", line={"color": BRAND_COLORS["dark_teal"]},
-    name="Mobility surface affected",
-    hovertemplate="<b>%{x|%b %d, %Y}</b><br>Mobility surface affected: %{y:.1f}%<extra></extra>",
+weather_metric_label = WEATHER_METRIC_LABELS.get(
+    CONDITIONS[selected_label]["metric"],
+    CONDITIONS[selected_label]["metric"].replace("_", " "),
+)
+timeline.add_trace(go.Bar(
+    x=available_dates["date"], y=available_dates["Condition coverage %"],
+    marker_color=BRAND_COLORS["dark_teal"],
+    name="Share meeting weather definition",
+    customdata=available_dates[["present_contexts", "eligible_contexts"]],
+    hovertemplate=(
+        f"<b>%{{x|%b %d, %Y}}</b><br>{selected_label}: "
+        "%{customdata[0]:,.0f} zone–temporal-bucket observations"
+        f"<br>All observations with {weather_metric_label} data: "
+        "%{customdata[1]:,.0f}"
+        "<br>Share with selected weather pattern: %{y:.1f}%"
+        "<extra></extra>"
+    ),
 ), row=1, col=1)
 timeline.add_trace(go.Scatter(
-    x=selected_daily["date"], y=selected_daily["Anomaly incidence when present %"],
-    mode="lines", line={"color": BRAND_COLORS["terracotta"]},
+    x=supported_incidence_dates["date"],
+    y=supported_incidence_dates["Anomaly incidence when present %"],
+    mode="markers",
+    marker={
+        "size": np.clip(
+            5 + np.sqrt(supported_incidence_dates["present_contexts"]), 7, 18
+        ),
+        "color": BRAND_COLORS["terracotta"],
+        "opacity": 0.75,
+    },
     name="Anomaly incidence",
-    hovertemplate="<b>%{x|%b %d, %Y}</b><br>Anomaly incidence where condition is present: %{y:.1f}%<extra></extra>",
+    customdata=supported_incidence_dates[["present_anomalies", "present_contexts"]],
+    hovertemplate=(
+        "<b>%{x|%b %d, %Y}</b><br>Stress anomalies: %{customdata[0]:,.0f}"
+        "<br>Observations with selected weather pattern: %{customdata[1]:,.0f}"
+        "<br>Stress-anomaly rate: %{y:.1f}%<extra></extra>"
+    ),
 ), row=2, col=1)
-timeline.add_hline(
-    y=selected["overall_present"], line_dash="dot", line_color=BRAND_COLORS["terracotta"],
-    annotation_text="Full-period incidence during this condition", row=2, col=1,
-)
-for row_number in [1, 2]:
-    timeline.add_vline(
-        x=pd.Timestamp(selected_date), line_dash="dot",
-        line_color=BRAND_COLORS["dark_teal"], row=row_number, col=1,
+if np.isfinite(median_supported_daily_incidence):
+    timeline.add_hline(
+        y=median_supported_daily_incidence,
+        line_dash="dot",
+        line_color=BRAND_COLORS["terracotta"],
+        annotation_text=(
+            f"Median anomaly rate on dates with this weather: "
+            f"{median_supported_daily_incidence:.1f}%"
+        ),
+        row=2,
+        col=1,
     )
 timeline.update_layout(
-    title=f"{selected_label} across the study period", height=600,
-    hovermode="x unified", showlegend=False,
+    title=f"{selected_label} across the active time period", height=600,
+    hovermode="closest", showlegend=False,
     margin=dict(t=90, r=30, b=50, l=65),
 )
 timeline.update_yaxes(ticksuffix="%", rangemode="tozero", row=1, col=1)
 timeline.update_yaxes(ticksuffix="%", rangemode="tozero", row=2, col=1)
-st.plotly_chart(apply_branding(timeline), use_container_width=True)
-
-date_cards = st.columns(4)
-date_cards[0].metric("Mobility surface affected", f"{selected_date_row['Condition coverage %']:.1f}%")
-date_cards[1].metric("Affected contexts", f"{int(selected_date_row['present_contexts']):,}")
-date_cards[2].metric(
-    "Anomalies in affected contexts", f"{int(selected_date_row['present_anomalies']):,}"
-)
-date_cards[3].metric(
-    "Anomaly incidence", f"{selected_date_row['Anomaly incidence when present %']:.1f}%"
-)
-date_difference = (
-    selected_date_row["Anomaly incidence when present %"] - selected["overall_present"]
-)
-st.markdown(
-    f"On **{selected_date:%b %d, %Y}**, **{selected_date_row['Condition coverage %']:.1f}%** "
-    f"of contexts with an available weather measurement met the "
-    f"{selected_label.lower()} definition. Among those "
-    f"contexts, **{selected_date_row['Anomaly incidence when present %']:.1f}%** contained "
-    f"a stress anomaly, **{date_difference:+.1f} pp** from the full-period incidence "
-    f"observed whenever this condition was present."
-)
+temporal_tab.plotly_chart(apply_branding(timeline), use_container_width=True)
+if not available_dates.empty:
+    most_widespread_date = available_dates.sort_values(
+        ["Condition coverage %", "present_contexts"], ascending=False
+    ).iloc[0]
+    temporal_insight = (
+        f"The condition covered the largest share of the active mobility surface on "
+        f"**{most_widespread_date['date']:%b %d, %Y}** "
+        f"(**{most_widespread_date['Condition coverage %']:.1f}%** of evaluated observations)."
+    )
+    if not supported_incidence_dates.empty:
+        highest_incidence_date = supported_incidence_dates.sort_values(
+            ["Anomaly incidence when present %", "present_contexts"],
+            ascending=False,
+        ).iloc[0]
+        temporal_insight += (
+            f" Across dates with at least {MIN_DAILY_CONDITION_CONTEXTS} observations "
+            f"meeting the weather definition, the median anomaly rate was "
+            f"**{median_supported_daily_incidence:.1f}%**. The highest rate was on "
+            f"**{highest_incidence_date['date']:%b %d, %Y}** "
+            f"(**{int(highest_incidence_date['present_anomalies']):,} of "
+            f"{int(highest_incidence_date['present_contexts']):,} observations; "
+            f"{highest_incidence_date['Anomaly incidence when present %']:.1f}%**)."
+        )
+    temporal_tab.markdown(temporal_insight)
 
 # ---------------------------------------------------------------------
 # Spatial concentration
 # ---------------------------------------------------------------------
 
-st.subheader("Where did this condition coincide with the largest anomaly increases?")
-st.write(
-    "For each Taxi Zone, compare anomaly incidence during the selected weather "
-    "condition with that zone’s incidence when the condition was absent. Only zones "
-    "with at least 25 affected contexts across 10 dates are shown."
+spatial_tab.subheader("How did stress-anomaly rates vary by Taxi Zone?")
+spatial_tab.write(
+    "For each Taxi Zone, compare its stress-anomaly rate when the selected weather "
+    "condition was present with its own rate when the condition was absent. A zone is "
+    f"shown only when it has at least {MIN_ZONE_EXPOSED_CONTEXTS} zone–temporal-bucket observations "
+    f"meeting the weather definition across at least {MIN_ZONE_EXPOSED_DATES} distinct dates. This minimum "
+    "evidence threshold prevents a few observations from dominating the ranking; it "
+    "does not represent statistical significance."
 )
 
-zone_summary_df = zone_condition_summary(weather_stress_df, selected_label)
-zone_ranking = zone_summary_df.sort_values("Difference pp", ascending=False).head(15)
-zone_figure = go.Figure(go.Bar(
-    x=zone_ranking["Difference pp"],
-    y=zone_ranking["zone"],
-    orientation="h",
-    marker_color=np.where(
-        zone_ranking["Difference pp"].ge(0),
-        BRAND_COLORS["dark_teal"], BRAND_COLORS["terracotta"],
-    ),
-    text=[f"{value:+.1f} pp" for value in zone_ranking["Difference pp"]],
-    textposition="outside",
-    cliponaxis=False,
-    customdata=zone_ranking[[
-        "borough", "present_contexts", "present_dates",
-        "Condition-present anomaly incidence %", "Condition-absent anomaly incidence %",
-    ]],
-    hovertemplate=(
-        "<b>%{y}</b><br>Borough: %{customdata[0]}<br>Difference: %{x:+.1f} pp<br>"
-        "Incidence during condition: %{customdata[3]:.1f}%<br>"
-        "Incidence without condition: %{customdata[4]:.1f}%<br>"
-        "Affected contexts: %{customdata[1]:,.0f}<br>"
-        "Affected dates: %{customdata[2]:,.0f}<extra></extra>"
-    ),
-))
-zone_figure.update_layout(
-    title=f"Where {selected_label.lower()} coincided with the largest anomaly increases",
-    xaxis_title="Anomaly-incidence difference (percentage points)",
-    yaxis_title="", height=620, margin=dict(t=80, r=80, b=60, l=180),
+zone_summary_df = zone_condition_summary(
+    scoped_weather_stress_df,
+    selected_label,
 )
-zone_figure.update_yaxes(autorange="reversed")
-zone_figure.add_vline(x=0, line_dash="dash", line_color="#66747A")
-st.plotly_chart(apply_branding(zone_figure), use_container_width=True)
+zone_ranking = zone_summary_df.sort_values(
+    "Difference pp", ascending=False
+).head(10)
 
-if not zone_ranking.empty:
-    leading_zone = zone_ranking.iloc[0]
-    st.markdown(
-        f"**{leading_zone['zone']}** shows the largest supported difference: anomaly "
-        f"incidence was **{leading_zone['Condition-present anomaly incidence %']:.1f}%** "
-        f"during {selected_label.lower()} and "
-        f"**{leading_zone['Condition-absent anomaly incidence %']:.1f}%** when the "
-        f"condition was absent—a **{leading_zone['Difference pp']:+.1f} pp** gap "
-        f"across **{int(leading_zone['present_dates'])} affected dates**."
+if zone_ranking.empty:
+    spatial_tab.info(
+        "No Taxi Zones meet the minimum evidence thresholds in this scope. Broaden the "
+        "geography or time period, or choose another condition."
     )
+else:
+    present_hover_data = np.column_stack([
+        zone_ranking["borough"].fillna("Unknown").astype(str),
+        zone_ranking["present_anomalies"].map(lambda value: f"{value:,.0f}"),
+        zone_ranking["present_contexts"].map(lambda value: f"{value:,.0f}"),
+        zone_ranking["present_dates"].map(lambda value: f"{value:,.0f}"),
+        zone_ranking["Difference pp"].map(lambda value: f"{value:+.3f} pp"),
+    ])
+    absent_hover_data = np.column_stack([
+        zone_ranking["borough"].fillna("Unknown").astype(str),
+        zone_ranking["absent_anomalies"].map(lambda value: f"{value:,.0f}"),
+        zone_ranking["absent_contexts"].map(lambda value: f"{value:,.0f}"),
+        zone_ranking["Difference pp"].map(lambda value: f"{value:+.3f} pp"),
+    ])
+    connector_x = []
+    connector_y = []
+    for _, zone_row in zone_ranking.iterrows():
+        connector_x.extend([
+            zone_row["Condition-absent anomaly incidence %"],
+            zone_row["Condition-present anomaly incidence %"],
+            None,
+        ])
+        connector_y.extend([zone_row["zone"], zone_row["zone"], None])
 
-zone_table = zone_ranking.rename(columns={
-    "zone": "Taxi Zone",
-    "borough": "Borough",
-    "present_contexts": "Affected contexts",
-    "present_dates": "Affected dates",
-    "present_anomalies": "Stress anomalies",
-    "Condition-present anomaly incidence %": "Incidence during condition %",
-    "Condition-absent anomaly incidence %": "Incidence without condition %",
-})[[
-    "Taxi Zone", "Borough", "Affected contexts", "Affected dates",
-    "Stress anomalies", "Incidence during condition %",
-    "Incidence without condition %", "Difference pp",
-]].copy()
-numeric_columns = zone_table.select_dtypes(include="number").columns
-zone_table[numeric_columns] = zone_table[numeric_columns].round(1)
-st.dataframe(zone_table, use_container_width=True, hide_index=True)
+    zone_figure = go.Figure()
+    zone_figure.add_trace(go.Scatter(
+        x=connector_x,
+        y=connector_y,
+        mode="lines",
+        line={"color": "#AAB8BC", "width": 2},
+        hoverinfo="skip",
+        showlegend=False,
+    ))
+    zone_figure.add_trace(go.Scatter(
+        x=zone_ranking["Condition-absent anomaly incidence %"],
+        y=zone_ranking["zone"],
+        mode="markers",
+        name="Without condition",
+        marker={"size": 11, "color": BRAND_COLORS["seafoam"]},
+        customdata=absent_hover_data,
+        hovertemplate=(
+            "<b>%{y}</b><br>Borough: %{customdata[0]}<br>"
+            "Without condition: %{x:.3f}%<br>Stress anomalies: %{customdata[1]}"
+            "<br>Observations without condition: %{customdata[2]}<br>Difference: %{customdata[3]}"
+            "<extra></extra>"
+        ),
+    ))
+    zone_figure.add_trace(go.Scatter(
+        x=zone_ranking["Condition-present anomaly incidence %"],
+        y=zone_ranking["zone"],
+        mode="markers+text",
+        name="During condition",
+        marker={"size": 12, "color": BRAND_COLORS["dark_teal"]},
+        text=[f"{value:+.1f} pp" for value in zone_ranking["Difference pp"]],
+        textposition="middle right",
+        customdata=present_hover_data,
+        hovertemplate=(
+            "<b>%{y}</b><br>Borough: %{customdata[0]}<br>"
+            "During condition: %{x:.3f}%<br>Stress anomalies: %{customdata[1]}"
+            "<br>Observations meeting weather definition: %{customdata[2]}"
+            "<br>Condition-present dates: %{customdata[3]}"
+            "<br>Difference: %{customdata[4]}<extra></extra>"
+        ),
+    ))
+    zone_figure.update_layout(
+        title={
+            "text": f"Taxi Zone anomaly rates within {active_scope}",
+            "x": 0.01,
+            "y": 0.98,
+            "xanchor": "left",
+            "yanchor": "top",
+        },
+        xaxis_title="Stress-anomaly rate (%)",
+        yaxis_title="", height=650, margin=dict(t=120, r=115, b=85, l=240),
+        legend={
+            "orientation": "h", "x": 0.01, "y": 0.90,
+            "xanchor": "left", "yanchor": "bottom", "title_text": "",
+        },
+    )
+    zone_figure.update_yaxes(
+        autorange="reversed", automargin=True, ticks="outside", ticklen=6
+    )
+    zone_figure.update_xaxes(
+        automargin=True, title_standoff=20, ticksuffix="%", rangemode="tozero"
+    )
+    spatial_tab.plotly_chart(apply_branding(zone_figure), use_container_width=True)
+
+    leading_zone = zone_ranking.iloc[0]
+    positive_zone_count = int(zone_summary_df["Difference pp"].gt(0).sum())
+    eligible_zone_count = len(zone_summary_df)
+    if positive_zone_count:
+        spatial_tab.markdown(
+            f"Stress-anomaly rates were higher during the condition in "
+            f"**{positive_zone_count} of {eligible_zone_count}** adequately observed Taxi Zones. "
+            f"**{leading_zone['zone']}** had the largest increase at "
+            f"**{leading_zone['Difference pp']:+.1f} percentage points**."
+        )
+    else:
+        spatial_tab.markdown(
+            f"Stress-anomaly rates were not higher during the condition in any of the "
+            f"**{eligible_zone_count}** adequately observed Taxi Zones. "
+            f"**{leading_zone['zone']}** was closest to the no-change line at "
+            f"**{leading_zone['Difference pp']:+.1f} percentage points**."
+        )
+
+    zone_table = zone_ranking.rename(columns={
+        "zone": "Taxi Zone",
+        "borough": "Borough",
+        "present_contexts": "Observations during condition",
+        "present_dates": "Dates with condition",
+        "present_anomalies": "Anomalies during condition",
+        "absent_contexts": "Observations without condition",
+        "absent_anomalies": "Anomalies without condition",
+        "Condition-present anomaly incidence %": "Anomaly rate during condition %",
+        "Condition-absent anomaly incidence %": "Anomaly rate without condition %",
+    })[[
+        "Taxi Zone", "Borough", "Observations during condition", "Dates with condition",
+        "Anomalies during condition", "Anomaly rate during condition %",
+        "Observations without condition", "Anomalies without condition",
+        "Anomaly rate without condition %", "Difference pp",
+    ]].copy()
+    rate_columns = [
+        "Anomaly rate during condition %",
+        "Anomaly rate without condition %",
+        "Difference pp",
+    ]
+    zone_table[rate_columns] = zone_table[rate_columns].round(3)
+    with spatial_tab.expander("See Taxi Zone details", expanded=False):
+        st.dataframe(
+            zone_table,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                column: st.column_config.NumberColumn(format="%.3f")
+                for column in rate_columns
+            },
+        )
 
 # ---------------------------------------------------------------------
 # Mobility-system composition
 # ---------------------------------------------------------------------
 
-st.subheader("Which mobility modes drove these anomalies?")
-st.write(
-    "See whether Taxi, FHVHV, Subway, or Bus accounted for a different share of "
-    "identified anomaly drivers during the selected weather condition."
+modes_tab.subheader("Which mobility modes were most often involved?")
+modes_tab.write(
+    "Compare the share of anomaly-related mobility measures associated with each "
+    "mode during the selected weather condition and when it was absent."
 )
 
-modality_df = modality_composition(selected_label)
+modality_df, metric_driver_df = scoped_driver_composition(
+    scoped_weather_stress_df,
+    selected_label,
+    selected_stress_type,
+)
+if not metric_driver_df.empty:
+    metric_driver_df["Metric driver"] = metric_driver_df["Metric driver"].map(
+        lambda metric: METRIC_LABELS.get(metric, str(metric).replace("_", " ").title())
+    )
 if modality_df.empty:
-    st.info("Modality-driver detail is unavailable in the local anomaly export.")
+    modes_tab.info("Modality-driver detail is unavailable for this active scope.")
 else:
-    modalities = ["Taxi", "FHVHV", "Subway", "Bus"]
+    if selected_stress_type == "Congestion-related":
+        modalities = ["Taxi", "FHVHV", "Bus"]
+    elif selected_stress_type == "Demand-related":
+        modalities = ["Taxi", "FHVHV", "Subway"]
+    else:
+        modalities = ["Taxi", "FHVHV", "Subway", "Bus"]
     modality_figure = go.Figure()
     for group_label, color in [
         ("Present", BRAND_COLORS["dark_teal"]),
@@ -626,37 +1417,167 @@ else:
             ),
         ))
     modality_figure.update_layout(
-        title=f"Which modes accounted for anomalies during {selected_label.lower()}?",
+        title={
+            "text": f"Modes involved during {selected_label.lower()}",
+            "x": 0.01,
+            "y": 0.98,
+            "xanchor": "left",
+            "yanchor": "top",
+        },
         xaxis_title="", yaxis_title="Share of identified modality drivers (%)",
-        barmode="group", height=440, margin=dict(t=80, r=30, b=50, l=70),
+        barmode="group", height=480, margin=dict(t=45, r=30, b=55, l=70),
+        legend={
+            "orientation": "h",
+            "x": 0.01,
+            "y": 0.86,
+            "xanchor": "left",
+            "yanchor": "bottom",
+            "title_text": "",
+        },
     )
-    modality_figure.update_yaxes(ticksuffix="%", rangemode="tozero")
-    st.plotly_chart(apply_branding(modality_figure), use_container_width=True)
+    modality_figure.update_yaxes(
+        ticksuffix="%", rangemode="tozero", domain=[0, 0.78]
+    )
+    modes_tab.plotly_chart(apply_branding(modality_figure), use_container_width=True)
 
-    driver_pivot = modality_df.pivot(
-        index="Modality", columns="Condition group", values="Composition share %"
-    ).fillna(0)
-    driver_pivot["Shift pp"] = driver_pivot.get("Present", 0) - driver_pivot.get("Absent", 0)
+    driver_pivot = (
+        modality_df.pivot(
+            index="Modality",
+            columns="Condition group",
+            values="Composition share %",
+        )
+        .reindex(columns=["Present", "Absent"], fill_value=0)
+        .fillna(0)
+    )
+    driver_pivot["Shift pp"] = (
+        driver_pivot["Present"] - driver_pivot["Absent"]
+    )
     leading_driver = driver_pivot["Present"].idxmax()
     largest_shift_driver = driver_pivot["Shift pp"].abs().idxmax()
     largest_shift = driver_pivot.loc[largest_shift_driver, "Shift pp"]
-    st.markdown(
-        f"**{leading_driver}** was the largest identified driver during "
-        f"{selected_label.lower()}, accounting for "
-        f"**{driver_pivot.loc[leading_driver, 'Present']:.1f}%** of driver records. "
-        f"The largest change in composition was **{largest_shift_driver}** at "
-        f"**{largest_shift:+.1f} percentage points** compared with anomalies observed "
-        f"without the condition."
+    shift_direction = "increased" if largest_shift >= 0 else "decreased"
+    modes_tab.markdown(
+        f"**{leading_driver}** accounted for the largest share of involved mobility "
+        f"measures during {selected_label.lower()} "
+        f"(**{driver_pivot.loc[leading_driver, 'Present']:.1f}%**). "
+        f"**{largest_shift_driver}** changed the most, with its share "
+        f"{shift_direction} by **{abs(largest_shift):.1f} percentage points**."
+    )
+
+metric_detail = modes_tab.expander("See the underlying mobility measures", expanded=False)
+metric_detail.write(
+    "Drill into the metric drivers behind the anomalies in the active scope. The "
+    "chart shows the five most frequently identified metrics and compares their "
+    "share during the condition with their share when the condition was absent."
+)
+
+if metric_driver_df.empty:
+    metric_detail.info("Metric-driver detail is unavailable for this active scope.")
+else:
+    leading_metrics = (
+        metric_driver_df.groupby("Metric driver")["Driver records"]
+        .sum()
+        .nlargest(5)
+        .index
+        .tolist()
+    )
+    metric_driver_figure = go.Figure()
+    for group_label, color in [
+        ("Present", BRAND_COLORS["dark_teal"]),
+        ("Absent", BRAND_COLORS["seafoam"]),
+    ]:
+        group = (
+            metric_driver_df.loc[
+                metric_driver_df["Condition group"].eq(group_label)
+            ]
+            .set_index("Metric driver")
+            .reindex(leading_metrics)
+            .fillna(0)
+            .reset_index()
+        )
+        metric_driver_figure.add_trace(go.Bar(
+            x=group["Metric driver"],
+            y=group["Composition share %"],
+            name=(
+                "During condition"
+                if group_label == "Present"
+                else "Without condition"
+            ),
+            marker_color=color,
+            text=[f"{value:.1f}%" for value in group["Composition share %"]],
+            textposition="outside",
+            cliponaxis=False,
+            customdata=group[["Driver records"]],
+            hovertemplate=(
+                "<b>%{x}</b><br>Share of identified metric drivers: %{y:.1f}%<br>"
+                "Driver records: %{customdata[0]:,.0f}<extra></extra>"
+            ),
+        ))
+    metric_driver_figure.update_layout(
+        title={
+            "text": f"Leading metric drivers during {selected_label.lower()}",
+            "x": 0.01,
+            "y": 0.98,
+            "xanchor": "left",
+            "yanchor": "top",
+        },
+        xaxis_title="",
+        yaxis_title="Share of identified metric drivers (%)",
+        barmode="group",
+        height=550,
+        margin=dict(t=45, r=30, b=130, l=70),
+        legend={
+            "orientation": "h",
+            "x": 0.01,
+            "y": 0.86,
+            "xanchor": "left",
+            "yanchor": "bottom",
+            "title_text": "",
+        },
+    )
+    metric_driver_figure.update_xaxes(tickangle=-30)
+    metric_driver_figure.update_yaxes(
+        ticksuffix="%", rangemode="tozero", domain=[0, 0.78]
+    )
+    metric_detail.plotly_chart(
+        apply_branding(metric_driver_figure),
+        use_container_width=True,
+    )
+
+    metric_pivot = (
+        metric_driver_df.pivot(
+            index="Metric driver",
+            columns="Condition group",
+            values="Composition share %",
+        )
+        .reindex(columns=["Present", "Absent"], fill_value=0)
+        .fillna(0)
+    )
+    metric_pivot["Shift pp"] = (
+        metric_pivot["Present"] - metric_pivot["Absent"]
+    )
+    leading_metric = metric_pivot["Present"].idxmax()
+    largest_metric_shift = metric_pivot["Shift pp"].abs().idxmax()
+    metric_shift_value = metric_pivot.loc[largest_metric_shift, "Shift pp"]
+    metric_shift_direction = "increased" if metric_shift_value >= 0 else "decreased"
+    metric_detail.markdown(
+        f"**{leading_metric}** was the most frequently identified metric driver "
+        f"during {selected_label.lower()}, representing "
+        f"**{metric_pivot.loc[leading_metric, 'Present']:.1f}%** of metric-driver "
+        f"records. **{largest_metric_shift}** changed the most, and its share "
+        f"{metric_shift_direction} by **{abs(metric_shift_value):.1f} percentage points**."
     )
 
 with st.expander("How to read this page", expanded=False):
     st.markdown(
+        "- Each **zone–temporal-bucket observation** is one Taxi Zone during one temporal bucket on one date.\n"
         "- **Condition present** means the underlying weather measure is available "
         "and meets the displayed condition definition. **Condition absent** means "
         "the measure is available but does not meet that definition.\n"
-        "- The headline comparison contrasts contexts from similar months, day types, "
-        "times of day, and parts of the congestion-pricing geography.\n"
-        "- The date view describes condition-active contexts; it does not claim that "
+        "- The headline comparison contrasts zone–temporal-bucket observations from similar months, day types, "
+        "times of day, and—unless fixed by a filter—parts of the congestion-pricing "
+        "geography.\n"
+        "- The date view describes observations meeting the weather definition; it does not claim that "
         "weather caused the anomalies observed on a particular date.\n"
         "- Taxi Zone estimates use weather assigned from a small station network and "
         "should be interpreted as broad spatial patterns rather than block-level weather."

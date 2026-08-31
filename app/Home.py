@@ -104,6 +104,11 @@ pages = {
             title="Stress Anomaly Deep Dive",
             icon=":material/troubleshoot:",
         ),
+        st.Page(
+            "views/raw_17_weather_stress_episode_explorer.py",
+            title="Weather and Stress Episodes",
+            icon=":material/weather_mix:",
+        ),
     ],
 
     "Planned Work": [
