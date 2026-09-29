@@ -5,7 +5,7 @@
 [**Explore the Live Mobility Showcase ↗**](https://nyc-mobility-showcase-148034634843.us-east1.run.app/)  
 [View the analytical pipeline ↗](https://github.com/jesingson/NYC-Congestion-Pricing-Mobility-v2)
 
-![Citywide mobility demand around congestion pricing](app/images/kf_citywide_demand_shift.png)
+[![NYC Congestion Pricing Mobility Showcase homepage](app/images/showcase.png)](https://nyc-mobility-showcase-148034634843.us-east1.run.app/)
 
 ---
 
@@ -57,6 +57,12 @@ The application contains **27 analytical views** organized around six complement
 | **Stress & Anomalies** | When unusual mobility conditions occurred, where they concentrated, which modes were involved, and how weather relates to stress episodes |
 | **Forecasting & Reliability** | Forecast accuracy, geographic reliability, and where the selected forecasting system wins or misses relative to a simple Last-week baseline |
 | **No-CP Counterfactual Mobility** | Observed versus estimated no-CP mobility, geographic and multimodal differences, robustness checks, and gap calibration |
+
+### How did citywide mobility move across modes and time?
+
+![Citywide mobility demand around congestion pricing](app/images/kf_citywide_demand_shift.png)
+
+The Showcase begins with the observed mobility record itself. Citywide views make it possible to compare how Taxi, FHVHV, Subway, and Bus activity evolved through the study period before moving into more detailed temporal, spatial, and mode-specific views.
 
 ### When did NYC's modes become unusual together?
 
