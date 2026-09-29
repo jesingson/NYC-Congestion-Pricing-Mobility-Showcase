@@ -17,6 +17,8 @@ The underlying analysis follows NYC mobility from **January 2023 through March 2
 
 Rather than reproduce the notebook pipeline, this repository turns selected final outputs into an explorable Streamlit application. The Showcase moves from what actually happened, to when mobility became unusual, to how well future mobility can be forecast, and finally to a model-estimated alternative in which congestion pricing had not begun.
 
+The public application is built with Streamlit and deployed on Google Cloud Run.
+
 | | |
 |---|---|
 | **Study period** | January 2023 – March 2026 |
@@ -27,6 +29,10 @@ Rather than reproduce the notebook pipeline, this repository turns selected fina
 | **Primary modes** | Taxi, FHVHV, Subway, Bus |
 | **Additional context** | Weather, geography, CBD and gateway relationships |
 | **Application** | Multi-page Streamlit Showcase |
+
+### Built With
+
+**Python · Pandas · GeoPandas · Plotly · Streamlit · Parquet · Docker · Google Cloud Run**
 
 ---
 
@@ -129,6 +135,8 @@ This repository and the analytical repository serve different jobs.
 
 **This Showcase repository** is the interactive presentation layer. It packages selected final analytical outputs, application-optimized tables, reusable data-access logic, visual assets, and Streamlit views so the results can be explored without rerunning the full research pipeline.
 
+Readers who want to go deeper can browse the analytical repository's **[source notebooks](https://github.com/jesingson/NYC-Congestion-Pricing-Mobility-v2/tree/main/notebooks)** or its **[rendered notebooks](https://github.com/jesingson/NYC-Congestion-Pricing-Mobility-v2/tree/main/rendered_notebooks)**, which preserve the executed analysis and outputs in a browser-friendly form.
+
 The application consumes final outputs from:
 
 ```text
@@ -153,6 +161,19 @@ The `data/processed/` directory intentionally contains two kinds of application 
 **`app_tables/`** contains application-oriented derivatives designed to make interactive exploration practical. These include spatial summaries, Mobility Day Types and Drivers, partitioned Zone Profile data, metric-specific stress histories, and pre-rendered Mobility Pulse animations.
 
 This separation keeps the analytical contracts visible while allowing expensive transformations to happen before a visitor opens a page.
+
+---
+
+## Data Sources
+
+Mobility v2 combines public transportation, weather, and geographic data from several NYC and federal sources:
+
+- **NYC Taxi & Limousine Commission (TLC)** — Yellow Taxi and High Volume For-Hire Vehicle trip records
+- **Metropolitan Transportation Authority (MTA)** — Subway ridership and Bus performance data
+- **National Weather Service / NOAA** — Weather observations used as forecasting and mobility context
+- **NYC geographic reference data** — Taxi Zone boundaries and supporting spatial relationships used to align mobility measures geographically
+
+These sources are standardized in the analytical repository before their final outputs are packaged for the Showcase.
 
 ---
 
