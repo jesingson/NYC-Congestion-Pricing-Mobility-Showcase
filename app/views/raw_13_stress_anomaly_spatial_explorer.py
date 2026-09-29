@@ -12,13 +12,14 @@ from app.data_access.anomalies import (
     ANOMALY_EVENT_UNIVERSE_PATH,
     EVENT_ID_COLUMN,
     SELECTED_FINALIST_FLAG,
-    load_selected_anomaly_events,
+    load_stress_anomaly_events_runtime,
+    load_stress_anomaly_observation_universe,
 )
 from app.data_access.loaders import (
     CONGESTION_PRICING_START_DATE,
     load_analysis_panel,
 )
-from app.data_access.aggregations import apply_common_filters
+
 from app.data_access.mobility_environments import (
     format_mobility_regime_cluster_label,
     get_mobility_regime_cluster_options,
@@ -207,33 +208,71 @@ def _load_spatial_universe() -> pd.DataFrame:
 
 @st.cache_data(show_spinner="Loading Taxi Zone reference metadata...")
 def _load_zone_reference() -> pd.DataFrame:
-    """Return one complete, canonical metadata row per analysis Taxi Zone."""
-    panel = load_analysis_panel(
-        columns=[
-            "taxi_zone_id",
-            "zone",
-            "borough",
-            "cbd_spatial_category",
-        ]
-    ).copy()
+    """
+    Return one complete metadata row per analysis Taxi Zone.
 
-    panel["taxi_zone_id"] = pd.to_numeric(
-        panel["taxi_zone_id"], errors="coerce"
-    ).astype("Int64")
+    WHY:
+    The shared observation runtime already carries the same canonical Taxi
+    Zone, borough, and policy-geography context used by the anomaly pages.
+    """
+    observations = (
+        load_stress_anomaly_observation_universe()
+        .copy()
+    )
+
+    required_columns = {
+        "taxi_zone_id",
+        "zone",
+        "borough",
+        "geography_group",
+    }
+
+    missing = sorted(
+        required_columns.difference(
+            observations.columns
+        )
+    )
+
+    if missing:
+        raise ValueError(
+            "Shared stress-anomaly observation runtime is missing Raw 13 "
+            "zone-reference fields: "
+            + ", ".join(missing)
+        )
 
     reference = (
-        panel.dropna(subset=["taxi_zone_id"])
-        .sort_values("taxi_zone_id")
-        .drop_duplicates("taxi_zone_id", keep="first")
-        .reset_index(drop=True)
+        observations[
+            [
+                "taxi_zone_id",
+                "zone",
+                "borough",
+                "geography_group",
+            ]
+        ]
+        .dropna(
+            subset=["taxi_zone_id"]
+        )
+        .drop_duplicates(
+            "taxi_zone_id"
+        )
+        .sort_values(
+            "taxi_zone_id"
+        )
+        .reset_index(
+            drop=True
+        )
     )
-    reference["policy_geography"] = (
-        reference["cbd_spatial_category"]
-        .astype("string")
-        .str.lower()
-        .map(POLICY_GEOGRAPHY_MAP)
-        .fillna("Unknown")
+
+    reference = reference.rename(
+        columns={
+            "geography_group": "policy_geography",
+        }
     )
+
+    if reference["taxi_zone_id"].duplicated().any():
+        raise ValueError(
+            "Shared zone reference is not unique by Taxi Zone."
+        )
 
     return reference
 
@@ -1167,36 +1206,83 @@ def _get_mobility_environment_zone_ids(
     start_date: date,
     end_date: date,
 ) -> tuple[int, ...]:
-    """Return zones assigned to one period-aware mobility environment."""
-    panel = load_analysis_panel(
-        columns=[
-            "taxi_zone_id",
-            "date",
-            "pre_post_cp",
-            "mobility_regime_cluster_label",
-        ]
-    ).copy()
-    panel["date"] = pd.to_datetime(panel["date"], errors="coerce")
+    """
+    Return zones assigned to one period-aware mobility environment.
+
+    WHY:
+    The shared observation runtime already carries environment membership at
+    the same Zone × date context needed by this explorer, so Raw 13 no longer
+    needs to reopen the full analysis panel.
+    """
+    observations = (
+        load_stress_anomaly_observation_universe()
+        .copy()
+    )
+
+    required_columns = {
+        "taxi_zone_id",
+        "date",
+        "environment_group",
+    }
+
+    missing = sorted(
+        required_columns.difference(
+            observations.columns
+        )
+    )
+
+    if missing:
+        raise ValueError(
+            "Shared stress-anomaly observation runtime is missing Raw 13 "
+            "mobility-environment fields: "
+            + ", ".join(missing)
+        )
+
+    target_environment = (
+        format_mobility_regime_cluster_label(
+            int(cluster_label)
+        )
+    )
+
+    scoped = observations
 
     if time_view == "Pre-CP":
-        panel = panel.loc[panel["date"].lt(CP_START_DATE)].copy()
+        scoped = scoped.loc[
+            scoped["date"].lt(
+                CP_START_DATE
+            )
+        ]
+
     elif time_view == "Post-CP":
-        panel = panel.loc[panel["date"].ge(CP_START_DATE)].copy()
+        scoped = scoped.loc[
+            scoped["date"].ge(
+                CP_START_DATE
+            )
+        ]
+
     elif time_view == "Custom dates":
-        panel = panel.loc[
-            panel["date"].between(
+        scoped = scoped.loc[
+            scoped["date"].between(
                 pd.Timestamp(start_date),
                 pd.Timestamp(end_date),
                 inclusive="both",
             )
-        ].copy()
+        ]
 
-    panel = apply_common_filters(
-        panel,
-        mobility_regime_cluster_label=int(cluster_label),
-    )
+    scoped = scoped.loc[
+        scoped["environment_group"].eq(
+            target_environment
+        )
+    ]
+
     return tuple(
-        sorted(panel["taxi_zone_id"].dropna().astype(int).unique().tolist())
+        sorted(
+            scoped["taxi_zone_id"]
+            .dropna()
+            .astype(int)
+            .unique()
+            .tolist()
+        )
     )
 
 
@@ -1367,16 +1453,31 @@ def _load_zone_event_rows(
     start_date: date,
     end_date: date,
 ) -> pd.DataFrame:
-    """Return selected stress-anomaly events for the zone drill-down."""
-    events = load_selected_anomaly_events().copy()
-    events["taxi_zone_id"] = pd.to_numeric(
-        events["taxi_zone_id"], errors="coerce"
-    ).astype("Int64")
-    events["date"] = pd.to_datetime(events["date"], errors="coerce")
-    events = events.loc[events["taxi_zone_id"].astype(int).isin(zone_ids)].copy()
+    """
+    Return selected stress-anomaly events for the zone drill-down.
+
+    WHY:
+    Selected events and their canonical stress-family fields already live in
+    the compact shared event runtime.
+    """
+    events = (
+        load_stress_anomaly_events_runtime()
+        .copy()
+    )
+
+    events = events.loc[
+        events["taxi_zone_id"]
+        .astype(int)
+        .isin(zone_ids)
+    ].copy()
 
     if temporal_bucket != ALL_TEMPORAL_BUCKETS:
-        events = events.loc[events["temporal_bucket"].eq(temporal_bucket)].copy()
+        events = events.loc[
+            events["temporal_bucket"].eq(
+                temporal_bucket
+            )
+        ].copy()
+
     if time_view != "Policy-period change":
         events = _apply_time_scope(
             events,
@@ -1385,20 +1486,43 @@ def _load_zone_event_rows(
             end_date=end_date,
         )
 
-    congestion = events[CONGESTION_FLAG].fillna(False).astype(bool)
-    demand = events[DEMAND_FLAG].fillna(False).astype(bool)
-    events[FAMILY_COLUMN] = np.select(
-        [congestion & ~demand, ~congestion & demand, congestion & demand],
-        FAMILY_ORDER,
-        default="Unclassified",
-    )
-    if family != "All stress anomalies":
-        events = events.loc[events[FAMILY_COLUMN].eq(family)].copy()
+    # Preserve Raw 13's existing reader-facing family names.
+    family_map = {
+        "Congestion": "Congestion-only",
+        "Demand": "Demand-only",
+        "Both": "Both",
+    }
 
-    return events.sort_values(
-        ["date", "taxi_zone_id", "daypart_order"],
-        ascending=[False, True, True],
-    ).reset_index(drop=True)
+    events[FAMILY_COLUMN] = (
+        events["stress_family"]
+        .map(family_map)
+        .fillna("Unclassified")
+    )
+
+    if family != "All stress anomalies":
+        events = events.loc[
+            events[FAMILY_COLUMN].eq(
+                family
+            )
+        ].copy()
+
+    return (
+        events.sort_values(
+            [
+                "date",
+                "taxi_zone_id",
+                "daypart",
+            ],
+            ascending=[
+                False,
+                True,
+                True,
+            ],
+        )
+        .reset_index(
+            drop=True
+        )
+    )
 
 
 def _event_display_table(events: pd.DataFrame) -> pd.DataFrame:

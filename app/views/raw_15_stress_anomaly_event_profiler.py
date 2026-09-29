@@ -15,8 +15,10 @@ from app.data_access.anomalies import (
     EVENT_ID_COLUMN,
     SELECTED_FINALIST_FLAG,
     load_metric_history,
-    load_selected_anomaly_events,
+    load_stress_anomaly_events_runtime,
+    load_stress_anomaly_metric_evidence,
 )
+
 from app.data_access.loaders import CONGESTION_PRICING_START_DATE
 from app.utils.project_branding import (
     exploration_section,
@@ -676,69 +678,117 @@ def _build_scouting_report() -> str:
 
 @st.cache_data(show_spinner="Loading the featured stress-anomaly event...")
 def _load_frozen_hero() -> tuple[pd.Series, pd.DataFrame, pd.DataFrame]:
-    events = load_selected_anomaly_events().copy()
-    diagnostics = pd.read_parquet(ANOMALY_METRIC_DIAGNOSTICS_PATH).copy()
+    """
+    Load the featured event from the compact runtime.
 
-    events[EVENT_ID_COLUMN] = events[EVENT_ID_COLUMN].astype(str)
-    diagnostics[EVENT_ID_COLUMN] = diagnostics[EVENT_ID_COLUMN].astype(str)
-    matches = events.loc[events[EVENT_ID_COLUMN].eq(FROZEN_HERO_EVENT_ID)].copy()
+    WHY:
+    The featured hero needs one selected event, its ten metric-evidence rows,
+    and nearby selected events from the same Taxi Zone. The shared runtime
+    already contains the reconciled event attributes, so Raw 15 no longer
+    needs to materialize the full metric-diagnostics table.
+    """
+    events = (
+        load_stress_anomaly_events_runtime()
+        .copy()
+    )
+
+    matches = events.loc[
+        events[EVENT_ID_COLUMN]
+        .astype(str)
+        .eq(FROZEN_HERO_EVENT_ID)
+    ].copy()
+
     if matches.empty:
         raise ValueError(
-            f"The featured event {FROZEN_HERO_EVENT_ID!r} is not present in the "
-            "selected stress-anomaly export."
+            f"The featured event {FROZEN_HERO_EVENT_ID!r} is not present in "
+            "the shared stress-anomaly runtime."
         )
 
     event = matches.iloc[0]
-    events["date"] = pd.to_datetime(events["date"], errors="coerce")
-    events["stress_family"] = _stress_family(events)
-    events = _attach_stress_aligned_drivers(events, diagnostics)
-    context_start = pd.Timestamp(event["date"]) - pd.DateOffset(months=6)
-    context_end = pd.Timestamp(event["date"]) + pd.DateOffset(months=6)
-    zone_context = events.loc[
-        events["taxi_zone_id"].eq(event["taxi_zone_id"])
-        & events["date"].between(context_start, context_end)
-    ].copy()
-    zone_context["is_featured"] = zone_context[EVENT_ID_COLUMN].eq(
-        FROZEN_HERO_EVENT_ID
-    )
-    driver_metrics = set(
-        events.loc[
-            events[EVENT_ID_COLUMN].eq(FROZEN_HERO_EVENT_ID), "driver_metrics"
-        ].iloc[0]
-    )
-    evidence = diagnostics.loc[
-        diagnostics[EVENT_ID_COLUMN].eq(FROZEN_HERO_EVENT_ID)
-    ].copy()
-    if evidence.empty:
-        raise ValueError("The featured event has no defining metric diagnostics.")
 
-    evidence["metric_label"] = evidence["metric"].map(METRIC_LABELS).fillna(
-        evidence["metric"]
+    context_start = (
+        pd.Timestamp(event["date"])
+        - pd.DateOffset(months=6)
     )
-    evidence = _annotate_evidence(evidence, driver_metrics)
-    evidence["mode"] = evidence["metric"].map(METRIC_TO_MODE)
-    evidence["stress_signal"] = np.where(
-        evidence["metric"].isin(DEMAND_METRICS),
-        "Demand pressure",
-        "Congestion pressure",
+
+    context_end = (
+        pd.Timestamp(event["date"])
+        + pd.DateOffset(months=6)
     )
+
+    zone_context = events.loc[
+        events["taxi_zone_id"].eq(
+            event["taxi_zone_id"]
+        )
+        & events["date"].between(
+            context_start,
+            context_end,
+        )
+    ].copy()
+
+    zone_context["is_featured"] = (
+        zone_context[EVENT_ID_COLUMN]
+        .astype(str)
+        .eq(FROZEN_HERO_EVENT_ID)
+    )
+
+    evidence = (
+        load_stress_anomaly_metric_evidence(
+            FROZEN_HERO_EVENT_ID
+        )
+        .copy()
+    )
+
+    if evidence.empty:
+        raise ValueError(
+            "The featured event has no defining metric evidence."
+        )
+
+    # WHY: these display aliases preserve Raw 15's current downstream contract
+    # without recomputing attribution that was already validated at build time.
+    evidence["is_listed_anomaly_driver"] = (
+        evidence["stress_driver_flag"]
+        .fillna(False)
+        .astype(bool)
+    )
+
+    evidence["is_stress_aligned"] = (
+        evidence["stress_driver_flag"]
+        .fillna(False)
+        .astype(bool)
+    )
+
+    evidence["is_counter_stress_driver"] = False
+
     evidence["observed_display"] = evidence.apply(
-        lambda row: f"{row['observed_value']:,.0f}"
-        if row["metric"] in DEMAND_METRICS
-        else f"{row['observed_value']:,.2f}",
+        lambda row: (
+            f"{row['observed_value']:,.0f}"
+            if row["metric"] in DEMAND_METRICS
+            else f"{row['observed_value']:,.2f}"
+        ),
         axis=1,
     )
+
     evidence["expected_display"] = evidence.apply(
-        lambda row: f"{row['expected_value']:,.0f}"
-        if row["metric"] in DEMAND_METRICS
-        else f"{row['expected_value']:,.2f}",
+        lambda row: (
+            f"{row['expected_value']:,.0f}"
+            if row["metric"] in DEMAND_METRICS
+            else f"{row['expected_value']:,.2f}"
+        ),
         axis=1,
     )
-    evidence["support_label"] = evidence["support_status"].str.title()
+
     return (
         event,
         evidence.sort_values(
-            ["is_defining_driver", "metric_label"], ascending=[False, True]
+            [
+                "is_defining_driver",
+                "metric_label",
+            ],
+            ascending=[
+                False,
+                True,
+            ],
         ),
         zone_context,
     )
@@ -889,49 +939,106 @@ def _event_context_chart(
 
 
 @st.cache_data(show_spinner="Loading stress-anomaly events...")
-def _load_profiler_data() -> tuple[pd.DataFrame, pd.DataFrame]:
-    events = load_selected_anomaly_events().copy()
-    diagnostics = pd.read_parquet(ANOMALY_METRIC_DIAGNOSTICS_PATH).copy()
-    events[EVENT_ID_COLUMN] = events[EVENT_ID_COLUMN].astype(str)
-    diagnostics[EVENT_ID_COLUMN] = diagnostics[EVENT_ID_COLUMN].astype(str)
-    events["date"] = pd.to_datetime(events["date"], errors="coerce")
-    events["stress_family"] = _stress_family(events)
-    events["day_type"] = np.where(
-        events["temporal_bucket"].str.startswith("weekend"), "Weekend", "Weekday"
+def _load_profiler_data() -> pd.DataFrame:
+    """
+    Load the compact event runtime used by the interactive profiler.
+
+    WHY:
+    Event filtering only needs selected-event attributes. Metric evidence is
+    fetched separately for the one event the reader actually opens.
+    """
+    events = (
+        load_stress_anomaly_events_runtime()
+        .copy()
     )
-    events["daypart"] = (
-        events["temporal_bucket"]
-        .str.replace(r"^(weekday|weekend)_", "", regex=True)
-        .str.replace("_", " ", regex=False)
-        .str.title()
-        .replace({"Am Peak": "AM Peak", "Pm Peak": "PM Peak"})
+
+    required_columns = {
+        EVENT_ID_COLUMN,
+        "taxi_zone_id",
+        "date",
+        "zone",
+        "borough",
+        "zone_label",
+        "temporal_bucket",
+        "daypart",
+        "day_type",
+        "stress_family",
+        "driver_mode_count",
+        "driver_mode_label",
+    }
+
+    missing = sorted(
+        required_columns.difference(
+            events.columns
+        )
     )
-    events = _attach_stress_aligned_drivers(events, diagnostics)
-    events["zone_label"] = (
-        events["zone"].fillna("Unknown zone").astype(str)
-        + " · "
-        + events["borough"].fillna("Unknown borough").astype(str)
-        + " · ID "
-        + events["taxi_zone_id"].astype(str)
+
+    if missing:
+        raise ValueError(
+            "The shared stress-anomaly event runtime is missing required "
+            "Raw 15 fields: "
+            + ", ".join(missing)
+        )
+
+    return events.reset_index(
+        drop=True
     )
-    return events, diagnostics
 
 
 def _event_evidence(
     event: pd.Series,
-    diagnostics: pd.DataFrame,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    event_id = str(event[EVENT_ID_COLUMN])
-    drivers = set(event["driver_metrics"])
-    evidence = diagnostics.loc[diagnostics[EVENT_ID_COLUMN].eq(event_id)].copy()
-    evidence["metric_label"] = evidence["metric"].map(METRIC_LABELS).fillna(
-        evidence["metric"]
+    """
+    Load defining and contextual evidence for exactly one selected event.
+
+    WHY:
+    The shared evidence file is sorted and row-grouped by event ID, so Parquet
+    predicate pushdown can retrieve ten rows instead of loading 1.55M rows.
+    """
+    event_id = str(
+        event[EVENT_ID_COLUMN]
     )
-    evidence = _annotate_evidence(evidence, drivers)
-    evidence["support_label"] = evidence["support_status"].str.title()
+
+    evidence = (
+        load_stress_anomaly_metric_evidence(
+            event_id
+        )
+        .copy()
+    )
+
+    if evidence.empty:
+        raise ValueError(
+            f"No metric evidence found for event {event_id!r}."
+        )
+
+    # Preserve the legacy aliases still used by Raw 15 display helpers.
+    evidence["is_listed_anomaly_driver"] = (
+        evidence["stress_driver_flag"]
+        .fillna(False)
+        .astype(bool)
+    )
+
+    evidence["is_stress_aligned"] = (
+        evidence["stress_driver_flag"]
+        .fillna(False)
+        .astype(bool)
+    )
+
+    evidence["is_counter_stress_driver"] = False
+
+    defining_mask = (
+        evidence["is_defining_driver"]
+        .fillna(False)
+        .astype(bool)
+    )
+
     return (
-        evidence.loc[evidence["is_defining_driver"]].copy(),
-        evidence.loc[~evidence["is_defining_driver"]].copy(),
+        evidence.loc[
+            defining_mask
+        ].copy(),
+        evidence.loc[
+            ~defining_mask
+        ].copy(),
     )
 
 
@@ -1418,7 +1525,7 @@ with exploration_section(
         "expected history."
     ),
 ):
-    all_events, all_diagnostics = _load_profiler_data()
+    all_events = _load_profiler_data()
 
     # Honor an event handed off from Raw 13 before initializing the controls.
     # The event ID is the canonical key; its zone and date determine the initial
@@ -1630,7 +1737,7 @@ with exploration_section(
                 st.rerun()
 
         selected_defining, selected_context = _event_evidence(
-            selected_event, all_diagnostics
+            selected_event
         )
         st.subheader(
             f"{selected_event['zone']} · {selected_event['date']:%B %d, %Y} · "
@@ -1639,7 +1746,7 @@ with exploration_section(
         detail_1, detail_2, detail_3, detail_4 = st.columns(4)
         detail_1.metric("Day type", selected_event["day_type"])
         detail_2.metric("Stress family", selected_event["stress_family"])
-        detail_3.metric("Defining modes", len(selected_event["driver_modes"]))
+        detail_3.metric("Defining modes", int(selected_event["driver_mode_count"]),)
         detail_4.metric("Defining metrics", len(selected_defining))
 
         st.dataframe(

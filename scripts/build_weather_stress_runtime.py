@@ -26,7 +26,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.data_access.anomalies import load_selected_anomaly_events
+from app.data_access.anomalies import (
+    load_stress_anomaly_events_runtime,
+)
 from app.data_access.loaders import CONGESTION_PRICING_START_DATE
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -127,27 +129,98 @@ def main() -> None:
         raise ValueError("Canonical weather join changed the event-context grain.")
     progress(f"      Weather joined; {len(frame):,} rows retained.")
 
-    progress("[4/6] Adding established anomaly-family and modality details...")
-    selected_events = load_selected_anomaly_events()
+    progress("[4/6] Adding shared anomaly-family and driver details...")
+
+    selected_events = (
+        load_stress_anomaly_events_runtime()
+        .copy()
+    )
+
     detail_columns = [
-        column for column in [
-            "has_congestion_oriented", "has_positive_demand_shock",
-            "stress_family_exclusive", "event_modality_driver_list",
-            "event_metric_driver_list",
-        ] if column in selected_events.columns
+        "has_congestion_oriented",
+        "has_positive_demand_shock",
+        "stress_family",
+        "stress_metric_driver_list",
+        "signature_all",
+        "signature_demand",
+        "signature_congestion",
+        "signature_all_label",
+        "signature_demand_label",
+        "signature_congestion_label",
     ]
-    if detail_columns:
-        event_details = selected_events[["comparison_event_id", *detail_columns]].drop_duplicates("comparison_event_id")
-        frame = frame.merge(
-            event_details, on="comparison_event_id", how="left",
-            suffixes=("", "_event"), validate="one_to_one",
+
+    missing_details = sorted(
+        set(detail_columns).difference(
+            selected_events.columns
         )
-        for column in detail_columns:
-            event_column = f"{column}_event"
-            if event_column in frame.columns:
-                frame[column] = frame[event_column].combine_first(frame[column])
-                frame = frame.drop(columns=event_column)
-    progress(f"      Added {len(detail_columns)} anomaly-detail fields.")
+    )
+
+    if missing_details:
+        raise ValueError(
+            "Shared stress-anomaly runtime is missing Raw 17 fields: "
+            + ", ".join(missing_details)
+        )
+
+    event_details = (
+        selected_events[
+            [
+                "comparison_event_id",
+                *detail_columns,
+            ]
+        ]
+        .drop_duplicates(
+            "comparison_event_id"
+        )
+    )
+
+    if event_details["comparison_event_id"].duplicated().any():
+        raise ValueError(
+            "Shared anomaly runtime is not unique by comparison_event_id."
+        )
+
+    before_join = len(frame)
+
+    frame = frame.merge(
+        event_details,
+        on="comparison_event_id",
+        how="left",
+        suffixes=(
+            "",
+            "_event",
+        ),
+        validate="one_to_one",
+    )
+
+    if len(frame) != before_join:
+        raise ValueError(
+            "Anomaly-detail join changed the weather runtime grain."
+        )
+
+    # WHY: keep any authoritative handoff fields already present, but fill missing
+    # anomaly attribution from the validated shared event runtime.
+    for column in detail_columns:
+        event_column = f"{column}_event"
+
+        if event_column not in frame.columns:
+            continue
+
+        if column in frame.columns:
+            frame[column] = (
+                frame[column]
+                .combine_first(
+                    frame[event_column]
+                )
+            )
+        else:
+            frame[column] = frame[event_column]
+
+        frame = frame.drop(
+            columns=event_column
+        )
+
+    progress(
+        f"      Added {len(detail_columns)} shared anomaly-detail fields."
+    )
 
     progress("[5/6] Deriving reader-facing runtime fields and QA...")
     frame["calendar_month"] = frame["date"].dt.month
@@ -162,6 +235,38 @@ def main() -> None:
         "canonical_cluster_name", pd.Series(index=frame.index, dtype="object")
     ).fillna("Unassigned")
 
+    selected_mask = (
+        frame["selected_finalist_flag"]
+        .fillna(False)
+        .astype(bool)
+    )
+
+    missing_selected_stress_family = int(
+        frame.loc[
+            selected_mask,
+            "stress_family",
+        ].isna().sum()
+    )
+
+    missing_selected_signature = int(
+        frame.loc[
+            selected_mask,
+            "signature_all",
+        ].isna().sum()
+    )
+
+    if missing_selected_stress_family:
+        raise ValueError(
+            f"{missing_selected_stress_family:,} selected weather-context rows "
+            "are missing shared stress-family attribution."
+        )
+
+    if missing_selected_signature:
+        raise ValueError(
+            f"{missing_selected_signature:,} selected weather-context rows "
+            "are missing shared modality signatures."
+        )
+
     duplicate_events = int(frame["comparison_event_id"].duplicated().sum())
     qa = pd.DataFrame([
         {"check": "source_handoff_rows", "value": source_rows},
@@ -171,7 +276,20 @@ def main() -> None:
         {"check": "minimum_date", "value": str(frame["date"].min().date())},
         {"check": "maximum_date", "value": str(frame["date"].max().date())},
         {"check": "unique_taxi_zones", "value": int(frame["taxi_zone_id"].nunique())},
+        {
+            "check": "selected_rows_missing_stress_family",
+            "value": missing_selected_stress_family,
+        },
+        {
+            "check": "selected_rows_missing_signature_all",
+            "value": missing_selected_signature,
+        },
     ])
+
+    # WHY: QA values intentionally mix counts and date strings. Store them as
+    # strings so Arrow sees one stable Parquet type instead of an object column
+    # containing incompatible Python types.
+    qa["value"] = qa["value"].map(str)
     if duplicate_events:
         raise ValueError(f"Runtime surface has {duplicate_events:,} duplicate comparison_event_id values.")
 

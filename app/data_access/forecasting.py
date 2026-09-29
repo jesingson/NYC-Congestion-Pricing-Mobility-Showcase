@@ -59,6 +59,16 @@ FORECAST_HOLDOUT_SLICE_SUMMARY_PATH = (
     / "forecast_holdout_slice_summary.parquet"
 )
 
+FORECAST_HOLDOUT_SCATTER_SAMPLE_PATH = (
+    APP_TABLES_DIR
+    / "forecast_holdout_scatter_sample.parquet"
+)
+
+FORECAST_HOLDOUT_CURATED_CASES_PATH = (
+    APP_TABLES_DIR
+    / "forecast_holdout_curated_cases.parquet"
+)
+
 FORECAST_JOB_SUMMARY_PATH = (
     FORECAST_DIR
     / "showcase_forecast_job_summary.parquet"
@@ -451,6 +461,7 @@ def load_forecast_records(
     metrics: Iterable[str] | str | None = None,
     horizons: Iterable[int] | int | None = None,
     taxi_zone_ids: Iterable[int] | int | None = None,
+    temporal_buckets: Iterable[str] | str | None = None,
     boroughs: Iterable[str] | str | None = None,
     zones: Iterable[str] | str | None = None,
     reader_facing_only: bool = False,
@@ -459,76 +470,82 @@ def load_forecast_records(
     """
     Load exact final-holdout forecasting records from the compact runtime.
 
-    The old 118 MB Chapter 4 record surface is a build-time source only.
-    Reader-facing geography and champion-family labels are restored from the
-    tiny frozen summary tables.
+    Metric, horizon, Taxi Zone, and temporal-bucket filters are pushed into
+    the Parquet read whenever possible so interactive pages do not have to
+    materialize the entire holdout surface for a narrow slice.
     """
     metric_values = _as_list(metrics)
     horizon_values = _as_list(horizons)
     zone_id_values = _as_list(taxi_zone_ids)
+    bucket_values = _as_list(temporal_buckets)
     borough_values = _as_list(boroughs)
     zone_values = _as_list(zones)
 
-    frame = pd.read_parquet(
-        FORECAST_RECORD_RUNTIME_PATH
+    parquet_filters: list[tuple[str, str, object]] = []
+
+    def add_runtime_filter(column: str, values: list[object] | None) -> None:
+        """Push scalar or multi-value filters into the compact Parquet read."""
+        if not values:
+            return
+
+        if len(values) == 1:
+            parquet_filters.append((column, "==", values[0]))
+        else:
+            parquet_filters.append((column, "in", list(values)))
+
+    add_runtime_filter("metric", metric_values)
+    add_runtime_filter(
+        "horizon",
+        [int(value) for value in horizon_values]
+        if horizon_values is not None
+        else None,
+    )
+    add_runtime_filter(
+        "taxi_zone_id",
+        [int(value) for value in zone_id_values]
+        if zone_id_values is not None
+        else None,
+    )
+    add_runtime_filter("target_temporal_bucket", bucket_values)
+
+    frame = _read_forecast_parquet(
+        FORECAST_RECORD_RUNTIME_PATH,
+        label="forecast holdout runtime",
+        filters=parquet_filters or None,
     )
 
-    frame = _normalize_common_forecast_columns(
-        frame
-    )
+    frame = _normalize_common_forecast_columns(frame)
+    frame = _enrich_forecast_runtime(frame)
 
-    frame = _enrich_forecast_runtime(
-        frame
-    )
-
+    # WHY: retain explicit Pandas filtering after the Parquet read. It keeps the
+    # contract exact even if the local Parquet engine falls back without pushdown.
     if metric_values is not None:
-        frame = frame.loc[
-            frame["metric"].isin(
-                metric_values
-            )
-        ]
+        frame = frame.loc[frame["metric"].isin(metric_values)]
 
     if horizon_values is not None:
         frame = frame.loc[
-            frame["horizon"].isin(
-                [
-                    int(value)
-                    for value in horizon_values
-                ]
-            )
+            frame["horizon"].isin([int(value) for value in horizon_values])
         ]
 
     if zone_id_values is not None:
         frame = frame.loc[
-            frame["taxi_zone_id"].isin(
-                [
-                    int(value)
-                    for value in zone_id_values
-                ]
-            )
+            frame["taxi_zone_id"].isin([int(value) for value in zone_id_values])
+        ]
+
+    if bucket_values is not None:
+        frame = frame.loc[
+            frame["target_temporal_bucket"].isin(bucket_values)
         ]
 
     if borough_values is not None:
-        frame = frame.loc[
-            frame["borough"].isin(
-                borough_values
-            )
-        ]
+        frame = frame.loc[frame["borough"].isin(borough_values)]
 
     if zone_values is not None:
-        frame = frame.loc[
-            frame["zone"].isin(
-                zone_values
-            )
-        ]
+        frame = frame.loc[frame["zone"].isin(zone_values)]
 
     if reader_facing_only:
         frame = frame.loc[
-            frame[
-                "reader_facing_zone"
-            ]
-            .fillna(False)
-            .astype(bool)
+            frame["reader_facing_zone"].fillna(False).astype(bool)
         ]
 
     if final_holdout_only:
@@ -553,13 +570,9 @@ def load_forecast_records(
             columns,
             label="forecast_holdout_runtime",
         )
-
-        frame = frame[
-            list(columns)
-        ]
+        frame = frame[list(columns)]
 
     return frame.reset_index(drop=True)
-
 
 # ---------------------------------------------------------------------
 # Forecast history surface
@@ -735,6 +748,88 @@ def load_forecast_history(
 # ---------------------------------------------------------------------
 # Forecast summaries
 # ---------------------------------------------------------------------
+
+def load_forecast_holdout_slice_summary(
+    *,
+    metrics: Iterable[str] | str | None = None,
+    horizons: Iterable[int] | int | None = None,
+) -> pd.DataFrame:
+    """Load Raw 20's exact filterable final-holdout summary."""
+    metric_values = _as_list(metrics)
+    horizon_values = _as_list(horizons)
+
+    parquet_filters: list[tuple[str, str, object]] = []
+
+    if metric_values and len(metric_values) == 1:
+        parquet_filters.append(("metric", "==", metric_values[0]))
+
+    if horizon_values and len(horizon_values) == 1:
+        parquet_filters.append(("horizon", "==", int(horizon_values[0])))
+
+    frame = _read_forecast_parquet(
+        FORECAST_HOLDOUT_SLICE_SUMMARY_PATH,
+        label="forecast holdout slice summary",
+        filters=parquet_filters or None,
+    )
+
+    frame = _normalize_common_forecast_columns(frame)
+
+    if metric_values is not None:
+        frame = frame.loc[frame["metric"].isin(metric_values)]
+
+    if horizon_values is not None:
+        frame = frame.loc[
+            frame["horizon"].isin([int(value) for value in horizon_values])
+        ]
+
+    return frame.reset_index(drop=True)
+
+def load_forecast_holdout_scatter_sample() -> pd.DataFrame:
+    """Load Raw 20's deterministic tail-preserving Win-Miss sample."""
+    frame = _read_forecast_parquet(
+        FORECAST_HOLDOUT_SCATTER_SAMPLE_PATH,
+        label="forecast holdout scatter sample",
+    )
+
+    return _normalize_common_forecast_columns(frame).reset_index(drop=True)
+
+def load_forecast_holdout_curated_cases() -> pd.DataFrame:
+    """Load Raw 20's frozen clean-win, hard-helpful, and clear-miss cases."""
+    frame = _read_forecast_parquet(
+        FORECAST_HOLDOUT_CURATED_CASES_PATH,
+        label="forecast holdout curated cases",
+    )
+
+    frame = _normalize_common_forecast_columns(frame)
+
+    required = [
+        "curated_group",
+        "curated_rank",
+        "metric",
+        "horizon",
+        "taxi_zone_id",
+        "zone",
+        "borough",
+        "target_date",
+        "target_temporal_bucket",
+        "actual",
+        "champion_prediction",
+        "benchmark_prediction",
+        "severe_error",
+        "system_row_error_index",
+        "benchmark_advantage_index",
+    ]
+
+    require_columns(
+        frame,
+        required,
+        label="forecast_holdout_curated_cases",
+    )
+
+    return (
+        frame.sort_values(["curated_group", "curated_rank"])
+        .reset_index(drop=True)
+    )
 
 def load_forecast_job_summary(
     *,

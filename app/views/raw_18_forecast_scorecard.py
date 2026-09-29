@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import re
 
 import numpy as np
@@ -13,11 +11,13 @@ import streamlit as st
 from plotly.subplots import make_subplots
 
 from app.data_access.forecasting import (
+    load_forecast_geography_context,
     load_forecast_history,
+    load_forecast_job_summary,
     load_forecast_records,
+    load_forecast_zone_summary,
 )
 from app.data_access.anomalies import load_selected_anomaly_events
-from app.data_access.mobility_environments import load_canonical_cluster_assignments
 from app.utils.project_branding import (
     BRAND_COLORS,
     apply_branding,
@@ -61,14 +61,7 @@ from app.utils.project_branding import (
 PAGE_CAPTION = "FORECASTING & RELIABILITY"
 PAGE_TITLE = "How did the forecasts perform?"
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-FORECAST_DIR = PROJECT_ROOT / "data" / "processed" / "4.7.1.final_tables"
-
-JOB_SUMMARY_PATH = FORECAST_DIR / "showcase_forecast_job_summary.parquet"
-ZONE_SUMMARY_PATH = FORECAST_DIR / "showcase_forecast_zone_summary.parquet"
-
 FINAL_HOLDOUT_START_DATE = pd.Timestamp("2026-01-05")
-FINAL_HOLDOUT_END_DATE = pd.Timestamp("2026-03-31")
 
 HERO_BOROUGH = "Manhattan"
 HERO_METRIC = "subway_ridership"
@@ -133,26 +126,6 @@ TARGET_ROW_KEYS = [
 # ---------------------------------------------------------------------
 # Validation + formatting helpers
 # ---------------------------------------------------------------------
-
-def require_file(path: Path) -> None:
-    """Stop with a useful message if a frozen Chapter 4 source is missing."""
-    if not path.exists():
-        st.error(f"Required Forecast Scorecard input not found: {path}")
-        st.stop()
-
-
-def require_columns(
-    frame: pd.DataFrame,
-    required: list[str],
-    label: str,
-) -> None:
-    """Protect the page from silent upstream schema drift."""
-    missing = sorted(set(required) - set(frame.columns))
-
-    if missing:
-        st.error(f"{label} is missing required columns: {missing}")
-        st.stop()
-
 
 def metric_label(metric: str) -> str:
     """Return the reader-facing label used throughout the page."""
@@ -259,37 +232,46 @@ def load_hero_records() -> pd.DataFrame:
 
 @st.cache_data(show_spinner="Loading Forecast Quilt summaries...")
 def load_quilt_sources() -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Load the tiny system-level and Taxi-Zone-level forecast summaries."""
-    jobs = pd.read_parquet(JOB_SUMMARY_PATH)
-    zones = pd.read_parquet(ZONE_SUMMARY_PATH)
+    """
+    Load the frozen system-level and Taxi-Zone forecast summaries.
 
-    require_columns(
-        jobs,
-        [
-            "metric",
-            "horizon",
-            "champion_family",
-            "relative_mae_pct",
-            "benchmark_skill_pct",
-            "champion_better_row_pct",
-            "severe_error_pct",
-        ],
-        "showcase_forecast_job_summary",
+    WHY:
+    Physical file ownership, schema validation, and dtype normalization belong
+    to the shared forecasting access layer. Raw 18 only applies the Quilt's
+    reader-facing analytical checks.
+    """
+    job_columns = [
+        "metric",
+        "horizon",
+        "champion_family",
+        "relative_mae_pct",
+        "benchmark_skill_pct",
+        "champion_better_row_pct",
+        "severe_error_pct",
+    ]
+
+    zone_columns = [
+        "metric",
+        "horizon",
+        "taxi_zone_id",
+        "zone",
+        "borough",
+        "reader_facing_zone",
+        "relative_mae_pct",
+        "benchmark_skill_pct",
+    ]
+
+    jobs = load_forecast_job_summary(
+        columns=job_columns,
+        required_columns=job_columns,
     )
 
-    require_columns(
-        zones,
-        [
-            "metric",
-            "horizon",
-            "taxi_zone_id",
-            "zone",
-            "borough",
-            "reader_facing_zone",
-            "relative_mae_pct",
-            "benchmark_skill_pct",
-        ],
-        "showcase_forecast_zone_summary",
+    zones = load_forecast_zone_summary(
+        columns=zone_columns,
+        required_columns=zone_columns,
+        metrics=METRIC_ORDER,
+        horizons=HORIZONS,
+        reader_facing_only=True,
     )
 
     if jobs.duplicated(["metric", "horizon"]).any():
@@ -297,12 +279,10 @@ def load_quilt_sources() -> tuple[pd.DataFrame, pd.DataFrame]:
         st.stop()
 
     zones = zones.loc[
-        zones["reader_facing_zone"].fillna(False)
-        & zones["relative_mae_pct"].notna()
+        zones["relative_mae_pct"].notna()
     ].copy()
 
     return jobs.copy(), zones
-
 
 # ---------------------------------------------------------------------
 # Hero: Manhattan weekly Actual vs Forecast
@@ -2226,73 +2206,6 @@ def add_evaluation_boundary(
     )
 
     return figure
-
-
-def policy_geography_label(value: object) -> str:
-    """Collapse detailed CBD tags into the three reader-facing policy groups."""
-    mapping = {
-        "cbd": "CBD",
-        "adjacent_to_cbd": "Gateway + adjacent",
-        "gateway_to_cbd": "Gateway + adjacent",
-        "non_cbd": "Outside",
-    }
-
-    if pd.isna(value):
-        return "Unknown"
-
-    return mapping.get(str(value), str(value))
-
-
-@st.cache_data(show_spinner="Loading forecast geography context...")
-def load_explorer_zone_context() -> pd.DataFrame:
-    """
-    Build one stable lookup for the geography selector.
-
-    The longitudinal forecast history begins after congestion pricing, so
-    grouped views consistently use the Post-CP environment assignment.
-    """
-    assignments = load_canonical_cluster_assignments().copy()
-
-    require_columns(
-        assignments,
-        [
-            "taxi_zone_id",
-            "zone",
-            "borough",
-            "cbd_spatial_category",
-            "pre_post_cp",
-            "canonical_cluster_name",
-        ],
-        "canonical mobility-environment assignments",
-    )
-
-    post = assignments.loc[
-        assignments["pre_post_cp"].astype(str).eq("post_cp"),
-        [
-            "taxi_zone_id",
-            "zone",
-            "borough",
-            "cbd_spatial_category",
-            "canonical_cluster_name",
-        ],
-    ].drop_duplicates("taxi_zone_id")
-
-    post = post.rename(
-        columns={
-            "canonical_cluster_name": "mobility_environment",
-        }
-    )
-    post["policy_geography"] = post[
-        "cbd_spatial_category"
-    ].map(policy_geography_label)
-
-    post["taxi_zone_id"] = pd.to_numeric(
-        post["taxi_zone_id"],
-        errors="coerce",
-    ).astype("Int64")
-
-    return post
-
 
 @st.cache_data(show_spinner="Loading the selected forecast history...")
 def load_explorer_metric_records(
@@ -4888,12 +4801,6 @@ def apply_preset_to_state() -> None:
 
 inject_app_css()
 
-for source_path in [
-    JOB_SUMMARY_PATH,
-    ZONE_SUMMARY_PATH,
-]:
-    require_file(source_path)
-
 st.caption("FORECASTING & RELIABILITY  ›  FORECAST SCORECARD")
 st.title(PAGE_TITLE)
 
@@ -5152,7 +5059,7 @@ with exploration_section(
         "evidence."
     )
 
-    zone_context = load_explorer_zone_context()
+    zone_context = load_forecast_geography_context()
 
     selected_preset = st.selectbox(
         "Start with a story",

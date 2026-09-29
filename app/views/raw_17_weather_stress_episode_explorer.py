@@ -11,7 +11,6 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
 
-from app.data_access.anomalies import load_selected_anomaly_events
 from app.data_access.loaders import CONGESTION_PRICING_START_DATE
 from app.utils.project_branding import (
     BRAND_COLORS,
@@ -172,7 +171,7 @@ def load_weather_stress_surface() -> pd.DataFrame:
         "comparison_event_id", "taxi_zone_id", "date", "temporal_bucket",
         "selected_finalist_flag", "all_stress_anomaly_flag",
         "zone", "borough", "policy_geography_label", "canonical_cluster_name",
-        "calendar_month", "policy_period", "weekday_weekend",
+        "calendar_month", "policy_period", "weekday_weekend", "stress_metric_driver_list",
         *{spec["metric"] for spec in CONDITIONS.values()},
     }
     missing_columns = sorted(required_columns.difference(frame.columns))
@@ -192,6 +191,16 @@ def load_weather_stress_surface() -> pd.DataFrame:
     frame["all_stress_anomaly_flag"] = (
         frame["all_stress_anomaly_flag"].fillna(False).astype(bool)
     )
+
+    # WHY: Raw 17's metric-composition views depend on the shared event-level
+    # driver contract. Normalize it once at load time so every scoped copy keeps
+    # the same predictable string representation.
+    frame["stress_metric_driver_list"] = (
+        frame["stress_metric_driver_list"]
+        .fillna("")
+        .astype(str)
+    )
+
     return frame
 
 def stress_type_flag(frame: pd.DataFrame, stress_type: str) -> pd.Series:
@@ -273,44 +282,51 @@ def modality_flag(
     modality: str,
     stress_type: str,
 ) -> pd.Series:
-    """Identify selected-family stress evidence involving one mobility mode."""
-    selected = frame["all_stress_anomaly_flag"].fillna(False).astype(bool)
+    """
+    Identify selected-family stress evidence involving one mobility mode.
+
+    WHY:
+    All, Demand, and Congestion modality signatures are now prepared once in
+    the shared anomaly runtime and carried into Raw 17's weather surface.
+    """
+    selected = (
+        frame["all_stress_anomaly_flag"]
+        .fillna(False)
+        .astype(bool)
+    )
+
     if modality == "All modes":
         return selected
 
-    # Prefer metric-level driver evidence so "Demand + Bus" means Bus demand
-    # evidence, while "Congestion + Bus" means Bus speed evidence.
-    metric_column = next(
-        (
-            column
-            for column in [
-                "event_metric_driver_list",
-                "stress_metric_driver_list",
-            ]
-            if column in frame.columns
-        ),
-        None,
+    if stress_type == "Demand-related":
+        signature_column = "signature_demand"
+    elif stress_type == "Congestion-related":
+        signature_column = "signature_congestion"
+    else:
+        # All-stress and compound views preserve every defining mode.
+        signature_column = "signature_all"
+
+    if signature_column not in frame.columns:
+        raise ValueError(
+            f"Raw 17 runtime is missing required signature column "
+            f"{signature_column!r}."
+        )
+
+    signatures = (
+        frame[signature_column]
+        .fillna("")
+        .astype(str)
     )
 
-    if metric_column is not None:
-        metric_sets = frame[metric_column].map(_recognized_metric_drivers)
+    # WHY: signatures are pipe-delimited, so anchor on token boundaries rather
+    # than allowing partial matches between modality names.
+    mode_match = signatures.str.contains(
+        rf"(?:^|\|){re.escape(modality)}(?:\||$)",
+        regex=True,
+        na=False,
+    )
 
-        if stress_type == "Demand-related":
-            relevant_metrics = DEMAND_METRICS
-        elif stress_type == "Congestion-related":
-            relevant_metrics = CONGESTION_METRICS
-        else:
-            # All-stress and compound views preserve every recognized driver.
-            relevant_metrics = set(METRIC_TO_MODE)
-
-        mode_match = metric_sets.map(
-            lambda metrics: any(
-                metric in relevant_metrics
-                and METRIC_TO_MODE[metric] == modality
-                for metric in metrics
-            )
-        )
-        return selected & mode_match
+    return selected & mode_match
 
     # Backward-compatible fallback for handoffs that only retain mode lists.
     driver_column = next(
@@ -583,50 +599,86 @@ def normalize_modality_drivers(value: object) -> list[str]:
 
 
 @st.cache_data(show_spinner=False)
-def modality_composition(condition_label: str) -> pd.DataFrame:
-    """Compare identified modality drivers when a condition is present or absent."""
+def modality_composition(
+    condition_label: str,
+) -> pd.DataFrame:
+    """
+    Compare defining-mode composition when a weather condition is present or absent.
+
+    WHY:
+    The compact Raw 17 runtime already carries each selected event's complete
+    modality signature, so no second anomaly-table load or event-level join is
+    required.
+    """
     frame = load_weather_stress_surface()
     spec = CONDITIONS[condition_label]
-    condition_events = frame.loc[
-        frame[spec["metric"]].notna() & frame["selected_finalist_flag"],
-        ["comparison_event_id", spec["flag"]],
-    ].copy()
-    condition_events["Condition group"] = np.where(
-        condition_events[spec["flag"]].fillna(False), "Present", "Absent"
-    )
 
-    selected_events = load_selected_anomaly_events()
-    driver_column = next(
-        (
-            column for column in [
-                "event_modality_driver_list", "stress_modality_driver_list"
-            ]
-            if column in selected_events.columns
-        ),
-        None,
-    )
-    if driver_column is None:
+    drivers = frame.loc[
+        frame[spec["metric"]].notna()
+        & frame["selected_finalist_flag"],
+        [
+            spec["flag"],
+            "signature_all",
+        ],
+    ].copy()
+
+    if drivers.empty:
         return pd.DataFrame()
 
-    drivers = selected_events[["comparison_event_id", driver_column]].merge(
-        condition_events[["comparison_event_id", "Condition group"]],
-        on="comparison_event_id",
-        how="inner",
-        validate="one_to_one",
+    drivers["Condition group"] = np.where(
+        drivers[spec["flag"]].fillna(False),
+        "Present",
+        "Absent",
     )
-    drivers["Modality"] = drivers[driver_column].apply(normalize_modality_drivers)
-    drivers = drivers.explode("Modality")
-    drivers = drivers.loc[drivers["Modality"].isin(["Taxi", "FHVHV", "Subway", "Bus"])]
+
+    drivers["Modality"] = (
+        drivers["signature_all"]
+        .fillna("")
+        .astype(str)
+        .str.split("|")
+    )
+
+    drivers = (
+        drivers.explode("Modality")
+        .loc[
+            lambda data: data["Modality"].isin(
+                [
+                    "Taxi",
+                    "FHVHV",
+                    "Subway",
+                    "Bus",
+                ]
+            )
+        ]
+        .copy()
+    )
+
+    if drivers.empty:
+        return pd.DataFrame()
+
     summary = (
-        drivers.groupby(["Condition group", "Modality"])
+        drivers.groupby(
+            [
+                "Condition group",
+                "Modality",
+            ],
+            observed=True,
+        )
         .size()
-        .reset_index(name="Driver records")
+        .reset_index(
+            name="Driver records"
+        )
     )
+
     summary["Composition share %"] = (
         100
         * summary["Driver records"]
-        / summary.groupby("Condition group")["Driver records"].transform("sum")
+        / summary.groupby(
+            "Condition group",
+            observed=True,
+        )["Driver records"].transform("sum")
     )
+
     return summary
 
 
@@ -636,90 +688,166 @@ def scoped_driver_composition(
     stress_type: str,
     episode_date: object | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Summarize only drivers compatible with the selected anomaly family."""
+    """
+    Summarize defining metrics and modes compatible with one anomaly family.
+
+    WHY:
+    stress_metric_driver_list is now carried directly in the compact weather
+    runtime. This avoids reopening and joining the selected-event export every
+    time Raw 17 reruns.
+    """
     spec = CONDITIONS[condition_label]
-    condition_events = frame.loc[
-        frame[spec["metric"]].notna() & frame["selected_finalist_flag"],
-        ["comparison_event_id", "date", spec["flag"]],
+
+    required_columns = {
+        spec["metric"],
+        spec["flag"],
+        "selected_finalist_flag",
+        "stress_metric_driver_list",
+        "date",
+    }
+
+    missing = sorted(
+        required_columns.difference(
+            frame.columns
+        )
+    )
+
+    if missing:
+        raise RuntimeError(
+            "Raw 17 lost required columns after the weather runtime was loaded: "
+            + ", ".join(missing)
+        )
+
+    drivers = frame.loc[
+        frame[spec["metric"]].notna()
+        & frame["selected_finalist_flag"],
+        [
+            "date",
+            spec["flag"],
+            "stress_metric_driver_list",
+        ],
     ].copy()
+
     if episode_date is not None:
-        condition_events = condition_events.loc[
-            condition_events["date"].dt.date.eq(episode_date)
+        drivers = drivers.loc[
+            drivers["date"].dt.date.eq(
+                episode_date
+            )
         ].copy()
-    condition_events["Condition group"] = np.where(
-        condition_events[spec["flag"]].fillna(False),
+
+    if drivers.empty:
+        return (
+            pd.DataFrame(),
+            pd.DataFrame(),
+        )
+
+    drivers["Condition group"] = np.where(
+        drivers[spec["flag"]].fillna(False),
         "Present",
         "Absent",
     )
 
-    selected_events = load_selected_anomaly_events()
-    metric_column = next(
-        (
-            column
-            for column in [
-                "event_metric_driver_list",
-                "stress_metric_driver_list",
+    # WHY: use the existing robust metric recognizer because the stored driver
+    # text may contain serialized delimiters rather than a simple comma list.
+    drivers["Metric driver"] = (
+        drivers["stress_metric_driver_list"]
+        .map(_recognized_metric_drivers)
+    )
+
+    metric_drivers = (
+        drivers[
+            [
+                "Condition group",
+                "Metric driver",
             ]
-            if column in selected_events.columns
-        ),
-        None,
-    )
-    if condition_events.empty or metric_column is None:
-        return pd.DataFrame(), pd.DataFrame()
-
-    drivers = selected_events[["comparison_event_id", metric_column]].merge(
-        condition_events[["comparison_event_id", "Condition group"]],
-        on="comparison_event_id",
-        how="inner",
-        validate="one_to_one",
+        ]
+        .explode("Metric driver")
+        .dropna(
+            subset=["Metric driver"]
+        )
     )
 
-    metric_drivers = drivers[["Condition group", metric_column]].copy()
-    metric_drivers["Metric driver"] = metric_drivers[metric_column].apply(
-        normalize_modality_drivers
-    )
-    metric_drivers = metric_drivers.explode("Metric driver").dropna(
-        subset=["Metric driver"]
-    )
     metric_drivers = metric_drivers.loc[
-        metric_drivers["Metric driver"].isin(METRIC_TO_MODE)
+        metric_drivers[
+            "Metric driver"
+        ].isin(METRIC_TO_MODE)
     ].copy()
 
     if stress_type == "Congestion-related":
         metric_drivers = metric_drivers.loc[
-            metric_drivers["Metric driver"].isin(CONGESTION_METRICS)
+            metric_drivers[
+                "Metric driver"
+            ].isin(CONGESTION_METRICS)
         ].copy()
+
     elif stress_type == "Demand-related":
         metric_drivers = metric_drivers.loc[
-            metric_drivers["Metric driver"].isin(DEMAND_METRICS)
+            metric_drivers[
+                "Metric driver"
+            ].isin(DEMAND_METRICS)
         ].copy()
 
     if metric_drivers.empty:
-        return pd.DataFrame(), pd.DataFrame()
+        return (
+            pd.DataFrame(),
+            pd.DataFrame(),
+        )
 
     metric_summary = (
-        metric_drivers.groupby(["Condition group", "Metric driver"])
+        metric_drivers.groupby(
+            [
+                "Condition group",
+                "Metric driver",
+            ],
+            observed=True,
+        )
         .size()
-        .reset_index(name="Driver records")
+        .reset_index(
+            name="Driver records"
+        )
     )
+
     metric_summary["Composition share %"] = (
         100
         * metric_summary["Driver records"]
-        / metric_summary.groupby("Condition group")["Driver records"].transform("sum")
+        / metric_summary.groupby(
+            "Condition group",
+            observed=True,
+        )["Driver records"].transform("sum")
     )
 
-    metric_drivers["Modality"] = metric_drivers["Metric driver"].map(METRIC_TO_MODE)
-    modality_summary = (
-        metric_drivers.groupby(["Condition group", "Modality"])
-        .size()
-        .reset_index(name="Driver records")
+    metric_drivers["Modality"] = (
+        metric_drivers["Metric driver"]
+        .map(METRIC_TO_MODE)
     )
+
+    modality_summary = (
+        metric_drivers.groupby(
+            [
+                "Condition group",
+                "Modality",
+            ],
+            observed=True,
+        )
+        .size()
+        .reset_index(
+            name="Driver records"
+        )
+    )
+
     modality_summary["Composition share %"] = (
         100
         * modality_summary["Driver records"]
-        / modality_summary.groupby("Condition group")["Driver records"].transform("sum")
+        / modality_summary.groupby(
+            "Condition group",
+            observed=True,
+        )["Driver records"].transform("sum")
     )
-    return modality_summary, metric_summary
+
+    return (
+        modality_summary,
+        metric_summary,
+    )
 
 
 def comparison_chart(summary: dict[str, float], title: str) -> go.Figure:

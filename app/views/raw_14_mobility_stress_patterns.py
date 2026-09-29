@@ -11,15 +11,11 @@ import streamlit as st
 from plotly.subplots import make_subplots
 
 from app.data_access.anomalies import (
-    ANOMALY_EVENT_UNIVERSE_PATH,
-    load_selected_anomaly_events,
+    load_stress_anomaly_events_runtime,
+    load_stress_anomaly_observation_universe,
 )
 from app.data_access.loaders import (
     CONGESTION_PRICING_START_DATE,
-    load_analysis_panel,
-)
-from app.data_access.mobility_environments import (
-    load_mobility_regime_cluster_assignments,
 )
 from app.utils.project_branding import (
     BRAND_COLORS,
@@ -877,9 +873,23 @@ def _defining_metric_mix_text(
         "Loading mobility stress anomalies..."
     )
 )
+
+@st.cache_data(
+    show_spinner=(
+        "Loading mobility stress anomalies..."
+    )
+)
 def _load_all_stress_events() -> pd.DataFrame:
+    """
+    Load the compact selected-event runtime prepared offline.
+
+    WHY:
+    Period, geography, mobility environment, stress family, and modality
+    signatures are stable event attributes. They are built once in the shared
+    runtime instead of reconstructed during every Streamlit page load.
+    """
     events = (
-        load_selected_anomaly_events()
+        load_stress_anomaly_events_runtime()
         .copy()
     )
 
@@ -888,14 +898,17 @@ def _load_all_stress_events() -> pd.DataFrame:
         "taxi_zone_id",
         "date",
         "temporal_bucket",
-        "pre_post_cp",
+        "period_group",
         "borough",
-        "policy_geography_label",
-        "cbd_spatial_category",
-        "canonical_cluster_name",
+        "geography_group",
+        "environment_group",
         "stress_metric_driver_list",
         "has_positive_demand_shock",
         "has_congestion_oriented",
+        "stress_family",
+        "modality_signature",
+        "demand_modality_signature",
+        "congestion_modality_signature",
     }
 
     missing = sorted(
@@ -906,55 +919,29 @@ def _load_all_stress_events() -> pd.DataFrame:
 
     if missing:
         raise ValueError(
-            "The stress-anomaly data are missing required fields: "
-            + ", ".join(
-                missing
-            )
+            "The shared stress-anomaly event runtime is missing required "
+            "Raw 14 fields: "
+            + ", ".join(missing)
         )
-
-    events["date"] = pd.to_datetime(
-        events["date"],
-        errors="coerce",
-    )
-
-    events["period_group"] = (
-        _normalize_period(
-            events[
-                "pre_post_cp"
-            ]
-        )
-    )
-
-    events["geography_group"] = (
-        _normalize_policy_geography(
-            events[
-                "policy_geography_label"
-            ],
-            events[
-                "cbd_spatial_category"
-            ],
-        )
-    )
-
-    events["environment_group"] = (
-        _normalize_environment(
-            events[
-                "canonical_cluster_name"
-            ]
-        )
-    )
 
     return events.reset_index(
         drop=True
     )
 
-
 @st.cache_data(
     show_spinner=False
 )
 def _load_demand_stress_events() -> pd.DataFrame:
+    """
+    Return selected events containing positive demand stress.
+
+    WHY:
+    Demand-specific modality participation is precomputed offline and decoded
+    once by the shared loader, avoiding repeated metric-driver parsing.
+    """
     events = (
         _load_all_stress_events()
+        .copy()
     )
 
     events = events[
@@ -967,10 +954,8 @@ def _load_demand_stress_events() -> pd.DataFrame:
 
     events["modality_signature"] = (
         events[
-            "stress_metric_driver_list"
-        ].map(
-            _modality_signature
-        )
+            "demand_modality_signature"
+        ]
     )
 
     events = events[
@@ -991,187 +976,46 @@ def _load_demand_stress_events() -> pd.DataFrame:
 )
 def _load_eligible_observation_context() -> pd.DataFrame:
     """
-    Rebuild the 3.3.6 full-universe denominator with complete context.
+    Load the validated full observation universe with context already attached.
 
-    The saved 3.3.6 zone-frequency surface uses the full event universe as
-    its eligible denominator. Context fields embedded in the enriched export
-    are intentionally sparse outside finalist rows, so period/geography/
-    environment are reconstructed from canonical sources here.
+    The saved 3.3.6 incidence surface uses every Taxi Zone × date × daypart
+    observation as its denominator. Geography and period-specific mobility
+    environment are prepared offline in the shared runtime.
     """
-    eligible = pd.read_parquet(
-        ANOMALY_EVENT_UNIVERSE_PATH,
-        columns=[
-            "taxi_zone_id",
-            "date",
-            "temporal_bucket",
-        ],
+    eligible = (
+        load_stress_anomaly_observation_universe()
+        .copy()
     )
 
-    eligible["date"] = pd.to_datetime(
-        eligible["date"],
-        errors="coerce",
-    )
+    required_columns = {
+        "taxi_zone_id",
+        "date",
+        "daypart",
+        "day_type",
+        "temporal_bucket",
+        "period_group",
+        "borough",
+        "geography_group",
+        "environment_group",
+        "selected_finalist_flag",
+    }
 
-    cp_start = pd.Timestamp(
-        CONGESTION_PRICING_START_DATE
-    )
-
-    eligible["period_group"] = np.where(
-        eligible["date"] < cp_start,
-        "Pre-CP",
-        "Post-CP",
-    )
-
-    zone_geo = (
-        load_analysis_panel(
-            columns=[
-                "taxi_zone_id",
-                "borough",
-                "cbd_spatial_category",
-            ]
-        )[
-            [
-                "taxi_zone_id",
-                "borough",
-                "cbd_spatial_category",
-            ]
-        ]
-        .drop_duplicates()
-    )
-
-    if zone_geo.duplicated(
-        "taxi_zone_id"
-    ).any():
-        conflicts = (
-            zone_geo.groupby(
-                "taxi_zone_id",
-                observed=True,
-                dropna=False,
-            )[
-                "cbd_spatial_category"
-            ]
-            .nunique(
-                dropna=False
-            )
-            .gt(1)
-        )
-
-        if conflicts.any():
-            raise ValueError(
-                "Policy geography is not stable by Taxi Zone."
-            )
-
-        zone_geo = zone_geo.drop_duplicates(
-            "taxi_zone_id"
-        )
-
-    zone_geo["geography_group"] = (
-        _normalize_policy_geography(
-            zone_geo[
-                "cbd_spatial_category"
-            ],
-            zone_geo[
-                "cbd_spatial_category"
-            ],
+    missing = sorted(
+        required_columns.difference(
+            eligible.columns
         )
     )
 
-    eligible = eligible.merge(
-        zone_geo[
-            [
-                "taxi_zone_id",
-                "borough",
-                "geography_group",
-            ]
-        ],
-        on="taxi_zone_id",
-        how="left",
-        validate="many_to_one",
-    )
-
-    assignments = (
-        load_mobility_regime_cluster_assignments()[
-            [
-                "taxi_zone_id",
-                "pre_post_cp",
-                "canonical_cluster_name",
-            ]
-        ]
-        .drop_duplicates()
-    )
-
-    assignments["period_group"] = (
-        _normalize_period(
-            assignments[
-                "pre_post_cp"
-            ]
-        )
-    )
-
-    if assignments.duplicated(
-        [
-            "taxi_zone_id",
-            "period_group",
-        ]
-    ).any():
+    if missing:
         raise ValueError(
-            "Mobility-environment assignments are not unique at "
-            "Taxi Zone × policy period."
+            "The shared stress-anomaly observation universe is missing "
+            "required Raw 14 fields: "
+            + ", ".join(missing)
         )
 
-    assignments = assignments.rename(
-        columns={
-            "canonical_cluster_name": (
-                "environment_group"
-            )
-        }
+    return eligible.reset_index(
+        drop=True
     )
-
-    eligible = eligible.merge(
-        assignments[
-            [
-                "taxi_zone_id",
-                "period_group",
-                "environment_group",
-            ]
-        ],
-        on=[
-            "taxi_zone_id",
-            "period_group",
-        ],
-        how="left",
-        validate="many_to_one",
-    )
-
-    eligible[
-        "geography_group"
-    ] = (
-        eligible[
-            "geography_group"
-        ]
-        .astype("string")
-        .fillna("Unknown")
-    )
-
-    eligible["borough"] = (
-        eligible["borough"]
-        .astype("string")
-        .fillna("Unknown")
-    )
-
-    eligible[
-        "environment_group"
-    ] = (
-        eligible[
-            "environment_group"
-        ]
-        .astype("string")
-        .fillna("Unknown")
-    )
-
-    return eligible
-
-
 
 # -----------------------------------------------------------------------------
 # Comparison summaries
@@ -1958,11 +1802,20 @@ def _stress_family_filter(
     events: pd.DataFrame,
     stress_family: str,
 ) -> pd.DataFrame:
+    """
+    Filter events to one stress family using precomputed modality signatures.
+
+    WHY:
+    The shared runtime already derives All, Demand, and Congestion modality
+    participation offline. Reusing those tuple columns avoids reparsing every
+    event's serialized metric-driver list on each Streamlit rerun.
+    """
     congestion = (
         events["has_congestion_oriented"]
         .fillna(False)
         .astype(bool)
     )
+
     demand = (
         events["has_positive_demand_shock"]
         .fillna(False)
@@ -1971,33 +1824,39 @@ def _stress_family_filter(
 
     if stress_family == "Demand":
         mask = demand
-        signature_family = "Demand"
+        signature_column = "demand_modality_signature"
+
     elif stress_family == "Congestion":
         mask = congestion
-        signature_family = "Congestion"
+        signature_column = "congestion_modality_signature"
+
     elif stress_family == "Both":
         mask = congestion & demand
-        signature_family = "All"
+        signature_column = "modality_signature"
+
     elif stress_family == "All":
-        mask = pd.Series(True, index=events.index)
-        signature_family = "All"
+        mask = pd.Series(
+            True,
+            index=events.index,
+        )
+        signature_column = "modality_signature"
+
     else:
         raise ValueError(
             f"Unsupported stress family: {stress_family}"
         )
 
-    scoped = events[mask].copy()
+    scoped = events.loc[
+        mask
+    ].copy()
 
+    # WHY: downstream UpSet/storyline helpers expect one canonical
+    # `modality_signature` column regardless of the selected stress family.
     scoped["modality_signature"] = (
-        scoped["stress_metric_driver_list"].map(
-            lambda value: _stress_family_signature(
-                value,
-                signature_family,
-            )
-        )
+        scoped[signature_column]
     )
 
-    return scoped[
+    return scoped.loc[
         scoped["modality_signature"].map(bool)
     ].copy()
 
@@ -4241,32 +4100,69 @@ def _scout_family_events(
     events: pd.DataFrame,
     family: str,
 ) -> tuple[pd.DataFrame, int]:
-    """Return one family with an appropriate modality signature and raw count."""
-    congestion = events["has_congestion_oriented"].fillna(False).astype(bool)
-    demand = events["has_positive_demand_shock"].fillna(False).astype(bool)
+    """
+    Return one family with its precomputed modality signature.
+
+    WHY:
+    Hero scouting, weekly storylines, and explorer summaries all use the same
+    family-specific signatures. Reusing runtime columns avoids repeated regex
+    parsing and metric-to-modality reconstruction.
+    """
+    congestion = (
+        events["has_congestion_oriented"]
+        .fillna(False)
+        .astype(bool)
+    )
+
+    demand = (
+        events["has_positive_demand_shock"]
+        .fillna(False)
+        .astype(bool)
+    )
 
     if family == "All":
-        mask = pd.Series(True, index=events.index)
-        signature_family = "All"
+        mask = pd.Series(
+            True,
+            index=events.index,
+        )
+        signature_column = "modality_signature"
+
     elif family == "Congestion":
         mask = congestion
-        signature_family = "Congestion"
+        signature_column = "congestion_modality_signature"
+
     elif family == "Demand":
         mask = demand
-        signature_family = "Demand"
+        signature_column = "demand_modality_signature"
+
     elif family == "Both":
         mask = congestion & demand
-        signature_family = "All"
-    else:
-        raise ValueError(f"Unsupported scouting family: {family}")
+        signature_column = "modality_signature"
 
-    scoped = events.loc[mask].copy()
+    else:
+        raise ValueError(
+            f"Unsupported scouting family: {family}"
+        )
+
+    scoped = events.loc[
+        mask
+    ].copy()
+
     raw_count = len(scoped)
-    scoped["modality_signature"] = scoped["stress_metric_driver_list"].map(
-        lambda value: _stress_family_signature(value, signature_family)
+
+    scoped["modality_signature"] = (
+        scoped[signature_column]
     )
-    scoped = scoped.loc[scoped["modality_signature"].map(bool)].copy()
-    scoped["signature_label"] = scoped["modality_signature"].map(_signature_label)
+
+    scoped = scoped.loc[
+        scoped["modality_signature"].map(bool)
+    ].copy()
+
+    scoped["signature_label"] = (
+        scoped["modality_signature"]
+        .map(_signature_label)
+    )
+
     return scoped, raw_count
 
 

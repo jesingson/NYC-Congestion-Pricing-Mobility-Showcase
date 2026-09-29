@@ -34,7 +34,7 @@ from app.data_access.counterfactuals import (
     get_same_borough_taxi_zone_profiles,
     get_same_level_peers,
     get_strongest_profiles,
-    validate_counterfactual_contract,
+    load_counterfactual_runtime_qa,
 )
 from app.utils.project_branding import (
     BRAND_COLORS,
@@ -1157,26 +1157,6 @@ BRAID_DAYPART_BUCKETS = {
     "Evening": {"weekday_evening", "weekend_evening"},
 }
 
-
-def _braid_group_mask(
-    frame: pd.DataFrame,
-    grouping_name: str,
-    group_value: object,
-) -> pd.Series:
-    """Return a robust mask for one reader-facing geography."""
-    group_id = GROUPINGS[grouping_name]["group_id"]
-    series = frame[group_id]
-
-    if pd.api.types.is_numeric_dtype(series):
-        target = pd.to_numeric(
-            pd.Series([group_value]),
-            errors="coerce",
-        ).iloc[0]
-        return pd.to_numeric(series, errors="coerce").eq(target)
-
-    return series.astype(str).eq(str(group_value))
-
-
 @st.cache_data(show_spinner=False)
 def build_weekly_multimodal_braid(
     grouping_name: str,
@@ -1185,39 +1165,62 @@ def build_weekly_multimodal_braid(
     daypart: str = "All dayparts",
 ) -> pd.DataFrame:
     """
-    Build Raw 23's five-metric counterfactual profile at weekly resolution.
+    Build one geography's five-metric counterfactual profile by policy week.
 
-    WHY: Chapter 5 already stores the signed counterfactual gap in Pre-CP MAE
-    units. Aggregating that frozen quantity directly preserves Raw 23's existing
-    cross-metric comparison contract instead of rebuilding normalization here.
+    WHY:
+    Raw 23's storyline uses the frozen row-level gap in Pre-CP MAE units.
+    Filtering geography and temporal buckets during the Parquet read preserves
+    that exact contract while avoiding a full Raw 23 runtime materialization.
     """
-    source = load_primary_counterfactual_surface().copy()
-    source["target_date"] = pd.to_datetime(
-        source["target_date"],
-        errors="coerce",
+    if grouping_name not in GROUPINGS:
+        raise ValueError(f"Unsupported grouping: {grouping_name}")
+
+    valid_buckets = tuple(
+        sorted(
+            BRAID_DAY_TYPE_BUCKETS[day_type]
+            & BRAID_DAYPART_BUCKETS[daypart]
+        )
     )
 
-    valid_buckets = (
-        BRAID_DAY_TYPE_BUCKETS[day_type]
-        & BRAID_DAYPART_BUCKETS[daypart]
-    )
+    geography_filters = {
+        "taxi_zone_id": None,
+        "borough": None,
+        "cbd_spatial_category": None,
+        "pre_cp_mobility_environment": None,
+    }
 
-    scoped = source.loc[
-        source["target_temporal_bucket"].isin(valid_buckets)
-        & _braid_group_mask(source, grouping_name, group_value)
-    ].copy()
+    group_column = GROUPINGS[grouping_name]["group_id"]
+
+    if group_column == "taxi_zone_id":
+        geography_filters["taxi_zone_id"] = int(float(group_value))
+    elif group_column in geography_filters:
+        geography_filters[group_column] = str(group_value)
+    else:
+        raise ValueError(
+            f"Unsupported Raw 23 storyline geography: {grouping_name}"
+        )
+
+    scoped = load_primary_counterfactual_surface(
+        temporal_buckets=valid_buckets,
+        **geography_filters,
+    )
 
     if scoped.empty:
         return pd.DataFrame()
 
-    # WHY: Sunday-start weeks align naturally with the Sunday Jan 5, 2025 launch.
-    days_since_sunday = (
-        scoped["target_date"].dt.dayofweek + 1
-    ) % 7
-    scoped["week_start"] = (
+    # Policy-relative weeks begin Sunday Jan. 5, 2025.
+    days_since_launch = (
         scoped["target_date"]
-        - pd.to_timedelta(days_since_sunday, unit="D")
-    ).dt.normalize()
+        - pd.Timestamp("2025-01-05")
+    ).dt.days
+
+    scoped["week_start"] = (
+        pd.Timestamp("2025-01-05")
+        + pd.to_timedelta(
+            (days_since_launch // 7) * 7,
+            unit="D",
+        )
+    )
 
     weekly = (
         scoped.groupby(
@@ -1616,12 +1619,8 @@ def multimodal_braid_insight(
 # Load + hidden QA
 # ---------------------------------------------------------------------
 
-with st.spinner(
-    "Loading multimodal counterfactuals..."
-):
-    qa_detail = (
-        validate_counterfactual_contract()
-    )
+with st.spinner("Loading multimodal counterfactuals..."):
+    runtime_qa = load_counterfactual_runtime_qa()
     svg_assets = load_svg_assets()
 
 

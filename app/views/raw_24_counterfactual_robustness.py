@@ -14,13 +14,16 @@ repo. This page does not refit models or regenerate counterfactual forecasts.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from app.data_access.counterfactuals import (
+    load_counterfactual_raw24_zone_scout,
+    load_counterfactual_raw24_zone_weekly_inputs,
+    load_counterfactual_robustness_inputs,
+)
 from app.utils.project_branding import (
     BRAND_COLORS,
     apply_branding,
@@ -90,112 +93,15 @@ EVIDENCE_DIMENSIONS = [
 
 # Reader-facing physical Taxi Zone aliases.
 # WHY: source rows 56/57 and 103/105 represent the same physical places.
-CANONICAL_ZONE_ALIASES = {
-    57: 56,
-    105: 103,
-}
 
 UNKNOWN_ZONE_IDS = {
     264,
     265,
 }
 
-
-# ---------------------------------------------------------------------
-# Paths
-# ---------------------------------------------------------------------
-
-def find_repo_root() -> Path:
-    """Locate the Showcase repo without a developer-specific absolute path."""
-    candidates = [
-        Path.cwd(),
-        *Path(__file__).resolve().parents,
-    ]
-
-    for candidate in candidates:
-        final_dir = (
-            candidate
-            / "data"
-            / "processed"
-            / "5.3.1.final_tables"
-        )
-        if final_dir.exists():
-            return candidate.resolve()
-
-    raise FileNotFoundError(
-        "Could not locate data/processed/5.3.1.final_tables."
-    )
-
-
-REPO_ROOT = find_repo_root()
-FINAL_DIR = (
-    REPO_ROOT
-    / "data"
-    / "processed"
-    / "5.3.1.final_tables"
-)
-
-FILES = {
-    "matrix": FINAL_DIR / "counterfactual_robustness_matrix.parquet",
-    "registry": FINAL_DIR / "counterfactual_conclusion_registry.parquet",
-    "population": FINAL_DIR / "counterfactual_population_robustness.parquet",
-    "speed_weighting": FINAL_DIR / "counterfactual_speed_weighting_robustness.parquet",
-    "temporal": FINAL_DIR / "counterfactual_temporal_robustness.parquet",
-    "geography": FINAL_DIR / "counterfactual_geography_robustness.parquet",
-    "horizon": FINAL_DIR / "counterfactual_horizon_robustness.parquet",
-    "calibration": FINAL_DIR / "counterfactual_pre_cp_calibration.parquet",
-    "qa": FINAL_DIR / "counterfactual_validation_qa.parquet",
-    "manifest": FINAL_DIR / "counterfactual_validation_handoff_manifest.parquet",
-    # Compact Raw 21 weekly ingredients reused for zone-level scouting.
-    "post_zone_weekly": FINAL_DIR / "counterfactual_braid_temporal_explorer.parquet",
-    "post_zone_weekly_qa": FINAL_DIR / "counterfactual_braid_temporal_explorer_qa.parquet",
-    "pre_zone_weekly": FINAL_DIR / "counterfactual_prelaunch_temporal_explorer.parquet",
-    "pre_zone_weekly_qa": FINAL_DIR / "counterfactual_prelaunch_temporal_explorer_qa.parquet",
-    # Raw 24 Taxi-Zone scouting is precomputed once; the page never rebuilds it.
-    "zone_diagnostics": FINAL_DIR / "counterfactual_raw24_zone_diagnostics.parquet",
-    "zone_weekly": FINAL_DIR / "counterfactual_raw24_zone_weekly.parquet",
-    "zone_scout_qa": FINAL_DIR / "counterfactual_raw24_zone_scout_qa.parquet",
-}
-
-
 # ---------------------------------------------------------------------
 # Generic helpers
 # ---------------------------------------------------------------------
-
-def require_files(
-    paths: dict[str, Path],
-) -> None:
-    """Fail loudly when a frozen dependency is missing."""
-    missing = [
-        f"{name}: {path}"
-        for name, path in paths.items()
-        if not path.exists()
-    ]
-
-    if missing:
-        raise FileNotFoundError(
-            "Raw 24 is missing required files:\n"
-            + "\n".join(missing)
-        )
-
-
-def require_columns(
-    frame: pd.DataFrame,
-    required: set[str],
-    *,
-    label: str,
-) -> None:
-    """Fail loudly if an upstream contract changes."""
-    missing = sorted(
-        required - set(frame.columns)
-    )
-
-    if missing:
-        raise KeyError(
-            f"{label} is missing columns: "
-            + ", ".join(missing)
-        )
-
 
 def status_badge_html(
     status: str,
@@ -272,175 +178,6 @@ def metric_label(
 # ---------------------------------------------------------------------
 # Small frozen robustness package
 # ---------------------------------------------------------------------
-
-@st.cache_data(show_spinner=False)
-def load_robustness_inputs() -> dict[str, pd.DataFrame]:
-    """Load and validate the small authoritative 5.3.1 robustness tables."""
-    names = [
-        "matrix",
-        "registry",
-        "population",
-        "speed_weighting",
-        "temporal",
-        "geography",
-        "horizon",
-        "calibration",
-        "qa",
-        "manifest",
-    ]
-
-    require_files(
-        {
-            name: FILES[name]
-            for name in names
-        }
-    )
-
-    frames = {
-        name: pd.read_parquet(
-            FILES[name]
-        )
-        for name in names
-    }
-
-    require_columns(
-        frames["matrix"],
-        {
-            "Target",
-            "metric",
-            "horizon",
-            "baseline_abs_gap_pct",
-            "baseline_gap_direction",
-            "baseline_result_summary",
-            "evidence_status",
-            "caution_note",
-            "supporting_view",
-            "absolute_gap_pct_shift_pp",
-            "monthly_direction_agreement_pct",
-            "monthly_sign_flips",
-            "geography_mean_direction_agreement_pct",
-            "geography_min_direction_agreement_pct",
-            "aggregate_horizons_same_direction",
-            "aggregate_horizon_spread_pp",
-            "row_direction_agreement_pct",
-            "median_absolute_mae_units",
-            "share_abs_ge_1_mae_pct",
-            "share_abs_ge_2_mae_pct",
-            "showcase_include",
-        },
-        label="counterfactual_robustness_matrix",
-    )
-
-    require_columns(
-        frames["registry"],
-        {
-            "Target",
-            "metric",
-            "horizon",
-            "primary_gap_pct",
-            "baseline_gap_direction",
-            "baseline_result_summary",
-            "evidence_status",
-            "caution_note",
-            "supporting_view",
-            "showcase_include",
-        },
-        label="counterfactual_conclusion_registry",
-    )
-
-    require_columns(
-        frames["population"],
-        {
-            "Target",
-            "metric",
-            "horizon",
-            "primary_gap_pct",
-            "native_gap_pct",
-            "gap_pct_shift_pp",
-            "absolute_gap_pct_shift_pp",
-            "same_direction",
-        },
-        label="counterfactual_population_robustness",
-    )
-
-    require_columns(
-        frames["speed_weighting"],
-        {
-            "Target",
-            "metric",
-            "horizon",
-            "world_specific_gap_pct",
-            "common_observed_gap_pct",
-            "gap_pct_shift_pp",
-            "same_direction",
-        },
-        label="counterfactual_speed_weighting_robustness",
-    )
-
-    require_columns(
-        frames["temporal"],
-        {
-            "Target",
-            "metric",
-            "horizon",
-            "month_count",
-            "monthly_direction_agreement_pct",
-            "monthly_gap_pct_min",
-            "monthly_gap_pct_max",
-            "monthly_sign_flips",
-        },
-        label="counterfactual_temporal_robustness",
-    )
-
-    require_columns(
-        frames["geography"],
-        {
-            "Target",
-            "metric",
-            "horizon",
-            "geography_dimension",
-            "group_count",
-            "direction_agreement_pct",
-            "gap_pct_min",
-            "gap_pct_max",
-        },
-        label="counterfactual_geography_robustness",
-    )
-
-    require_columns(
-        frames["horizon"],
-        {
-            "Target",
-            "metric",
-            "h1_gap_pct",
-            "h2_gap_pct",
-            "h5_gap_pct",
-            "aggregate_horizons_same_direction",
-            "aggregate_horizon_spread_pp",
-            "median_row_horizon_spread_pct",
-            "row_direction_agreement_pct",
-        },
-        label="counterfactual_horizon_robustness",
-    )
-
-    require_columns(
-        frames["calibration"],
-        {
-            "Target",
-            "metric",
-            "horizon",
-            "median_signed_mae_units",
-            "median_absolute_mae_units",
-            "p90_absolute_mae_units",
-            "share_abs_ge_1_mae_pct",
-            "share_abs_ge_2_mae_pct",
-            "rows",
-        },
-        label="counterfactual_pre_cp_calibration",
-    )
-
-    return frames
-
 
 def build_robustness_qa(
     frames: dict[str, pd.DataFrame],
@@ -667,7 +404,7 @@ def build_robustness_qa(
     )
 
 
-frames = load_robustness_inputs()
+frames = load_counterfactual_robustness_inputs()
 qa = build_robustness_qa(
     frames
 )
@@ -1865,206 +1602,6 @@ SAVED_VIEWS = [
     },
 ]
 
-
-# ---------------------------------------------------------------------
-# Pass 2 — Taxi Zone × metric weekly scouting
-# ---------------------------------------------------------------------
-
-POST_REQUIRED = {
-    "week_start",
-    "period_complete",
-    "target_temporal_bucket",
-    "taxi_zone_id",
-    "zone",
-    "borough",
-    "metric",
-    "support_rows",
-    "observed_level",
-    "observed_weight",
-    "no_cp_h1",
-    "no_cp_weight_h1",
-    "no_cp_h2",
-    "no_cp_weight_h2",
-    "no_cp_h5",
-    "no_cp_weight_h5",
-}
-
-PRE_REQUIRED = {
-    "week_start",
-    "temporal_bucket",
-    "taxi_zone_id",
-    "zone",
-    "borough",
-    "metric",
-    "support_rows",
-    "observed_level",
-    "observed_weight",
-}
-
-
-def validate_compact_qa(
-    frame: pd.DataFrame,
-    *,
-    label: str,
-) -> None:
-    """Fail closed if a compact Raw 21 preprocessing artifact reports failure."""
-    status_column = (
-        "status"
-        if "status" in frame.columns
-        else None
-    )
-
-    if status_column is None:
-        raise KeyError(
-            f"{label} has no status column."
-        )
-
-    failed = frame.loc[
-        ~frame[
-            status_column
-        ].astype(str).str.upper().eq(
-            "PASS"
-        )
-    ]
-
-    if not failed.empty:
-        raise RuntimeError(
-            f"{label} contains failed QA rows."
-        )
-
-
-@st.cache_data(show_spinner=False)
-def load_zone_weekly_inputs() -> tuple[
-    pd.DataFrame,
-    pd.DataFrame,
-]:
-    """Load compact Raw 21 zone-level weekly ingredients used by Pass 2."""
-    paths = {
-        "post": FILES[
-            "post_zone_weekly"
-        ],
-        "post_qa": FILES[
-            "post_zone_weekly_qa"
-        ],
-        "pre": FILES[
-            "pre_zone_weekly"
-        ],
-        "pre_qa": FILES[
-            "pre_zone_weekly_qa"
-        ],
-    }
-
-    require_files(
-        paths
-    )
-
-    post = pd.read_parquet(
-        paths[
-            "post"
-        ]
-    )
-    post_qa = pd.read_parquet(
-        paths[
-            "post_qa"
-        ]
-    )
-    pre = pd.read_parquet(
-        paths[
-            "pre"
-        ]
-    )
-    pre_qa = pd.read_parquet(
-        paths[
-            "pre_qa"
-        ]
-    )
-
-    require_columns(
-        post,
-        POST_REQUIRED,
-        label="counterfactual_braid_temporal_explorer",
-    )
-    require_columns(
-        pre,
-        PRE_REQUIRED,
-        label="counterfactual_prelaunch_temporal_explorer",
-    )
-
-    validate_compact_qa(
-        post_qa,
-        label=(
-            "counterfactual_braid_temporal_explorer_qa"
-        ),
-    )
-    validate_compact_qa(
-        pre_qa,
-        label=(
-            "counterfactual_prelaunch_temporal_explorer_qa"
-        ),
-    )
-
-    for frame in [
-        post,
-        pre,
-    ]:
-        frame[
-            "week_start"
-        ] = pd.to_datetime(
-            frame[
-                "week_start"
-            ],
-            errors="raise",
-        )
-
-        frame[
-            "taxi_zone_id"
-        ] = pd.to_numeric(
-            frame[
-                "taxi_zone_id"
-            ],
-            errors="coerce",
-        ).astype(
-            "Int64"
-        )
-
-        frame[
-            "canonical_taxi_zone_id"
-        ] = (
-            frame[
-                "taxi_zone_id"
-            ]
-            .replace(
-                CANONICAL_ZONE_ALIASES
-            )
-            .astype(
-                "Int64"
-            )
-        )
-
-    # Unknown zones lack physical geometry/name semantics for reader-facing
-    # Taxi Zone examples.
-    post = post.loc[
-        ~post[
-            "canonical_taxi_zone_id"
-        ].isin(
-            UNKNOWN_ZONE_IDS
-        )
-    ].copy()
-
-    pre = pre.loc[
-        ~pre[
-            "canonical_taxi_zone_id"
-        ].isin(
-            UNKNOWN_ZONE_IDS
-        )
-    ].copy()
-
-    return (
-        post,
-        pre,
-    )
-
-
 def weighted_value(
     values: pd.Series,
     weights: pd.Series,
@@ -2171,7 +1708,7 @@ def build_zone_weekly_curves() -> tuple[
     Canonical aliases are combined before aggregation so Corona does not appear
     twice in the reader-facing scout.
     """
-    post, pre = load_zone_weekly_inputs()
+    post, pre = load_counterfactual_raw24_zone_weekly_inputs()
 
     post = post.loc[
         post[
@@ -3520,101 +3057,6 @@ def build_robustness_radar(
 # Precomputed Taxi Zone scout access
 # ---------------------------------------------------------------------
 
-ZONE_DIAGNOSTIC_REQUIRED = {
-    "metric",
-    "taxi_zone_id",
-    "zone",
-    "borough",
-    "pre_weeks",
-    "post_weeks",
-    "launch_jump_pct",
-    "direction_persistence_pct",
-    "horizon_agreement_pct",
-    "pre_range_share_pct",
-    "median_abs_gap_relative_to_pre_pct",
-    "median_h1_h5_spread_relative_to_pre_pct",
-    "median_h1_gap_native",
-    "strong_scout_index",
-    "concern_scout_index",
-}
-
-ZONE_WEEKLY_REQUIRED = {
-    "metric",
-    "taxi_zone_id",
-    "zone",
-    "borough",
-    "week_start",
-    "period",
-    "observed_level",
-    "no_cp_h1",
-    "no_cp_h2",
-    "no_cp_h5",
-}
-
-
-@st.cache_data(show_spinner=False)
-def load_precomputed_zone_scout() -> tuple[
-    pd.DataFrame,
-    pd.DataFrame,
-    pd.DataFrame,
-] | None:
-    """
-    Load Raw 24's one-time Taxi-Zone scout artifacts.
-
-    WHY:
-    The previous prototype recomputed tens of thousands of grouped weekly
-    trajectories inside Streamlit. That is preprocessing work, not app work.
-    """
-    paths = [
-        FILES["zone_diagnostics"],
-        FILES["zone_weekly"],
-        FILES["zone_scout_qa"],
-    ]
-
-    if not all(
-        path.exists()
-        for path in paths
-    ):
-        return None
-
-    diagnostics = pd.read_parquet(
-        FILES["zone_diagnostics"]
-    )
-    weekly = pd.read_parquet(
-        FILES["zone_weekly"]
-    )
-    scout_qa = pd.read_parquet(
-        FILES["zone_scout_qa"]
-    )
-
-    require_columns(
-        diagnostics,
-        ZONE_DIAGNOSTIC_REQUIRED,
-        label="counterfactual_raw24_zone_diagnostics",
-    )
-    require_columns(
-        weekly,
-        ZONE_WEEKLY_REQUIRED,
-        label="counterfactual_raw24_zone_weekly",
-    )
-
-    validate_compact_qa(
-        scout_qa,
-        label="counterfactual_raw24_zone_scout_qa",
-    )
-
-    weekly["week_start"] = pd.to_datetime(
-        weekly["week_start"],
-        errors="raise",
-    )
-
-    return (
-        diagnostics,
-        weekly,
-        scout_qa,
-    )
-
-
 def candidate_view_precomputed(
     diagnostics: pd.DataFrame,
     *,
@@ -4130,7 +3572,7 @@ with exploration_section(
         "patterns. The mobility measure above carries through automatically."
     )
 
-    zone_scout = load_precomputed_zone_scout()
+    zone_scout = load_counterfactual_raw24_zone_scout()
 
     if zone_scout is None:
         st.info(

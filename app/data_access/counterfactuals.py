@@ -48,9 +48,9 @@ RAW23_RUNTIME_PATH = (
     / "counterfactual_raw23_runtime.parquet"
 )
 
-PROFILE_SUMMARY_PATH = (
-    FINAL_DIR
-    / "counterfactual_mobility_profile_summary.parquet"
+RAW23_RUNTIME_QA_PATH = (
+    APP_TABLE_DIR
+    / "counterfactual_raw23_runtime_qa.parquet"
 )
 
 # Raw 21 compact temporal / braid contracts.
@@ -299,18 +299,6 @@ RAW23_RUNTIME_COLUMNS = [
     "target_temporal_bucket",
     "counterfactual_gap_mae_units",
 ]
-
-PROFILE_REQUIRED_COLUMNS = [
-    "profile_id",
-    "profile_type",
-    "profile_label",
-    "profile_context",
-    "metric",
-    "horizon",
-    "profile_rows",
-    "mean_gap_mae_units",
-]
-
 
 RAW21_BRAID_REQUIRED_COLUMNS = {
     "summary_grain",
@@ -950,24 +938,80 @@ def load_counterfactual_geography_explorer() -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner=False)
-def load_counterfactual_surface() -> pd.DataFrame:
+def load_counterfactual_surface(
+    *,
+    horizon: int | None = None,
+    taxi_zone_id: int | None = None,
+    canonical_location_id: int | None = None,
+    borough: str | None = None,
+    cbd_spatial_category: str | None = None,
+    pre_cp_mobility_environment: str | None = None,
+    start_date: pd.Timestamp | None = None,
+    end_date: pd.Timestamp | None = None,
+    temporal_buckets: tuple[str, ...] | None = None,
+) -> pd.DataFrame:
     """
-    Load Raw 23's compact exact-row runtime surface.
+    Load an exact Raw 23 runtime slice with Parquet predicate pushdown.
 
     WHY:
-    Raw 23 only needs the frozen primary population and eleven columns from the
-    much wider Chapter 5 gap surface. The deployment artifact stores exactly
-    that subset without rounding or aggregation, so all existing Raw 23 slicing
-    and profile calculations retain their original semantics.
+    The compact runtime preserves the exact Chapter 5 primary rows, so reader
+    interactions can filter directly at read time instead of materializing the
+    complete Raw 23 surface before applying the same conditions in Pandas.
     """
     _require_files(
         [RAW23_RUNTIME_PATH],
         "Raw 23 counterfactual runtime contract",
     )
 
+    filters: list[tuple[str, str, object]] = []
+
+    if horizon is not None:
+        filters.append(("horizon", "==", int(horizon)))
+
+    if taxi_zone_id is not None:
+        filters.append(("taxi_zone_id", "==", int(taxi_zone_id)))
+
+    if canonical_location_id is not None:
+        filters.append(
+            ("canonical_location_id", "==", int(canonical_location_id))
+        )
+
+    if borough is not None:
+        filters.append(("borough", "==", str(borough)))
+
+    if cbd_spatial_category is not None:
+        filters.append(
+            ("cbd_spatial_category", "==", str(cbd_spatial_category))
+        )
+
+    if pre_cp_mobility_environment is not None:
+        filters.append(
+            (
+                "pre_cp_mobility_environment",
+                "==",
+                str(pre_cp_mobility_environment),
+            )
+        )
+
+    if start_date is not None:
+        filters.append(
+            ("target_date", ">=", pd.Timestamp(start_date).normalize())
+        )
+
+    if end_date is not None:
+        filters.append(
+            ("target_date", "<=", pd.Timestamp(end_date).normalize())
+        )
+
+    if temporal_buckets:
+        filters.append(
+            ("target_temporal_bucket", "in", list(temporal_buckets))
+        )
+
     frame = pd.read_parquet(
         RAW23_RUNTIME_PATH,
         columns=RAW23_RUNTIME_COLUMNS,
+        filters=filters or None,
     )
 
     _require_columns(
@@ -1001,6 +1045,7 @@ def load_counterfactual_surface() -> pd.DataFrame:
         errors="coerce",
     )
 
+    # Retain the frozen global contract even when a narrower slice was requested.
     return frame.loc[
         frame["metric"].isin(METRIC_ORDER)
         & frame["horizon"].isin(HORIZONS)
@@ -1013,207 +1058,52 @@ def load_counterfactual_surface() -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner=False)
-def load_primary_counterfactual_surface() -> pd.DataFrame:
-    """
-    Return the frozen reader-facing Chapter 5 primary population.
-
-    The compact Raw 23 runtime is already filtered to primary-gap-eligible rows
-    during its offline build, so this remains a compatibility wrapper for the
-    existing Raw 23 API.
-    """
-    return load_counterfactual_surface().copy()
-
+def load_primary_counterfactual_surface(
+    *,
+    horizon: int | None = None,
+    taxi_zone_id: int | None = None,
+    canonical_location_id: int | None = None,
+    borough: str | None = None,
+    cbd_spatial_category: str | None = None,
+    pre_cp_mobility_environment: str | None = None,
+    start_date: pd.Timestamp | None = None,
+    end_date: pd.Timestamp | None = None,
+    temporal_buckets: tuple[str, ...] | None = None,
+) -> pd.DataFrame:
+    """Return an exact filtered slice of Raw 23's frozen primary population."""
+    return load_counterfactual_surface(
+        horizon=horizon,
+        taxi_zone_id=taxi_zone_id,
+        canonical_location_id=canonical_location_id,
+        borough=borough,
+        cbd_spatial_category=cbd_spatial_category,
+        pre_cp_mobility_environment=pre_cp_mobility_environment,
+        start_date=start_date,
+        end_date=end_date,
+        temporal_buckets=temporal_buckets,
+    ).copy()
 
 @st.cache_data(show_spinner=False)
-def load_authoritative_profile_summary() -> pd.DataFrame:
-    """Load the compact Chapter 5 Taxi-Zone profile summary."""
-    frame = pd.read_parquet(
-        PROFILE_SUMMARY_PATH
+def load_counterfactual_runtime_qa() -> pd.DataFrame:
+    """Load and validate Raw 23's offline runtime QA results."""
+    _require_files(
+        [RAW23_RUNTIME_QA_PATH],
+        "Raw 23 runtime QA contract",
     )
+
+    qa = pd.read_parquet(RAW23_RUNTIME_QA_PATH)
 
     _require_columns(
-        frame,
-        PROFILE_REQUIRED_COLUMNS,
-        "counterfactual_mobility_profile_summary",
+        qa,
+        {"check_id", "status", "details"},
+        "counterfactual_raw23_runtime_qa",
+    )
+    _validate_qa_table(
+        qa,
+        label="counterfactual_raw23_runtime_qa",
     )
 
-    return frame
-
-
-def validate_counterfactual_contract() -> str:
-    """
-    Validate the profile calculation against the frozen compact artifact.
-
-    Coverage differs between the two frozen Chapter 5 artifacts, so equality is
-    required wherever profile keys overlap.
-    """
-    source = load_counterfactual_surface()
-    authoritative = load_authoritative_profile_summary()
-
-    qa_source = source.loc[
-        source[
-            "counterfactual_gap_mae_units"
-        ].notna()
-    ].copy()
-
-    rebuilt = (
-        qa_source.groupby(
-            [
-                "taxi_zone_id",
-                "zone",
-                "borough",
-                "metric",
-                "horizon",
-            ],
-            observed=True,
-            dropna=False,
-        )
-        .agg(
-            profile_rows=(
-                "counterfactual_gap_mae_units",
-                "count",
-            ),
-            mean_gap_mae_units=(
-                "counterfactual_gap_mae_units",
-                "mean",
-            ),
-        )
-        .reset_index()
-    )
-
-    rebuilt["taxi_zone_id"] = (
-        rebuilt["taxi_zone_id"]
-        .astype("Int64")
-        .astype("string")
-    )
-
-    authoritative = authoritative.copy()
-    authoritative["profile_id"] = (
-        authoritative["profile_id"]
-        .astype("string")
-    )
-    authoritative["horizon"] = pd.to_numeric(
-        authoritative["horizon"],
-        errors="raise",
-    ).astype(int)
-
-    comparison = rebuilt.merge(
-        authoritative[
-            [
-                "profile_id",
-                "profile_label",
-                "profile_context",
-                "metric",
-                "horizon",
-                "profile_rows",
-                "mean_gap_mae_units",
-            ]
-        ],
-        left_on=[
-            "taxi_zone_id",
-            "zone",
-            "borough",
-            "metric",
-            "horizon",
-        ],
-        right_on=[
-            "profile_id",
-            "profile_label",
-            "profile_context",
-            "metric",
-            "horizon",
-        ],
-        how="outer",
-        suffixes=(
-            "_rebuilt",
-            "_authoritative",
-        ),
-        indicator=True,
-    )
-
-    matched = comparison.loc[
-        comparison["_merge"].eq("both")
-    ].copy()
-
-    row_diff = (
-        pd.to_numeric(
-            matched["profile_rows_rebuilt"],
-            errors="coerce",
-        )
-        - pd.to_numeric(
-            matched["profile_rows_authoritative"],
-            errors="coerce",
-        )
-    ).abs()
-
-    value_diff = (
-        pd.to_numeric(
-            matched["mean_gap_mae_units_rebuilt"],
-            errors="coerce",
-        )
-        - pd.to_numeric(
-            matched["mean_gap_mae_units_authoritative"],
-            errors="coerce",
-        )
-    ).abs()
-
-    passed = (
-        len(matched) > 0
-        and row_diff.fillna(0).eq(0).all()
-        and value_diff.fillna(0).le(
-            1e-10
-        ).all()
-    )
-
-    if not passed:
-        raise RuntimeError(
-            "Raw 23 counterfactual profile QA failed: "
-            f"matched={len(matched):,}; "
-            f"max row diff="
-            f"{float(row_diff.max()) if row_diff.notna().any() else 0:.12g}; "
-            f"max MAE diff="
-            f"{float(value_diff.max()) if value_diff.notna().any() else 0:.12g}."
-        )
-
-    return (
-        f"matched={len(matched):,}; "
-        f"rebuilt_only="
-        f"{int(comparison['_merge'].eq('left_only').sum()):,}; "
-        f"authoritative_only="
-        f"{int(comparison['_merge'].eq('right_only').sum()):,}"
-    )
-
-
-def _subset_time(
-    frame: pd.DataFrame,
-    *,
-    period: str,
-    day_type: str,
-    daypart: str,
-) -> pd.DataFrame:
-    """Apply one Raw 23 temporal slice."""
-    start_date, end_date = PERIODS[
-        period
-    ]
-
-    valid_buckets = (
-        set(DAY_TYPE_BUCKETS[day_type])
-        & set(DAYPART_BUCKETS[daypart])
-    )
-
-    return frame.loc[
-        frame["target_date"].between(
-            start_date,
-            end_date,
-            inclusive="both",
-        )
-        & frame[
-            "target_temporal_bucket"
-        ].isin(
-            valid_buckets
-        )
-    ].copy()
-
+    return qa
 
 def _rms_profile(
     values: pd.Series,
@@ -1339,89 +1229,54 @@ def get_counterfactual_profiles(
     """
     Return one multimodal standardized profile per requested geography.
 
-    The statistic matches the Chapter 5 mobility-profile definition: mean
-    row-level counterfactual gap in Pre-CP validation-MAE units.
+    The statistic remains the mean row-level counterfactual gap in Pre-CP
+    validation-MAE units; filtering now happens before the Parquet rows load.
     """
     if grouping_name not in GROUPINGS:
-        raise ValueError(
-            f"Unsupported grouping: {grouping_name}"
-        )
+        raise ValueError(f"Unsupported grouping: {grouping_name}")
 
-    source = load_primary_counterfactual_surface()
-
-    grouping = GROUPINGS[
-        grouping_name
-    ]
-
-    group_id = grouping[
-        "group_id"
-    ]
-    group_label = grouping[
-        "group_label"
-    ]
-
-    group_columns = list(
-        dict.fromkeys(
-            [
-                group_id,
-                group_label,
-            ]
+    start_date, end_date = PERIODS[period]
+    valid_buckets = tuple(
+        sorted(
+            set(DAY_TYPE_BUCKETS[day_type])
+            & set(DAYPART_BUCKETS[daypart])
         )
     )
 
-    scoped = source.loc[
-        source["horizon"].eq(
-            int(horizon)
-        )
-    ].copy()
+    source = load_primary_counterfactual_surface(
+        horizon=int(horizon),
+        start_date=start_date,
+        end_date=end_date,
+        temporal_buckets=valid_buckets,
+    )
+
+    grouping = GROUPINGS[grouping_name]
+    group_id = grouping["group_id"]
+    group_label = grouping["group_label"]
+    group_columns = list(dict.fromkeys([group_id, group_label]))
 
     if grouping_name == "Taxi Zone":
-        scoped = _canonicalize_physical_taxi_zone_rows(
-            scoped
-        )
+        source = _canonicalize_physical_taxi_zone_rows(source)
 
-    scoped = _subset_time(
-        scoped,
-        period=period,
-        day_type=day_type,
-        daypart=daypart,
-    )
-
-    mask = pd.Series(
-        True,
-        index=scoped.index,
-    )
+    mask = pd.Series(True, index=source.index)
 
     for column in group_columns:
-        mask &= scoped[
-            column
-        ].notna()
+        mask &= source[column].notna()
 
-    scoped = scoped.loc[
-        mask
-    ].copy()
+    scoped = source.loc[mask].copy()
 
     if scoped.empty:
         return pd.DataFrame()
 
     long_summary = (
         scoped.groupby(
-            [
-                *group_columns,
-                "metric",
-            ],
+            [*group_columns, "metric"],
             observed=True,
             dropna=False,
         )
         .agg(
-            mean_gap_mae_units=(
-                "counterfactual_gap_mae_units",
-                "mean",
-            ),
-            support_rows=(
-                "counterfactual_gap_mae_units",
-                "count",
-            ),
+            mean_gap_mae_units=("counterfactual_gap_mae_units", "mean"),
+            support_rows=("counterfactual_gap_mae_units", "count"),
         )
         .reset_index()
     )
@@ -1456,50 +1311,28 @@ def get_counterfactual_profiles(
         if metric not in wide.columns:
             wide[metric] = np.nan
 
-    wide["multimodal_rms"] = wide[
-        METRIC_ORDER
-    ].apply(
+    wide["multimodal_rms"] = wide[METRIC_ORDER].apply(
         _rms_profile,
         axis=1,
     )
-
-    wide["max_abs_mae"] = wide[
-        METRIC_ORDER
-    ].abs().max(
-        axis=1
-    )
-
-    wide["sign_pattern"] = wide.apply(
-        _sign_pattern,
-        axis=1,
-    )
-
+    wide["max_abs_mae"] = wide[METRIC_ORDER].abs().max(axis=1)
+    wide["sign_pattern"] = wide.apply(_sign_pattern, axis=1)
     wide["opposite_sign_pairs"] = wide.apply(
         _opposite_sign_pairs,
         axis=1,
     )
-
     wide["grouping"] = grouping_name
 
     if grouping_name == "Policy geography":
         wide["_policy_order"] = pd.Categorical(
-            wide[
-                "cbd_spatial_category"
-            ],
+            wide["cbd_spatial_category"],
             categories=POLICY_ORDER,
             ordered=True,
         )
-
         wide = (
-            wide.sort_values(
-                "_policy_order"
-            )
-            .drop(
-                columns="_policy_order"
-            )
-            .reset_index(
-                drop=True
-            )
+            wide.sort_values("_policy_order")
+            .drop(columns="_policy_order")
+            .reset_index(drop=True)
         )
 
     return wide
@@ -1607,8 +1440,6 @@ def get_same_level_peers(
         )
     )
 
-    source = load_primary_counterfactual_surface()
-
     connectivity = load_taxi_zone_connectivity()
 
     _require_columns(
@@ -1674,87 +1505,65 @@ def get_child_taxi_zone_profiles(
     day_type: str,
     daypart: str,
 ) -> pd.DataFrame:
-    """
-    Return Taxi-Zone profiles contained by the selected parent geography.
-
-    Mobility-environment membership intentionally remains tied to the source
-    Taxi Zone assignment carried by Chapter 5.
-    """
+    """Return Taxi-Zone profiles contained by the selected parent geography."""
     if parent_grouping == "Taxi Zone":
+        raise ValueError("Taxi Zone does not have child Taxi Zones.")
+
+    start_date, end_date = PERIODS[period]
+    valid_buckets = tuple(
+        sorted(
+            set(DAY_TYPE_BUCKETS[day_type])
+            & set(DAYPART_BUCKETS[daypart])
+        )
+    )
+
+    geography_filters = {
+        "borough": None,
+        "cbd_spatial_category": None,
+        "pre_cp_mobility_environment": None,
+    }
+
+    parent_column = GROUPINGS[parent_grouping]["group_id"]
+
+    if parent_column not in geography_filters:
         raise ValueError(
-            "Taxi Zone does not have child Taxi Zones."
+            f"Unsupported parent geography for Taxi-Zone drill-down: "
+            f"{parent_grouping}"
         )
 
-    source = load_primary_counterfactual_surface()
+    geography_filters[parent_column] = str(selected_value)
 
-    parent_column = GROUPINGS[
-        parent_grouping
-    ]["group_id"]
-
-    scoped = source.loc[
-        source[
-            parent_column
-        ]
-        .astype(str)
-        .eq(
-            str(selected_value)
-        )
-    ].copy()
-
-    if scoped.empty:
-        return pd.DataFrame()
-
-    scoped = scoped.loc[
-        scoped[
-            "horizon"
-        ].eq(
-            int(horizon)
-        )
-    ].copy()
-
-    scoped = _subset_time(
-        scoped,
-        period=period,
-        day_type=day_type,
-        daypart=daypart,
+    scoped = load_primary_counterfactual_surface(
+        horizon=int(horizon),
+        start_date=start_date,
+        end_date=end_date,
+        temporal_buckets=valid_buckets,
+        **geography_filters,
     )
 
     if scoped.empty:
         return pd.DataFrame()
 
-    scoped = _canonicalize_physical_taxi_zone_rows(
-        scoped
-    )
+    # WHY: parent filtering happens before canonicalization so frozen mobility-
+    # environment membership continues to follow each source Taxi Zone.
+    scoped = _canonicalize_physical_taxi_zone_rows(scoped)
 
     long_summary = (
         scoped.groupby(
-            [
-                "taxi_zone_id",
-                "zone",
-                "metric",
-            ],
+            ["taxi_zone_id", "zone", "metric"],
             observed=True,
             dropna=False,
         )
         .agg(
-            mean_gap_mae_units=(
-                "counterfactual_gap_mae_units",
-                "mean",
-            ),
-            support_rows=(
-                "counterfactual_gap_mae_units",
-                "count",
-            ),
+            mean_gap_mae_units=("counterfactual_gap_mae_units", "mean"),
+            support_rows=("counterfactual_gap_mae_units", "count"),
         )
         .reset_index()
     )
 
     wide = (
         long_summary.pivot(
-            index=[
-                "taxi_zone_id",
-                "zone",
-            ],
+            index=["taxi_zone_id", "zone"],
             columns="metric",
             values="mean_gap_mae_units",
         )
@@ -1763,10 +1572,7 @@ def get_child_taxi_zone_profiles(
 
     support = (
         long_summary.groupby(
-            [
-                "taxi_zone_id",
-                "zone",
-            ],
+            ["taxi_zone_id", "zone"],
             observed=True,
             dropna=False,
         )["support_rows"]
@@ -1776,59 +1582,34 @@ def get_child_taxi_zone_profiles(
 
     wide = wide.merge(
         support,
-        on=[
-            "taxi_zone_id",
-            "zone",
-        ],
+        on=["taxi_zone_id", "zone"],
         how="left",
         validate="one_to_one",
     )
 
     for metric in METRIC_ORDER:
         if metric not in wide.columns:
-            wide[
-                metric
-            ] = np.nan
+            wide[metric] = np.nan
 
-    wide["multimodal_rms"] = wide[
-        METRIC_ORDER
-    ].apply(
+    wide["multimodal_rms"] = wide[METRIC_ORDER].apply(
         _rms_profile,
         axis=1,
     )
-
-    wide["max_abs_mae"] = wide[
-        METRIC_ORDER
-    ].abs().max(
-        axis=1
-    )
-
-    wide["sign_pattern"] = wide.apply(
-        _sign_pattern,
-        axis=1,
-    )
-
+    wide["max_abs_mae"] = wide[METRIC_ORDER].abs().max(axis=1)
+    wide["sign_pattern"] = wide.apply(_sign_pattern, axis=1)
     wide["opposite_sign_pairs"] = wide.apply(
         _opposite_sign_pairs,
         axis=1,
     )
-
     wide["grouping"] = "Taxi Zone"
 
     return (
         wide.sort_values(
-            [
-                "multimodal_rms",
-                "max_abs_mae",
-            ],
+            ["multimodal_rms", "max_abs_mae"],
             ascending=False,
         )
-        .reset_index(
-            drop=True
-        )
+        .reset_index(drop=True)
     )
-
-
 
 
 @st.cache_data(show_spinner=False)
@@ -2044,27 +1825,19 @@ def get_same_borough_taxi_zone_profiles(
     daypart: str,
 ) -> pd.DataFrame:
     """Return other Taxi Zones in the selected zone's borough."""
-    source = load_primary_counterfactual_surface()
-
-    selected = source.loc[
-        source[
-            "taxi_zone_id"
-        ].eq(
-            int(selected_zone_id)
-        )
-    ]
+    selected = load_primary_counterfactual_surface(
+        taxi_zone_id=int(selected_zone_id),
+    )
 
     if selected.empty:
         return pd.DataFrame()
 
-    borough = (
-        selected[
-            "borough"
-        ]
-        .dropna()
-        .astype(str)
-        .iloc[0]
-    )
+    borough_values = selected["borough"].dropna().astype(str)
+
+    if borough_values.empty:
+        return pd.DataFrame()
+
+    borough = borough_values.iloc[0]
 
     children = get_child_taxi_zone_profiles(
         parent_grouping="Borough",
@@ -2077,15 +1850,9 @@ def get_same_borough_taxi_zone_profiles(
 
     return (
         children.loc[
-            ~children[
-                "taxi_zone_id"
-            ].eq(
-                int(selected_zone_id)
-            )
+            ~children["taxi_zone_id"].eq(int(selected_zone_id))
         ]
-        .reset_index(
-            drop=True
-        )
+        .reset_index(drop=True)
     )
 
 @st.cache_data(show_spinner=False)

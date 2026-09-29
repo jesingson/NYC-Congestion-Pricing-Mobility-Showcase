@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
-from app.data_access.mobility_environments import load_canonical_cluster_assignments
 from app.data_access.spatial_visuals import get_zone_geojson
 from app.data_access.forecasting import (
+    forecast_day_type,
+    forecast_daypart,
+    load_forecast_geography_context,
     load_forecast_records,
     load_forecast_temporal_zone_summary,
 )
@@ -40,14 +40,6 @@ from app.utils.project_branding import (
 
 PAGE_CAPTION = "FORECAST RELIABILITY"
 PAGE_TITLE = "Where are forecasts most and least reliable?"
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-FORECAST_DIR = PROJECT_ROOT / "data" / "processed" / "4.7.1.final_tables"
-
-ZONE_SUMMARY_PATH = FORECAST_DIR / "showcase_forecast_zone_summary.parquet"
-
-FINAL_HOLDOUT_START_DATE = pd.Timestamp("2026-01-05")
-FINAL_HOLDOUT_END_DATE = pd.Timestamp("2026-03-31")
 
 # Scouting selected this as the clearest reader-facing spatial reliability hero:
 # broad support, substantial spatial variation, and no low-activity-tail warning.
@@ -113,27 +105,6 @@ GEOGRAPHY_FILTER_TYPES = [
     "Borough",
     "Policy geography",
     "Mobility environment",
-]
-
-POLICY_GEOGRAPHY_MAP = {
-    "cbd": "CBD",
-    "adjacent_to_cbd": "Gateway + adjacent",
-    "gateway_to_cbd": "Gateway + adjacent",
-    "non_cbd": "Outside",
-}
-
-ZONE_REQUIRED_COLUMNS = [
-    "metric",
-    "horizon",
-    "taxi_zone_id",
-    "zone",
-    "borough",
-    "reader_facing_zone",
-    "forecast_rows",
-    "mae",
-    "benchmark_mae",
-    "relative_mae_pct",
-    "benchmark_skill_pct",
 ]
 
 RECORD_COLUMNS = [
@@ -231,22 +202,6 @@ STORY_PRESETS = {
 # General helpers
 # ---------------------------------------------------------------------
 
-
-def require_file(path: Path) -> None:
-    """Stop with a useful message when an authoritative handoff is missing."""
-    if not path.exists():
-        st.error(f"Required Forecast Reliability input not found: {path}")
-        st.stop()
-
-
-def require_columns(frame: pd.DataFrame, required: list[str], label: str) -> None:
-    """Protect reader-facing results from silent schema drift."""
-    missing = sorted(set(required) - set(frame.columns))
-    if missing:
-        st.error(f"{label} is missing required columns: {missing}")
-        st.stop()
-
-
 def metric_label(metric: str) -> str:
     """Return the page's reader-facing mobility-measure label."""
     return METRIC_LABELS.get(metric, metric)
@@ -262,41 +217,6 @@ def _safe_divide(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
     numerator = pd.to_numeric(numerator, errors="coerce")
     denominator = pd.to_numeric(denominator, errors="coerce")
     return numerator.div(denominator.where(denominator.ne(0)))
-
-
-def _policy_geography(values: pd.Series) -> pd.Series:
-    """Collapse canonical CBD tags into three reader-facing geography groups."""
-    normalized = (
-        values.astype("string")
-        .str.strip()
-        .str.lower()
-        .replace(POLICY_GEOGRAPHY_MAP)
-    )
-    return normalized.fillna("Unknown")
-
-
-def _day_type(bucket: pd.Series) -> pd.Series:
-    """Translate the canonical temporal bucket into a simple Day type control."""
-    values = bucket.astype("string").str.lower()
-    return np.where(values.str.startswith("weekend"), "Weekends", "Weekdays")
-
-
-def _daypart(bucket: pd.Series) -> pd.Series:
-    """Translate the canonical temporal bucket into the five app Dayparts."""
-    values = bucket.astype("string").str.lower()
-    result = pd.Series("Unknown", index=bucket.index, dtype="string")
-
-    mapping = {
-        "overnight": "Overnight",
-        "am_peak": "AM peak",
-        "midday": "Midday",
-        "pm_peak": "PM peak",
-        "evening": "Evening",
-    }
-    for token, label in mapping.items():
-        result.loc[values.str.contains(token, regex=False, na=False)] = label
-
-    return result
 
 
 def _format_pct(value: object, *, signed: bool = False) -> str:
@@ -409,28 +329,16 @@ BIVARIATE_SKILL_LABELS = {
 # Load and compact the authoritative final-holdout evidence
 # ---------------------------------------------------------------------
 
-
 @st.cache_data(show_spinner="Loading forecast reliability evidence...")
-def load_page_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def load_page_data() -> tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Load final-holdout reliability summaries and compact temporal evidence.
+    Load compact final-holdout reliability evidence and shared geography context.
 
     WHY:
-    The main reliability explorer only needs additive statistics at
-    Metric × Horizon × Taxi Zone × Day type × Daypart grain. Those statistics
-    already exist in the compact temporal-zone handoff, so Raw 19 does not need
-    to scan and regroup the full row-level final-holdout runtime on startup.
+    Raw 19 reconstructs supported temporal slices exactly from additive
+    temporal-zone statistics. It does not need the separate frozen zone-summary
+    table or its own geography reconstruction.
     """
-    require_file(ZONE_SUMMARY_PATH)
-
-    zones = pd.read_parquet(ZONE_SUMMARY_PATH)
-
-    require_columns(
-        zones,
-        ZONE_REQUIRED_COLUMNS,
-        "showcase_forecast_zone_summary",
-    )
-
     temporal_base = load_forecast_temporal_zone_summary(
         columns=TEMPORAL_ZONE_COLUMNS,
         required_columns=TEMPORAL_ZONE_COLUMNS,
@@ -438,75 +346,9 @@ def load_page_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         horizons=HORIZONS,
     )
 
-    zones["horizon"] = pd.to_numeric(
-        zones["horizon"],
-        errors="coerce",
-    ).astype("Int64")
+    geography_context = load_forecast_geography_context()
 
-    zones["taxi_zone_id"] = pd.to_numeric(
-        zones["taxi_zone_id"],
-        errors="coerce",
-    ).astype("Int64")
-
-    temporal_base["horizon"] = pd.to_numeric(
-        temporal_base["horizon"],
-        errors="coerce",
-    ).astype("Int64")
-
-    temporal_base["taxi_zone_id"] = pd.to_numeric(
-        temporal_base["taxi_zone_id"],
-        errors="coerce",
-    ).astype("Int64")
-
-    zones = zones.loc[
-        zones["reader_facing_zone"].fillna(False)
-        & zones["metric"].isin(METRIC_ORDER)
-        & zones["horizon"].isin(HORIZONS)
-    ].copy()
-
-    temporal_base = temporal_base.loc[
-        temporal_base["metric"].isin(METRIC_ORDER)
-        & temporal_base["horizon"].isin(HORIZONS)
-    ].copy()
-
-    assignments = load_canonical_cluster_assignments().copy()
-
-    require_columns(
-        assignments,
-        [
-            "taxi_zone_id",
-            "cbd_spatial_category",
-            "pre_post_cp",
-            "canonical_cluster_name",
-        ],
-        "canonical mobility-environment assignments",
-    )
-
-    context = assignments.loc[
-        assignments["pre_post_cp"].astype(str).eq("post_cp"),
-        [
-            "taxi_zone_id",
-            "cbd_spatial_category",
-            "canonical_cluster_name",
-        ],
-    ].drop_duplicates("taxi_zone_id")
-
-    context["taxi_zone_id"] = pd.to_numeric(
-        context["taxi_zone_id"],
-        errors="coerce",
-    ).astype("Int64")
-
-    context["policy_geography"] = _policy_geography(
-        context["cbd_spatial_category"]
-    )
-
-    context = context.rename(
-        columns={
-            "canonical_cluster_name": "mobility_environment",
-        }
-    )
-
-    return zones, temporal_base, context
+    return temporal_base, geography_context
 
 
 @st.cache_data(show_spinner=False)
@@ -534,11 +376,11 @@ def load_zone_evidence(
         errors="coerce",
     )
 
-    frame["day_type"] = _day_type(
+    frame["day_type"] = forecast_day_type(
         frame["target_temporal_bucket"]
     )
 
-    frame["daypart"] = _daypart(
+    frame["daypart"] = forecast_daypart(
         frame["target_temporal_bucket"]
     )
 
@@ -1081,6 +923,15 @@ def build_bivariate_map(
     if plot.empty:
         return go.Figure(), classified_city, cuts
 
+    # WHY: mixed-type customdata is serialized as strings, so Plotly's numeric
+    # format specifiers are not reliable here. Pre-format hover-only values.
+    plot["hover_skill"] = plot["benchmark_skill_pct"].map(
+        lambda value: _format_pct(value, signed=True)
+    )
+    plot["hover_support"] = plot["forecast_rows"].map(
+        lambda value: f"{int(value):,}"
+    )
+
     figure = go.Figure(
         go.Choroplethmap(
             geojson=get_zone_geojson(),
@@ -1097,18 +948,18 @@ def build_bivariate_map(
                     "taxi_zone_id",
                     "zone",
                     "borough",
-                    "bivariate_label",
-                    "hover_error",
+                    "hover_support",
                     "hover_skill",
-                    "forecast_rows",
+                    "bivariate_label",
                 ]
             ].to_numpy(),
             hovertemplate=(
-                "<b>%{customdata[1]}</b> · %{customdata[2]}<br><br>"
-                "%{customdata[3]}<br>"
-                "Relative MAE: %{customdata[4]}<br>"
-                "vs Last-week baseline: %{customdata[5]}<br>"
-                "Holdout observations: %{customdata[6]:,.0f}"
+                "<b>%{customdata[1]}</b> · %{customdata[2]}<br>"
+                "%{customdata[5]}<br>"
+                "Typical observed magnitude: %{x:,.3f}<br>"
+                "Relative MAE: %{y:.3f}%<br>"
+                "vs Last-week baseline: %{customdata[4]}<br>"
+                "Holdout observations: %{customdata[3]}"
                 "<extra></extra>"
             ),
         )
@@ -1187,12 +1038,25 @@ def build_activity_scatter(
     if plot.empty:
         return go.Figure(), classified_city, cuts
 
+    if plot.empty:
+        return go.Figure(), classified_city, cuts
+
+    # WHY: Plotly customdata becomes mixed-type here because zone labels and numeric
+    # values share one array. Pre-format presentation-only values so hover text never
+    # exposes raw floating-point precision.
+    plot["hover_skill"] = plot["benchmark_skill_pct"].map(
+        lambda value: _format_pct(value, signed=True)
+    )
+    plot["hover_support"] = plot["forecast_rows"].map(
+        lambda value: f"{int(value):,}"
+    )
+
     rho = plot["relative_mae_pct"].corr(
         np.log1p(plot["observed_abs_mean"]), method="spearman"
     )
     error_ratio = (
-        float(plot["relative_mae_pct"].max())
-        / max(float(plot["relative_mae_pct"].quantile(0.10)), 1e-9)
+            float(plot["relative_mae_pct"].max())
+            / max(float(plot["relative_mae_pct"].quantile(0.10)), 1e-9)
     )
     use_log_y = error_ratio > 20
 
@@ -1217,8 +1081,8 @@ def build_activity_scatter(
                     "taxi_zone_id",
                     "zone",
                     "borough",
-                    "forecast_rows",
-                    "benchmark_skill_pct",
+                    "hover_support",
+                    "hover_skill",
                     "bivariate_label",
                 ]
             ].to_numpy(),
@@ -1227,8 +1091,8 @@ def build_activity_scatter(
                 "%{customdata[5]}<br>"
                 "Typical observed magnitude: %{x:,.3f}<br>"
                 "Relative MAE: %{y:.3f}%<br>"
-                "vs Last-week baseline: %{customdata[4]:+.3f}%<br>"
-                "Holdout observations: %{customdata[3]:,.0f}"
+                "vs Last-week baseline: %{customdata[4]}<br>"
+                "Holdout observations: %{customdata[3]}"
                 "<extra></extra>"
             ),
         )
@@ -2352,8 +2216,6 @@ st.markdown(
 
 _set_default_state()
 
-require_file(ZONE_SUMMARY_PATH)
-
 st.caption(PAGE_CAPTION)
 st.title(PAGE_TITLE)
 st.markdown(
@@ -2366,7 +2228,7 @@ week**.
 """
 )
 
-_, temporal_base, geography_context = load_page_data()
+temporal_base, geography_context = load_page_data()
 
 # ------------------------------------------------------------------
 # Hero — one simple spatial answer

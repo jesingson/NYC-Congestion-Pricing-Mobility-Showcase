@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
 from app.data_access.forecasting import (
+    forecast_day_type,
+    forecast_daypart,
+    load_forecast_failure_cases,
+    load_forecast_failure_context,
+    load_forecast_failure_mechanisms,
+    load_forecast_holdout_curated_cases,
+    load_forecast_holdout_scatter_sample,
+    load_forecast_holdout_slice_summary,
     load_forecast_records,
 )
+
 from app.utils.project_branding import (
     BRAND_COLORS,
     apply_branding,
@@ -37,16 +44,6 @@ from app.utils.project_branding import (
 
 PAGE_CAPTION = "FORECAST WINS & MISSES"
 PAGE_TITLE = "A forecast can miss badly and still be useful"
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-FORECAST_DIR = PROJECT_ROOT / "data" / "processed" / "4.7.1.final_tables"
-
-FAILURE_CASES_PATH = FORECAST_DIR / "forecast_failure_case_studies.parquet"
-FAILURE_CONTEXT_PATH = FORECAST_DIR / "forecast_failure_case_context.parquet"
-FAILURE_MECHANISM_PATH = FORECAST_DIR / "forecast_failure_mechanism_summary.parquet"
-
-FINAL_HOLDOUT_START_DATE = pd.Timestamp("2026-01-05")
-FINAL_HOLDOUT_END_DATE = pd.Timestamp("2026-03-31")
 
 PLOT_CONFIG = {"displayModeBar": False, "responsive": True}
 SCATTER_RANDOM_ROWS = 12_000
@@ -84,6 +81,13 @@ DAYPART_LABELS = {
     "midday": "Midday",
     "pm_peak": "PM peak",
     "evening": "Evening",
+}
+DAYPART_FILTER_VALUES = {
+    "Overnight": "overnight",
+    "AM peak": "am_peak",
+    "Midday": "midday",
+    "PM peak": "pm_peak",
+    "Evening": "evening",
 }
 
 RECORD_COLUMNS = [
@@ -246,22 +250,6 @@ DIAGNOSTIC_DEFINITIONS = {
 # ---------------------------------------------------------------------
 # Basic guards and formatting
 # ---------------------------------------------------------------------
-
-
-def require_file(path: Path) -> None:
-    """Stop before rendering if an authoritative Chapter 4 handoff is missing."""
-    if not path.exists():
-        st.error(f"Required Forecast Wins & Misses input not found: {path}")
-        st.stop()
-
-
-def require_columns(frame: pd.DataFrame, required: list[str], label: str) -> None:
-    """Prevent a stale or changed upstream schema from silently changing the page."""
-    missing = sorted(set(required) - set(frame.columns))
-    if missing:
-        st.error(f"{label} is missing required columns: {missing}")
-        st.stop()
-
 
 def metric_label(metric: str) -> str:
     """Return the reader-facing name for one forecasting target."""
@@ -569,6 +557,55 @@ def explorer_plane_takeaway(
         f"{comparison_sentence}.{tie_sentence}{severe_sentence}"
     )
 
+def explorer_plane_takeaway_from_summary(
+    visible_summary: pd.DataFrame,
+    reference_summary: pd.DataFrame,
+) -> str:
+    """Explain one explorer slice using exact additive summary statistics."""
+    visible_shares = exact_quadrant_shares(visible_summary)
+    reference_shares = exact_quadrant_shares(reference_summary)
+    visible_stats = summary_statistics(visible_summary)
+
+    dominant = str(visible_shares.idxmax())
+    dominant_share = float(visible_shares.loc[dominant])
+
+    miss_label = "Higher-error misses"
+    miss_share = float(visible_shares.loc[miss_label])
+    miss_delta = miss_share - float(reference_shares.loc[miss_label])
+
+    if np.isclose(miss_delta, 0.0):
+        comparison_sentence = "the same share as in the full final holdout"
+    else:
+        direction = "higher" if miss_delta > 0 else "lower"
+        comparison_sentence = (
+            f"**{abs(miss_delta):.1f} percentage points {direction}** "
+            "than the full final holdout"
+        )
+
+    tie_share = visible_stats["tie_share"]
+    tie_sentence = (
+        f" Exact ties account for **{tie_share:.2f}%**."
+        if np.isfinite(tie_share) and tie_share > 0
+        else ""
+    )
+
+    severe_helpful = visible_stats["severe_helpful_share"]
+    severe_sentence = (
+        f" Among severe errors, **{severe_helpful:.1f}%** are still closer "
+        "than Last-week."
+        if np.isfinite(severe_helpful)
+        else " This slice contains no severe errors."
+    )
+
+    return (
+        f"The largest quadrant in this slice is **{dominant}** at "
+        f"**{dominant_share:.1f}%** of supported records. The selected forecast "
+        f"is closer than Last-week on **{visible_stats['model_win_share']:.1f}%** "
+        f"of rows; Last-week is closer on "
+        f"**{visible_stats['last_week_win_share']:.1f}%**. "
+        f"**Higher-error misses** account for **{miss_share:.1f}%**, "
+        f"{comparison_sentence}.{tie_sentence}{severe_sentence}"
+    )
 
 # ---------------------------------------------------------------------
 # Data loading
@@ -581,108 +618,58 @@ def load_page_data() -> tuple[
     pd.DataFrame,
     pd.DataFrame,
     pd.DataFrame,
+    pd.DataFrame,
+    pd.DataFrame,
 ]:
-    """Load compact final-holdout evidence needed to render Page 20."""
-    records = load_forecast_records(
-        columns=RECORD_COLUMNS,
-        required_columns=RECORD_COLUMNS,
-        reader_facing_only=True,
-        final_holdout_only=True,
-    )
+    """Load compact page-wide evidence through the shared forecasting layer."""
+    summary = load_forecast_holdout_slice_summary()
+    scatter = load_forecast_holdout_scatter_sample()
+    curated = load_forecast_holdout_curated_cases()
 
-    records["severe_error"] = (
-        records["severe_error"]
-        .fillna(False)
-        .astype(bool)
-    )
-
-    records["failure_combination"] = (
-        records["failure_combination"]
+    scatter["severe_error"] = scatter["severe_error"].fillna(False).astype(bool)
+    scatter["failure_combination"] = (
+        scatter["failure_combination"]
         .astype("string")
-        .fillna(
-            "No identified mechanism"
-        )
+        .fillna("No identified mechanism")
+    )
+    scatter["day_type"] = forecast_day_type(
+        scatter["target_temporal_bucket"]
+    )
+    scatter["daypart"] = forecast_daypart(
+        scatter["target_temporal_bucket"]
     )
 
-    records["lens"] = analysis_lens(
-        records
+    curated["severe_error"] = curated["severe_error"].fillna(False).astype(bool)
+    curated["failure_combination"] = (
+        curated["failure_combination"]
+        .astype("string")
+        .fillna("No identified mechanism")
     )
 
-    cases = pd.read_parquet(
-        FAILURE_CASES_PATH
+    cases = load_forecast_failure_cases(
+        required_columns=FAILURE_CASE_REQUIRED,
     )
 
-    require_columns(
-        cases,
-        FAILURE_CASE_REQUIRED,
-        "forecast_failure_case_studies",
+    context = load_forecast_failure_context(
+        required_columns=FAILURE_CONTEXT_REQUIRED,
     )
 
-    cases["target_date"] = (
-        pd.to_datetime(
-            cases["target_date"],
-            errors="coerce",
-        )
-    )
-
-    context = pd.read_parquet(
-        FAILURE_CONTEXT_PATH
-    )
-
-    require_columns(
-        context,
-        FAILURE_CONTEXT_REQUIRED,
-        "forecast_failure_case_context",
-    )
-
-    context["target_date"] = (
-        pd.to_datetime(
-            context["target_date"],
-            errors="coerce",
-        )
-    )
-
-    mechanisms = pd.read_parquet(
-        FAILURE_MECHANISM_PATH
-    )
-
-    require_columns(
-        mechanisms,
-        MECHANISM_REQUIRED,
-        "forecast_failure_mechanism_summary",
+    mechanisms = load_forecast_failure_mechanisms(
+        required_columns=MECHANISM_REQUIRED,
     )
 
     return (
-        records,
+        summary,
+        scatter,
+        curated,
         cases,
         context,
         mechanisms,
     )
-
 
 # ---------------------------------------------------------------------
 # Page filters
 # ---------------------------------------------------------------------
-
-
-def day_type_from_bucket(series: pd.Series) -> pd.Series:
-    """Map temporal bucket strings to reader-facing day types."""
-    return np.where(
-        series.astype(str).str.startswith("weekend_"),
-        "Weekends",
-        "Weekdays",
-    )
-
-
-def daypart_from_bucket(series: pd.Series) -> pd.Series:
-    """Map temporal bucket strings to reader-facing dayparts."""
-    cleaned = (
-        series.astype(str)
-        .str.replace("weekday_", "", regex=False)
-        .str.replace("weekend_", "", regex=False)
-    )
-    return cleaned.map(DAYPART_LABELS).fillna(cleaned.str.replace("_", " ").str.title())
-
 
 def apply_page_filters(
     frame: pd.DataFrame,
@@ -706,6 +693,150 @@ def apply_page_filters(
 
     return selected.copy()
 
+def apply_summary_filters(
+    frame: pd.DataFrame,
+    *,
+    metric: str,
+    horizon: str,
+    day_type: str,
+    daypart: str,
+) -> pd.DataFrame:
+    """Filter Raw 20's exact additive summary using reader-facing controls."""
+    selected = frame
+
+    if metric != "All targets":
+        selected = selected.loc[selected["metric"].eq(metric)]
+
+    if horizon != "All horizons":
+        selected = selected.loc[selected["horizon"].eq(int(horizon))]
+
+    if day_type != "All days":
+        selected = selected.loc[selected["day_type"].eq(day_type)]
+
+    if daypart != "All dayparts":
+        selected = selected.loc[
+            selected["daypart"].eq(DAYPART_FILTER_VALUES[daypart])
+        ]
+
+    return selected.copy()
+
+
+def summary_statistics(frame: pd.DataFrame) -> dict[str, float]:
+    """Recover exact additive Win-Miss statistics from one summary slice."""
+    forecast_rows = int(frame["forecast_rows"].sum())
+    supported_rows = int(frame["supported_rows"].sum())
+
+    def supported_share(column: str) -> float:
+        if not supported_rows:
+            return np.nan
+        return 100 * float(frame[column].sum()) / supported_rows
+
+    severe_rows = int(frame["severe_rows"].sum())
+    hard_helpful_rows = int(frame["hard_helpful_rows"].sum())
+
+    return {
+        "forecast_rows": forecast_rows,
+        "supported_rows": supported_rows,
+        "model_win_share": supported_share("model_win_rows"),
+        "last_week_win_share": supported_share("last_week_win_rows"),
+        "tie_share": supported_share("tie_rows"),
+        "lower_error_model_win_share": supported_share(
+            "lower_error_model_win_rows"
+        ),
+        "higher_error_model_win_share": supported_share(
+            "higher_error_model_win_rows"
+        ),
+        "lower_error_last_week_win_share": supported_share(
+            "lower_error_last_week_win_rows"
+        ),
+        "higher_error_last_week_win_share": supported_share(
+            "higher_error_last_week_win_rows"
+        ),
+        "severe_share": (
+            100 * severe_rows / forecast_rows
+            if forecast_rows
+            else np.nan
+        ),
+        "severe_helpful_share": (
+            100 * hard_helpful_rows / severe_rows
+            if severe_rows
+            else np.nan
+        ),
+    }
+
+
+def exact_quadrant_shares(frame: pd.DataFrame) -> pd.Series:
+    """Return exact Plane quadrant percentages from the additive summary."""
+    stats = summary_statistics(frame)
+
+    return pd.Series(
+        {
+            "Lower-error forecast wins": stats[
+                "lower_error_model_win_share"
+            ],
+            "Higher-error but still helpful": stats[
+                "higher_error_model_win_share"
+            ],
+            "Lower-error Last-week wins": stats[
+                "lower_error_last_week_win_share"
+            ],
+            "Higher-error misses": stats[
+                "higher_error_last_week_win_share"
+            ],
+        },
+        dtype=float,
+    )
+
+@st.cache_data(show_spinner=False)
+def load_band_records(
+    metric: str,
+    horizon: int,
+) -> pd.DataFrame:
+    """Load only one metric × horizon slice for Win-Miss Bands."""
+    frame = load_forecast_records(
+        columns=RECORD_COLUMNS,
+        required_columns=RECORD_COLUMNS,
+        metrics=metric,
+        horizons=int(horizon),
+        reader_facing_only=True,
+        final_holdout_only=True,
+    )
+
+    frame["severe_error"] = frame["severe_error"].fillna(False).astype(bool)
+    frame["failure_combination"] = (
+        frame["failure_combination"]
+        .astype("string")
+        .fillna("No identified mechanism")
+    )
+    frame["day_type"] = forecast_day_type(
+        frame["target_temporal_bucket"]
+    )
+
+    frame["daypart"] = forecast_daypart(
+        frame["target_temporal_bucket"]
+    )
+
+    return frame
+
+
+@st.cache_data(show_spinner=False)
+def load_record_context_rows(
+    metric: str,
+    horizon: int,
+    taxi_zone_id: int,
+    temporal_bucket: str,
+) -> pd.DataFrame:
+    """Load only the exact series needed around one curated forecast case."""
+    return load_forecast_records(
+        columns=RECORD_COLUMNS,
+        required_columns=RECORD_COLUMNS,
+        metrics=metric,
+        horizons=int(horizon),
+        taxi_zone_ids=int(taxi_zone_id),
+        temporal_buckets=temporal_bucket,
+        reader_facing_only=True,
+        final_holdout_only=True,
+    )
 
 # ---------------------------------------------------------------------
 # Win–Miss plane
@@ -781,7 +912,12 @@ def scatter_sample(frame: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def build_win_miss_plane(frame: pd.DataFrame) -> go.Figure:
+def build_win_miss_plane(
+    frame: pd.DataFrame,
+    *,
+    exact_summary: pd.DataFrame | None = None,
+    pre_sampled: bool = False,
+) -> go.Figure:
     """
     Plot forecast-error magnitude against value added over Last-week.
 
@@ -816,7 +952,11 @@ def build_win_miss_plane(frame: pd.DataFrame) -> go.Figure:
         x_high = float(positive_x.quantile(0.9999))
         x_high = max(x_high, x_low * 10, 100.0)
 
-    sample = scatter_sample(eligible)
+    sample = (
+        eligible.copy()
+        if pre_sampled
+        else scatter_sample(eligible)
+    )
     if sample.empty:
         return figure
 
@@ -829,8 +969,17 @@ def build_win_miss_plane(frame: pd.DataFrame) -> go.Figure:
         .where(lambda values: values.gt(0), display_floor)
     )
 
-    quadrant_share = quadrant_share_series(eligible)
-    outcome_shares = baseline_outcome_shares(eligible)
+    if exact_summary is None:
+        quadrant_share = quadrant_share_series(eligible)
+        outcome_shares = baseline_outcome_shares(eligible)
+    else:
+        exact_stats = summary_statistics(exact_summary)
+        quadrant_share = exact_quadrant_shares(exact_summary)
+        outcome_shares = {
+            "forecast_win": exact_stats["model_win_share"],
+            "baseline_win": exact_stats["last_week_win_share"],
+            "tie": exact_stats["tie_share"],
+        }
 
     full_y = pd.to_numeric(
         eligible["benchmark_advantage_index"],
@@ -2202,13 +2351,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-for source_path in [
-    FAILURE_CASES_PATH,
-    FAILURE_CONTEXT_PATH,
-    FAILURE_MECHANISM_PATH,
-]:
-    require_file(source_path)
-
 st.caption(PAGE_CAPTION)
 st.title(PAGE_TITLE)
 st.markdown(
@@ -2224,10 +2366,14 @@ it improved — or failed to improve — on the **Last-week baseline**.
 )
 
 with st.spinner("Loading the frozen final-holdout forecast diagnostics…"):
-    records, failure_cases, failure_context, mechanisms = load_page_data()
-
-records["day_type"] = day_type_from_bucket(records["target_temporal_bucket"])
-records["daypart"] = daypart_from_bucket(records["target_temporal_bucket"])
+    (
+        holdout_summary,
+        scatter_records,
+        curated_cases,
+        failure_cases,
+        failure_context,
+        mechanisms,
+    ) = load_page_data()
 
 # ------------------------------------------------------------------
 # At a Glance
@@ -2235,30 +2381,25 @@ records["daypart"] = daypart_from_bucket(records["target_temporal_bucket"])
 
 st.subheader("At a Glance")
 
-job_count = int(records[["metric", "horizon"]].drop_duplicates().shape[0])
-outcome_shares = baseline_outcome_shares(records)
-model_win_share = float(outcome_shares["forecast_win"])
-last_week_win_share = float(outcome_shares["baseline_win"])
-tie_share = float(outcome_shares["tie"])
-severe_share = 100 * float(records["severe_error"].mean())
+full_stats = summary_statistics(holdout_summary)
 
-advantage = pd.to_numeric(
-    records["benchmark_advantage_index"],
-    errors="coerce",
+job_count = int(
+    holdout_summary[["metric", "horizon"]]
+    .drop_duplicates()
+    .shape[0]
 )
-severe_supported = records["severe_error"] & advantage.notna()
-severe_supported_count = int(severe_supported.sum())
-severe_helpful_count = int(
-    (severe_supported & advantage.gt(0)).sum()
-)
-severe_helpful_within_severe = (
-    100 * severe_helpful_count / severe_supported_count
-    if severe_supported_count
-    else np.nan
-)
+
+model_win_share = full_stats["model_win_share"]
+last_week_win_share = full_stats["last_week_win_share"]
+tie_share = full_stats["tie_share"]
+severe_share = full_stats["severe_share"]
+severe_helpful_within_severe = full_stats["severe_helpful_share"]
 
 m1, m2, m3, m4, m5 = st.columns(5)
-m1.metric("Holdout records", f"{len(records):,}")
+m1.metric(
+    "Holdout records",
+    f"{int(full_stats['forecast_rows']):,}",
+)
 m2.metric("Measure × horizon pairs", f"{job_count}")
 m3.metric("Selected forecast closer", f"{model_win_share:.1f}%")
 m4.metric("Last-week closer", f"{last_week_win_share:.1f}%")
@@ -2300,7 +2441,11 @@ st.caption(
     "Jan 5–Mar 31, 2026"
 )
 
-hero_plane = build_win_miss_plane(records)
+hero_plane = build_win_miss_plane(
+    scatter_records,
+    exact_summary=holdout_summary,
+    pre_sampled=True,
+)
 st.plotly_chart(
     hero_plane,
     width="stretch",
@@ -2357,7 +2502,20 @@ st.write(
     "improved on Last-week."
 )
 
-hero_shortlists = candidate_shortlists(records)
+hero_shortlists = {
+    group: (
+        curated_cases.loc[
+            curated_cases["curated_group"].eq(group)
+        ]
+        .sort_values("curated_rank")
+        .reset_index(drop=True)
+    )
+    for group in [
+        "Clean wins",
+        "Hard but helpful",
+        "Clear misses",
+    ]
+}
 curated_labels = [
     ("Clean win", "Clean wins"),
     ("Hard but helpful", "Hard but helpful"),
@@ -2402,7 +2560,17 @@ for tab, (tab_label, shortlist_key) in zip(curated_tabs, curated_labels):
             format_number(lead_case["benchmark_advantage_index"]),
         )
 
-        case_chart = build_record_context_chart(lead_case, records)
+        case_context = load_record_context_rows(
+            str(lead_case["metric"]),
+            int(lead_case["horizon"]),
+            int(lead_case["taxi_zone_id"]),
+            str(lead_case["target_temporal_bucket"]),
+        )
+
+        case_chart = build_record_context_chart(
+            lead_case,
+            case_context,
+        )
         st.plotly_chart(
             case_chart,
             width="stretch",
@@ -2608,19 +2776,32 @@ with exploration_section(
             key="raw20_explorer_daypart",
         )
 
-    visible = apply_page_filters(
-        records,
+    visible_summary = apply_summary_filters(
+        holdout_summary,
         metric=metric_choice,
         horizon=horizon_choice,
         day_type=day_type_choice,
         daypart=daypart_choice,
     )
 
-    if visible.empty:
+    visible_scatter = apply_page_filters(
+        scatter_records,
+        metric=metric_choice,
+        horizon=horizon_choice,
+        day_type=day_type_choice,
+        daypart=daypart_choice,
+    )
+
+    if visible_summary.empty:
         st.warning("No holdout records match the current explorer filters.")
         st.stop()
 
-    explorer_plane = build_win_miss_plane(visible)
+    explorer_plane = build_win_miss_plane(
+        visible_scatter,
+        exact_summary=visible_summary,
+        pre_sampled=True,
+    )
+
     st.plotly_chart(
         explorer_plane,
         width="stretch",
@@ -2628,19 +2809,10 @@ with exploration_section(
         key="raw20_explorer_plane",
     )
 
-    visible_win_share = 100 * float(visible["benchmark_advantage_index"].gt(0).mean())
-    visible_severe_share = 100 * float(visible["severe_error"].mean())
-    visible_hard_helpful = 100 * float(
-        (
-            visible["severe_error"]
-            & visible["benchmark_advantage_index"].gt(0)
-        ).mean()
-    )
-
     render_chart_insight(
-        explorer_plane_takeaway(
-            visible,
-            records,
+        explorer_plane_takeaway_from_summary(
+            visible_summary,
+            holdout_summary,
         )
     )
 
@@ -2716,8 +2888,13 @@ with exploration_section(
     with st.expander("What do the Taxi Zone ordering measures mean?", expanded=False):
         render_band_rate_definitions()
 
+    band_records = load_band_records(
+        strip_metric,
+        strip_horizon,
+    )
+
     strip_scope = apply_page_filters(
-        records,
+        band_records,
         metric=strip_metric,
         horizon=str(strip_horizon),
         day_type=day_type_choice,
@@ -2879,7 +3056,7 @@ with exploration_section(
 
         selected_key = st.session_state.get("raw20_selected_record_key")
         selected_record = (
-            record_from_key(records, tuple(selected_key))
+            record_from_key(strip_scope, tuple(selected_key))
             if selected_key is not None
             else None
         )
@@ -2912,7 +3089,7 @@ with exploration_section(
                 format_number(selected_record["benchmark_advantage_index"]),
             )
 
-            record_chart = build_record_context_chart(selected_record, records)
+            record_chart = build_record_context_chart(selected_record, band_records)
             st.plotly_chart(
                 record_chart,
                 width="stretch",

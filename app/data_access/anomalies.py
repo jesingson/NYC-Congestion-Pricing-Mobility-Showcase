@@ -62,6 +62,34 @@ ANOMALY_METRIC_HISTORY_DIR = (
     / "stress_anomaly_metric_history"
 )
 
+STRESS_ANOMALY_RUNTIME_DIR = (
+    APP_ROOT
+    / "data"
+    / "processed"
+    / "app_tables"
+    / "stress_anomaly_runtime"
+)
+
+STRESS_ANOMALY_EVENTS_PATH = (
+    STRESS_ANOMALY_RUNTIME_DIR
+    / "stress_anomaly_events.parquet"
+)
+
+STRESS_ANOMALY_OBSERVATION_UNIVERSE_PATH = (
+    STRESS_ANOMALY_RUNTIME_DIR
+    / "stress_anomaly_observation_universe.parquet"
+)
+
+STRESS_ANOMALY_METRIC_EVIDENCE_PATH = (
+    STRESS_ANOMALY_RUNTIME_DIR
+    / "stress_anomaly_metric_evidence.parquet"
+)
+
+STRESS_ANOMALY_RUNTIME_QA_PATH = (
+    STRESS_ANOMALY_RUNTIME_DIR
+    / "stress_anomaly_runtime_qa.parquet"
+)
+
 EVENT_ID_COLUMN = "comparison_event_id"
 SELECTED_FINALIST_FLAG = "selected_finalist_flag"
 METRIC_HISTORY_SCALE_FACTOR = 1_000
@@ -167,6 +195,257 @@ def _normalize_event_columns(
 
     return result
 
+# ---------------------------------------------------------------------
+# Shared stress-anomaly runtime
+# ---------------------------------------------------------------------
+def _decode_modality_signature(
+    value: object,
+) -> tuple[str, ...]:
+    """Decode one compact pipe-delimited modality signature."""
+    if pd.isna(value):
+        return tuple()
+
+    text = str(value).strip()
+
+    if not text:
+        return tuple()
+
+    return tuple(
+        part
+        for part in text.split("|")
+        if part
+    )
+
+
+@st.cache_data(show_spinner=False)
+def load_stress_anomaly_events_runtime() -> pd.DataFrame:
+    """
+    Load the compact shared selected-event runtime.
+
+    Storage keeps modality signatures as pipe-delimited strings. This loader
+    adds tuple convenience columns for page logic that compares, groups, or
+    iterates over participating modes.
+    """
+    _require_file(
+        STRESS_ANOMALY_EVENTS_PATH
+    )
+
+    frame = pd.read_parquet(
+        STRESS_ANOMALY_EVENTS_PATH
+    )
+
+    required_columns = {
+        EVENT_ID_COLUMN,
+        "taxi_zone_id",
+        "date",
+        "temporal_bucket",
+        "daypart",
+        "day_type",
+        "period_group",
+        "zone",
+        "borough",
+        "geography_group",
+        "environment_group",
+        "stress_family",
+        "stress_metric_driver_list",
+        "has_congestion_oriented",
+        "has_positive_demand_shock",
+        "signature_all",
+        "signature_all_label",
+        "signature_demand",
+        "signature_demand_label",
+        "signature_congestion",
+        "signature_congestion_label",
+    }
+
+    missing = sorted(
+        required_columns.difference(
+            frame.columns
+        )
+    )
+
+    if missing:
+        raise ValueError(
+            "The shared stress-anomaly event runtime is missing required "
+            "columns: "
+            + ", ".join(missing)
+        )
+
+    frame = frame.copy()
+
+    frame["date"] = pd.to_datetime(
+        frame["date"],
+        errors="coerce",
+    )
+
+    # WHY: keep compact strings on disk, but expose tuple semantics where
+    # Raw 14's existing grouping and intersection logic benefits from them.
+    frame["modality_signature"] = (
+        frame["signature_all"]
+        .map(_decode_modality_signature)
+    )
+
+    frame["demand_modality_signature"] = (
+        frame["signature_demand"]
+        .map(_decode_modality_signature)
+    )
+
+    frame["congestion_modality_signature"] = (
+        frame["signature_congestion"]
+        .map(_decode_modality_signature)
+    )
+
+    frame["signature_label"] = (
+        frame["signature_all_label"]
+    )
+
+    return frame.reset_index(
+        drop=True
+    )
+
+
+@st.cache_data(show_spinner=False)
+def load_stress_anomaly_observation_universe() -> pd.DataFrame:
+    """Load the compact full observation universe used by anomaly pages."""
+    _require_file(STRESS_ANOMALY_OBSERVATION_UNIVERSE_PATH)
+
+    frame = pd.read_parquet(
+        STRESS_ANOMALY_OBSERVATION_UNIVERSE_PATH
+    ).copy()
+
+    required_columns = {
+        "taxi_zone_id",
+        "date",
+        "daypart",
+        "day_type",
+        "temporal_bucket",
+        "period_group",
+        "zone",
+        "borough",
+        "geography_group",
+        "environment_group",
+        SELECTED_FINALIST_FLAG,
+        "mobility_regime_cluster_label",
+        "has_congestion_oriented",
+        "has_positive_demand_shock",
+    }
+
+    missing = sorted(required_columns.difference(frame.columns))
+    if missing:
+        raise ValueError(
+            "Shared stress-anomaly observation runtime is missing required fields: "
+            + ", ".join(missing)
+        )
+
+    frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
+    frame["taxi_zone_id"] = pd.to_numeric(
+        frame["taxi_zone_id"], errors="coerce"
+    ).astype("Int64")
+
+    frame["mobility_regime_cluster_label"] = pd.to_numeric(
+        frame["mobility_regime_cluster_label"], errors="coerce"
+    ).astype("Int64")
+
+    for flag in [
+        SELECTED_FINALIST_FLAG,
+        "has_congestion_oriented",
+        "has_positive_demand_shock",
+    ]:
+        frame[flag] = frame[flag].fillna(False).astype(bool)
+
+    return frame
+
+
+@st.cache_data(show_spinner=False)
+def load_stress_anomaly_metric_evidence(
+    comparison_event_id: str,
+) -> pd.DataFrame:
+    """
+    Load the ten precomputed metric-evidence rows for one selected event.
+
+    WHY: predicate pushdown keeps Raw 15 from loading the full 1.55M-row
+    evidence table for every Streamlit rerun.
+    """
+    _require_file(
+        STRESS_ANOMALY_METRIC_EVIDENCE_PATH
+    )
+
+    event_id = str(
+        comparison_event_id
+    )
+
+    frame = pd.read_parquet(
+        STRESS_ANOMALY_METRIC_EVIDENCE_PATH,
+        filters=[
+            (
+                EVENT_ID_COLUMN,
+                "==",
+                event_id,
+            )
+        ],
+    )
+
+    required_columns = {
+        EVENT_ID_COLUMN,
+        "taxi_zone_id",
+        "date",
+        "daypart",
+        "temporal_bucket",
+        "metric",
+        "metric_label",
+        "mode",
+        "stress_signal",
+        "observed_value",
+        "expected_value",
+        "difference",
+        "residual_value",
+        "residual_zscore",
+        "support_status",
+        "support_label",
+        "stress_driver_flag",
+        "is_defining_driver",
+        "is_counter_stress",
+        "directional_label",
+    }
+
+    missing = sorted(
+        required_columns.difference(
+            frame.columns
+        )
+    )
+
+    if missing:
+        raise ValueError(
+            "The shared stress-anomaly metric-evidence runtime is missing "
+            "required columns: "
+            + ", ".join(missing)
+        )
+
+    frame = frame.copy()
+
+    frame["date"] = pd.to_datetime(
+        frame["date"],
+        errors="coerce",
+    )
+
+    return (
+        frame.sort_values(
+            "metric"
+        )
+        .reset_index(drop=True)
+    )
+
+
+@st.cache_data(show_spinner=False)
+def load_stress_anomaly_runtime_qa() -> pd.DataFrame:
+    """Load the compact build-time QA record for the shared anomaly runtime."""
+    _require_file(
+        STRESS_ANOMALY_RUNTIME_QA_PATH
+    )
+
+    return pd.read_parquet(
+        STRESS_ANOMALY_RUNTIME_QA_PATH
+    )
 
 # ---------------------------------------------------------------------
 # Canonical event universe

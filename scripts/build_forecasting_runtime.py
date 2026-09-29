@@ -1,5 +1,4 @@
-"""
-Build compact forecasting runtime tables for Raw 18-20.
+"""Build compact forecasting runtime tables for Raw 18-20.
 
 The large Chapter 4 forecast surfaces remain authoritative build inputs.
 The Showcase receives only the evidence required to reproduce its current
@@ -19,6 +18,9 @@ forecast_holdout_runtime.parquet
 
 forecast_holdout_scatter_sample.parquet
     Deterministic visualization evidence for Raw 20's Win-Miss plane.
+
+forecast_holdout_curated_cases.parquet
+    Frozen Raw 20 clean-win, hard-but-helpful, and clear-miss shortlists.
 
 forecast_runtime_build_qa.parquet
     Build sizes, row counts, and validation results.
@@ -83,6 +85,11 @@ SCATTER_OUTPUT = (
     / "forecast_holdout_scatter_sample.parquet"
 )
 
+CURATED_OUTPUT = (
+    APP_DIR
+    / "forecast_holdout_curated_cases.parquet"
+)
+
 QA_OUTPUT = (
     APP_DIR
     / "forecast_runtime_build_qa.parquet"
@@ -101,6 +108,8 @@ OBSOLETE_V2_OUTPUT = (
 
 FINAL_HOLDOUT_START = pd.Timestamp("2026-01-05")
 FINAL_HOLDOUT_END = pd.Timestamp("2026-03-31")
+
+CURATED_CASE_ROWS = 8
 
 METRICS = [
     "taxi_trip_count",
@@ -298,7 +307,7 @@ def build_explorer_runtime() -> tuple[pd.DataFrame, dict]:
     """
     start = perf_counter()
 
-    print("\n[1/4] Raw 18 longitudinal explorer")
+    print("\n[1/5] Raw 18 longitudinal explorer")
     print(
         f"      Source: {HISTORY_SOURCE.name} "
         f"({size_mb(HISTORY_SOURCE):,.2f} MB)"
@@ -608,7 +617,37 @@ def build_holdout_summary(
     """
     start = perf_counter()
 
-    print("\n[2/4] Raw 20 exact slice summary")
+    print("\n[2/5] Raw 20 exact slice summary")
+
+    working = holdout.copy()
+
+    error_index = pd.to_numeric(
+        working["system_row_error_index"], errors="coerce"
+    )
+    advantage = pd.to_numeric(
+        working["benchmark_advantage_index"], errors="coerce"
+    )
+
+    working["lower_error_model_win"] = (
+            working["comparison_supported"]
+            & error_index.lt(100)
+            & advantage.gt(0)
+    )
+    working["higher_error_model_win"] = (
+            working["comparison_supported"]
+            & error_index.ge(100)
+            & advantage.gt(0)
+    )
+    working["lower_error_last_week_win"] = (
+            working["comparison_supported"]
+            & error_index.lt(100)
+            & advantage.lt(0)
+    )
+    working["higher_error_last_week_win"] = (
+            working["comparison_supported"]
+            & error_index.ge(100)
+            & advantage.lt(0)
+    )
 
     grouping = [
         "metric",
@@ -621,7 +660,7 @@ def build_holdout_summary(
     ]
 
     summary = (
-        holdout.groupby(
+        working.groupby(
             grouping,
             observed=True,
             sort=False,
@@ -652,18 +691,13 @@ def build_holdout_summary(
                 "severe_error",
                 "sum",
             ),
-            clear_miss_rows=(
-                "clear_miss",
-                "sum",
-            ),
-            hard_helpful_rows=(
-                "hard_helpful",
-                "sum",
-            ),
-            median_error_index=(
-                "system_row_error_index",
-                "median",
-            ),
+            clear_miss_rows=("clear_miss", "sum"),
+            hard_helpful_rows=("hard_helpful", "sum"),
+            lower_error_model_win_rows=("lower_error_model_win", "sum"),
+            higher_error_model_win_rows=("higher_error_model_win", "sum"),
+            lower_error_last_week_win_rows=("lower_error_last_week_win", "sum"),
+            higher_error_last_week_win_rows=("higher_error_last_week_win", "sum"),
+            median_error_index=("system_row_error_index", "median"),
             mean_error_index=(
                 "system_row_error_index",
                 "mean",
@@ -701,6 +735,18 @@ def build_holdout_summary(
         ),
         "hard_helpful_rows": int(
             holdout["hard_helpful"].sum()
+        ),
+        "lower_error_model_win_rows": int(
+            working["lower_error_model_win"].sum()
+        ),
+        "higher_error_model_win_rows": int(
+            working["higher_error_model_win"].sum()
+        ),
+        "lower_error_last_week_win_rows": int(
+            working["lower_error_last_week_win"].sum()
+        ),
+        "higher_error_last_week_win_rows": int(
+            working["higher_error_last_week_win"].sum()
         ),
     }
 
@@ -767,7 +813,7 @@ def build_holdout_runtime(
     """
     start = perf_counter()
 
-    print("\n[3/4] Raw 20 exact row-level runtime")
+    print("\n[3/5] Raw 20 exact row-level runtime")
 
     runtime = holdout[
         HOLDOUT_RUNTIME_COLUMNS
@@ -893,7 +939,7 @@ def build_scatter_sample(
     """
     start = perf_counter()
 
-    print("\n[4/4] Raw 20 deterministic scatter evidence")
+    print("\n[4/5] Raw 20 deterministic scatter evidence")
 
     eligible = holdout.loc[
         holdout["comparison_supported"]
@@ -1012,6 +1058,167 @@ def build_scatter_sample(
 
     return sample, qa
 
+def diverse_cases(
+    frame: pd.DataFrame,
+    *,
+    sort_column: str,
+    ascending: bool,
+    n: int = CURATED_CASE_ROWS,
+) -> pd.DataFrame:
+    """Keep strong cases without letting one metric or zone dominate."""
+    if frame.empty:
+        return frame
+
+    chosen = []
+    metric_counts: dict[str, int] = {}
+    seen_zones: set[tuple[str, int]] = set()
+
+    ordered = frame.sort_values(sort_column, ascending=ascending)
+
+    for row in ordered.itertuples(index=False):
+        metric = str(row.metric)
+        zone_key = (metric, int(row.taxi_zone_id))
+
+        if metric_counts.get(metric, 0) >= 2 or zone_key in seen_zones:
+            continue
+
+        chosen.append(row._asdict())
+        metric_counts[metric] = metric_counts.get(metric, 0) + 1
+        seen_zones.add(zone_key)
+
+        if len(chosen) >= n:
+            break
+
+    return pd.DataFrame(chosen)
+
+
+def build_curated_cases(
+    holdout: pd.DataFrame,
+) -> tuple[pd.DataFrame, dict]:
+    """Freeze Raw 20's three reader-facing outcome shortlists."""
+    start = perf_counter()
+
+    print("\n[5/5] Raw 20 curated outcome cases")
+
+    clean_wins = holdout.loc[
+        holdout["benchmark_advantage_index"].gt(0)
+        & ~holdout["severe_error"]
+        & holdout["system_row_error_index"].le(100)
+    ].copy()
+
+    hard_helpful = holdout.loc[
+        holdout["benchmark_advantage_index"].gt(0)
+        & holdout["severe_error"]
+    ].copy()
+
+    clear_misses = holdout.loc[
+        holdout["benchmark_advantage_index"].lt(0)
+        & holdout["severe_error"]
+    ].copy()
+
+    shortlists = [
+        (
+            "Clean wins",
+            diverse_cases(
+                clean_wins,
+                sort_column="benchmark_advantage_index",
+                ascending=False,
+            ),
+        ),
+        (
+            "Hard but helpful",
+            diverse_cases(
+                hard_helpful,
+                sort_column="benchmark_advantage_index",
+                ascending=False,
+            ),
+        ),
+        (
+            "Clear misses",
+            diverse_cases(
+                clear_misses,
+                sort_column="system_row_error_index",
+                ascending=False,
+            ),
+        ),
+    ]
+
+    frames = []
+
+    for label, shortlist in shortlists:
+        shortlist = shortlist.copy()
+        shortlist["curated_group"] = label
+        shortlist["curated_rank"] = np.arange(1, len(shortlist) + 1)
+        frames.append(shortlist)
+
+    curated = pd.concat(frames, ignore_index=True)
+
+    keep_columns = [
+        "curated_group",
+        "curated_rank",
+        "metric",
+        "horizon",
+        "taxi_zone_id",
+        "zone",
+        "borough",
+        "target_date",
+        "target_temporal_bucket",
+        "champion_family",
+        "actual",
+        "champion_prediction",
+        "benchmark_prediction",
+        "absolute_error",
+        "benchmark_absolute_error",
+        "severe_error",
+        "failure_combination",
+        "system_row_error_index",
+        "benchmark_advantage_index",
+    ]
+
+    curated = curated[keep_columns].copy()
+
+    duplicate_keys = int(
+        curated.duplicated(
+            ["curated_group", "curated_rank"]
+        ).sum()
+    )
+
+    if duplicate_keys:
+        raise AssertionError(
+            "Raw 20 curated-case ranks are not unique within shortlist."
+        )
+
+    expected_groups = {
+        "Clean wins",
+        "Hard but helpful",
+        "Clear misses",
+    }
+    observed_groups = set(curated["curated_group"].unique())
+
+    if observed_groups != expected_groups:
+        raise AssertionError(
+            "Raw 20 curated-case groups are incomplete."
+        )
+
+    output_mb = write_table(curated, CURATED_OUTPUT)
+
+    print(
+        f"      {len(curated):,} curated rows across "
+        f"{len(observed_groups)} outcome types"
+    )
+    print(f"      Output: {output_mb:,.3f} MB")
+    print(f"      Stage runtime: {elapsed(start)}")
+
+    qa = {
+        "artifact": CURATED_OUTPUT.name,
+        "rows": len(curated),
+        "columns": len(curated.columns),
+        "output_mb": output_mb,
+        "duplicate_keys": duplicate_keys,
+        "qa_status": "PASS",
+    }
+
+    return curated, qa
 
 # =====================================================================
 # Cleanup
@@ -1058,7 +1265,7 @@ def main() -> None:
     total_start = perf_counter()
 
     print("=" * 72)
-    print("FORECASTING RUNTIME BUILD V3")
+    print("FORECASTING RUNTIME BUILD V4")
     print("=" * 72)
 
     require_file(RECORD_SOURCE)
@@ -1093,12 +1300,15 @@ def main() -> None:
         )
     )
 
+    _, curated_qa = build_curated_cases(holdout)
+
     qa = pd.DataFrame(
         [
             explorer_qa,
             summary_qa,
             holdout_qa,
             scatter_qa,
+            curated_qa,
         ]
     )
 
@@ -1170,6 +1380,7 @@ def main() -> None:
         SUMMARY_OUTPUT,
         HOLDOUT_OUTPUT,
         SCATTER_OUTPUT,
+        CURATED_OUTPUT,
         QA_OUTPUT,
     ]:
         print(

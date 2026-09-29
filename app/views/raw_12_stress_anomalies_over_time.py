@@ -8,18 +8,14 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from app.data_access.anomalies import (
-    ANOMALY_EVENT_UNIVERSE_PATH,
-    EVENT_ID_COLUMN,
     SELECTED_FINALIST_FLAG,
+    load_stress_anomaly_observation_universe,
 )
-from app.data_access.loaders import (
-    CONGESTION_PRICING_START_DATE,
-    load_analysis_panel,
-)
+from app.data_access.loaders import CONGESTION_PRICING_START_DATE
 from app.data_access.mobility_environments import (
     format_mobility_regime_cluster_label,
-    load_mobility_regime_cluster_assignments,
 )
+
 from app.utils.project_branding import (
     BRAND_COLORS,
     apply_branding,
@@ -101,7 +97,6 @@ TIME_SCOPE_OPTIONS = [
 ]
 
 SCOUTING_COLUMNS = [
-    EVENT_ID_COLUMN,
     "taxi_zone_id",
     "date",
     "temporal_bucket",
@@ -160,118 +155,6 @@ SAVED_VIEW_DESCRIPTIONS = {
         "of follow-through so the early-2025 demand surge is visible in context."
     ),
 }
-
-
-# ---------------------------------------------------------------------
-# Geography context
-# ---------------------------------------------------------------------
-@st.cache_data(show_spinner=False)
-def _load_geography_context() -> pd.DataFrame:
-    """Return canonical geography context at Taxi Zone × policy period."""
-    # Static geography comes from the analysis panel. The panel does NOT
-    # contain Mobility Environment assignments.
-    zone_context = load_analysis_panel(
-        columns=[
-            "taxi_zone_id",
-            "zone",
-            "borough",
-            "cbd_spatial_category",
-        ]
-    ).copy()
-
-    zone_context["taxi_zone_id"] = pd.to_numeric(
-        zone_context["taxi_zone_id"],
-        errors="coerce",
-    ).astype("Int64")
-
-    zone_context = (
-        zone_context
-        .dropna(subset=["taxi_zone_id"])
-        [
-            [
-                "taxi_zone_id",
-                "zone",
-                "borough",
-                "cbd_spatial_category",
-            ]
-        ]
-        .drop_duplicates()
-    )
-
-    if zone_context.duplicated("taxi_zone_id").any():
-        raise ValueError(
-            "Static geography is not unique by Taxi Zone."
-        )
-
-    zone_context["policy_geography"] = (
-        zone_context["cbd_spatial_category"]
-        .astype("string")
-        .str.lower()
-        .map(POLICY_GEOGRAPHY_MAP)
-        .fillna("Unknown")
-    )
-
-    # Mobility Environment is a separate canonical artifact and is
-    # period-specific. Preserve that contract rather than inventing a
-    # date-level field in the analysis panel.
-    assignments = (
-        load_mobility_regime_cluster_assignments()
-        [
-            [
-                "taxi_zone_id",
-                "pre_post_cp",
-                "cluster_label",
-            ]
-        ]
-        .drop_duplicates()
-        .copy()
-    )
-
-    assignments["taxi_zone_id"] = pd.to_numeric(
-        assignments["taxi_zone_id"],
-        errors="coerce",
-    ).astype("Int64")
-    assignments["cluster_label"] = pd.to_numeric(
-        assignments["cluster_label"],
-        errors="coerce",
-    ).astype("Int64")
-    assignments["pre_post_cp"] = (
-        assignments["pre_post_cp"]
-        .astype(str)
-        .str.lower()
-    )
-
-    if assignments.duplicated(
-        [
-            "taxi_zone_id",
-            "pre_post_cp",
-        ]
-    ).any():
-        raise ValueError(
-            "Mobility Environment assignments are not unique at "
-            "Taxi Zone × policy period."
-        )
-
-    context = assignments.merge(
-        zone_context[
-            [
-                "taxi_zone_id",
-                "zone",
-                "borough",
-                "policy_geography",
-            ]
-        ],
-        on="taxi_zone_id",
-        how="left",
-        validate="many_to_one",
-    )
-
-    return context.rename(
-        columns={
-            "cluster_label": "mobility_regime_cluster_label",
-        }
-    ).reset_index(drop=True)
-
 
 def _taxi_zone_lookup(
     frame: pd.DataFrame,
@@ -469,55 +352,45 @@ def _filter_geography(
 # ---------------------------------------------------------------------
 @st.cache_data(show_spinner="Loading the stress-anomaly timeline...")
 def _load_temporal_universe() -> pd.DataFrame:
-    """Load the full denominator with only temporal-page columns."""
-    frame = pd.read_parquet(
-        ANOMALY_EVENT_UNIVERSE_PATH,
-        columns=SCOUTING_COLUMNS,
-    )
+    """Load the full shared anomaly observation universe for temporal analysis."""
+    frame = load_stress_anomaly_observation_universe().copy()
 
-    missing = sorted(
-        set(SCOUTING_COLUMNS).difference(frame.columns)
-    )
+    required_columns = {
+        "taxi_zone_id",
+        "date",
+        "temporal_bucket",
+        SELECTED_FINALIST_FLAG,
+        CONGESTION_FLAG,
+        DEMAND_FLAG,
+        "zone",
+        "borough",
+        "geography_group",
+        "mobility_regime_cluster_label",
+    }
+
+    missing = sorted(required_columns.difference(frame.columns))
     if missing:
         raise ValueError(
-            "The stress-anomaly event data are missing required columns: "
+            "Shared stress-anomaly runtime is missing Raw 12 fields: "
             + ", ".join(missing)
         )
 
-    frame = frame.copy()
-    frame["date"] = pd.to_datetime(
-        frame["date"],
-        errors="coerce",
-    )
+    frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
     if frame["date"].isna().any():
-        raise ValueError(
-            "The stress-anomaly event data contain unparseable dates."
-        )
+        raise ValueError("The shared observation runtime contains unparseable dates.")
 
     frame[SELECTED_FINALIST_FLAG] = (
-        frame[SELECTED_FINALIST_FLAG]
-        .fillna(False)
-        .astype(bool)
+        frame[SELECTED_FINALIST_FLAG].fillna(False).astype(bool)
     )
+
     for flag in [CONGESTION_FLAG, DEMAND_FLAG]:
         frame[flag] = frame[flag].fillna(False).astype(bool)
 
-    # pre_post_cp is intentionally sparse outside finalist rows in the export.
-    frame["policy_period"] = np.where(
-        frame["date"].lt(CP_START_DATE),
-        "Pre-CP",
-        "Post-CP",
-    )
-    frame["month"] = (
-        frame["date"]
-        .dt.to_period("M")
-        .dt.to_timestamp()
-    )
-    frame["week"] = (
-        frame["date"]
-        .dt.to_period("W-SUN")
-        .dt.start_time
-    )
+    frame["policy_period"] = frame["period_group"]
+    frame["policy_geography"] = frame["geography_group"]
+
+    frame["month"] = frame["date"].dt.to_period("M").dt.to_timestamp()
+    frame["week"] = frame["date"].dt.to_period("W-SUN").dt.start_time
 
     selected = frame[SELECTED_FINALIST_FLAG]
     congestion = frame[CONGESTION_FLAG]
@@ -528,52 +401,26 @@ def _load_temporal_universe() -> pd.DataFrame:
         index=frame.index,
         dtype="string",
     )
+
     frame.loc[
         selected & congestion & ~demand,
         FAMILY_COLUMN,
     ] = "Congestion-only"
+
     frame.loc[
         selected & demand & ~congestion,
         FAMILY_COLUMN,
     ] = "Demand-only"
+
     frame.loc[
         selected & congestion & demand,
         FAMILY_COLUMN,
     ] = "Both"
+
     frame.loc[
         selected & ~congestion & ~demand,
         FAMILY_COLUMN,
     ] = "Unclassified"
-
-    frame["taxi_zone_id"] = pd.to_numeric(
-        frame["taxi_zone_id"],
-        errors="coerce",
-    ).astype("Int64")
-
-    if frame["taxi_zone_id"].isna().any():
-        raise ValueError(
-            "The stress-anomaly event data contain missing Taxi Zone IDs."
-        )
-
-    # WHY: Geography is attached to every eligible observation, not only
-    # anomalies, so incidence retains the correct denominator after filtering.
-    # Mobility Environment membership is period-specific, matching the
-    # canonical clustering artifact used elsewhere in the Showcase.
-    frame["pre_post_cp"] = np.where(
-        frame["date"].lt(pd.Timestamp(CP_START_DATE)),
-        "pre_cp",
-        "post_cp",
-    )
-
-    frame = frame.merge(
-        _load_geography_context(),
-        on=[
-            "taxi_zone_id",
-            "pre_post_cp",
-        ],
-        how="left",
-        validate="many_to_one",
-    )
 
     return frame
 
@@ -598,21 +445,19 @@ def _build_group_summary(
     *,
     group_column: str,
 ) -> pd.DataFrame:
-    """Build distinct-event incidence and exclusive family counts."""
+    """Build observation-based incidence and exclusive family counts."""
     denominator = (
-        universe.groupby(group_column, observed=True)[EVENT_ID_COLUMN]
-        .nunique()
+        universe.groupby(group_column, observed=True)
+        .size()
         .rename("eligible_observations")
         .reset_index()
     )
 
-    selected = universe[
-        universe[SELECTED_FINALIST_FLAG]
-    ].copy()
+    selected = universe.loc[universe[SELECTED_FINALIST_FLAG]].copy()
 
     overall = (
-        selected.groupby(group_column, observed=True)[EVENT_ID_COLUMN]
-        .nunique()
+        selected.groupby(group_column, observed=True)
+        .size()
         .rename("stress_anomalies")
         .reset_index()
     )
@@ -621,8 +466,8 @@ def _build_group_summary(
         selected.groupby(
             [group_column, FAMILY_COLUMN],
             observed=True,
-        )[EVENT_ID_COLUMN]
-        .nunique()
+        )
+        .size()
         .unstack(fill_value=0)
         .reindex(columns=FAMILY_ORDER, fill_value=0)
         .reset_index()
@@ -892,26 +737,27 @@ except (FileNotFoundError, ValueError, OSError) as exc:
     st.error(str(exc))
     st.stop()
 
-selected_events = event_universe[
+selected_events = event_universe.loc[
     event_universe[SELECTED_FINALIST_FLAG]
 ].copy()
 
-eligible_event_count = int(
-    event_universe[EVENT_ID_COLUMN].nunique()
+eligible_event_count = len(event_universe)
+selected_event_count = len(selected_events)
+
+duplicate_observations = int(
+    event_universe.duplicated(
+        ["taxi_zone_id", "date", "daypart"]
+    ).sum()
 )
-selected_event_count = int(
-    selected_events[EVENT_ID_COLUMN].nunique()
-)
-duplicate_event_ids = int(
-    event_universe[EVENT_ID_COLUMN].duplicated().sum()
-)
+
 unclassified_event_count = int(
     selected_events[FAMILY_COLUMN].eq("Unclassified").sum()
 )
 
-if duplicate_event_ids:
+if duplicate_observations:
     st.error(
-        "The full event universe contains duplicate comparison_event_id values."
+        "The shared observation universe contains duplicate "
+        "Taxi Zone × date × daypart rows."
     )
     st.stop()
 
@@ -1316,9 +1162,7 @@ with exploration_section(
     custom_selected_count = int(
         custom_summary[selected_families].sum(axis=1).sum()
     )
-    custom_eligible_count = int(
-        filtered_universe[EVENT_ID_COLUMN].nunique()
-    )
+    custom_eligible_count = len(filtered_universe)
     custom_incidence = (
         custom_selected_count
         / custom_eligible_count
