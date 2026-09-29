@@ -20,6 +20,7 @@ from app.data_access.spatial_aggregations import (
 from app.utils.project_branding import (
     BRAND_COLORS,
     apply_branding,
+    exploration_section,
     inject_app_css,
     render_chart_insight,
 )
@@ -108,12 +109,18 @@ MOBILITY_REGIME_CLUSTER_ORDER = [
     for label in get_mobility_regime_cluster_options()
 ]
 
+# Two additional categorical shades are midpoint blends of the canonical
+# palette. They preserve five-way differentiation without introducing unrelated
+# purple or olive accents into a page otherwise built from the project brand.
+BRAND_TEAL_MID = "#42999A"
+BRAND_PEACH_MID = "#F0B9A5"
+
 MOBILITY_REGIME_CLUSTER_COLORS = {
     MOBILITY_REGIME_CLUSTER_ORDER[0]: BRAND_COLORS["dark_teal"],
     MOBILITY_REGIME_CLUSTER_ORDER[1]: BRAND_COLORS["terracotta"],
     MOBILITY_REGIME_CLUSTER_ORDER[2]: BRAND_COLORS["seafoam"],
-    MOBILITY_REGIME_CLUSTER_ORDER[3]: "#5B5F97",
-    MOBILITY_REGIME_CLUSTER_ORDER[4]: "#6B8E23",
+    MOBILITY_REGIME_CLUSTER_ORDER[3]: BRAND_TEAL_MID,
+    MOBILITY_REGIME_CLUSTER_ORDER[4]: BRAND_PEACH_MID,
 }
 
 GEO_POLICY_ORDER = [
@@ -137,15 +144,15 @@ GEO_POLICY_COLORS = {
     "CBD": BRAND_COLORS["dark_teal"],
     "Gateway": BRAND_COLORS["terracotta"],
     "Adjacent": BRAND_COLORS["seafoam"],
-    "Non-CBD": "#5B5F97",
+    "Non-CBD": BRAND_TEAL_MID,
     "Unknown": "#8A8A8A",
 }
 
 BOROUGH_COLORS = {
     "Manhattan": BRAND_COLORS["dark_teal"],
     "Brooklyn": BRAND_COLORS["terracotta"],
-    "Queens": "#5B5F97",
-    "Bronx": "#6B8E23",
+    "Queens": BRAND_TEAL_MID,
+    "Bronx": BRAND_PEACH_MID,
     "Staten Island": BRAND_COLORS["seafoam"],
     "Unknown": "#8A8A8A",
 }
@@ -390,6 +397,15 @@ def _metric_display_label(
         metric,
         metric.replace("_", " ").title(),
     )
+
+
+def _format_geography_term(value: str) -> str:
+    """Translate internal geography keys into reader-facing terminology."""
+    mapping = {
+        "Geo-policy group": "Policy geography",
+        "Mobility regime cluster": "Mobility environment",
+    }
+    return mapping.get(value, value)
 
 
 def _safe_percent_change(
@@ -1663,7 +1679,7 @@ def build_interactive_relationship_chart(
                     hovertemplate=(
                         "<b>%{customdata[0]}</b><br>"
                         "Borough: %{customdata[1]}<br>"
-                        "Geo-policy group: %{customdata[2]}<br>"
+                        "Policy geography: %{customdata[2]}<br>"
                         "Period: %{customdata[3]}<br>"
                         "%{customdata[4]}: %{customdata[5]}<br>"
                         "%{customdata[6]}: %{customdata[7]}<br>"
@@ -1874,7 +1890,7 @@ def build_temporal_relationship_heatmap(
     columns = [
         "Pre-CP",
         "Post-CP",
-        "Change",
+        "Post − pre",
     ]
 
     z_values = matrix_df[
@@ -2304,16 +2320,18 @@ def _build_explorer_insight(
         pd.notna(pre_correlation)
         and pd.notna(post_correlation)
     ):
-        if post_correlation > pre_correlation:
-            correlation_phrase = "strengthened"
-        elif post_correlation < pre_correlation:
-            correlation_phrase = "weakened"
+        if np.sign(pre_correlation) != np.sign(post_correlation):
+            correlation_phrase = "changed direction"
+        elif abs(post_correlation) > abs(pre_correlation):
+            correlation_phrase = "became stronger in the same direction"
+        elif abs(post_correlation) < abs(pre_correlation):
+            correlation_phrase = "became weaker in the same direction"
         else:
-            correlation_phrase = "was unchanged"
+            correlation_phrase = "kept the same strength"
 
         correlation_sentence = (
             f"The Pearson relationship {correlation_phrase}, "
-            f"from **{pre_correlation:+.3f}** pre-CP to "
+            f"moving from **{pre_correlation:+.3f}** pre-CP to "
             f"**{post_correlation:+.3f}** post-CP."
         )
     else:
@@ -2442,7 +2460,7 @@ def _build_detail_table(
     rename_map = {
         "geography_name": "Geography",
         "borough": "Borough",
-        "cbd_spatial_category": "Geo-policy group",
+        "cbd_spatial_category": "Policy geography",
         "x_value_pre_cp": f"{x_label} · Pre-CP",
         "x_value_post_cp": f"{x_label} · Post-CP",
         "x_percent_change": f"{x_label} · Change",
@@ -2479,9 +2497,10 @@ st.caption("MODE RELATIONSHIPS")
 st.title("Do modes move together?")
 
 st.write(
-    "Compare how mobility modes cluster across the city, how those "
-    "relationships changed after congestion pricing, and where local "
-    "patterns diverged from the broader trend."
+    "Two mobility modes can both increase citywide without changing in the same places "
+    "or at the same times. This page looks beyond each mode on its own to ask whether "
+    "mobility measures moved together across NYC—and whether those relationships looked "
+    "different before and after congestion pricing began."
 )
 
 
@@ -2489,13 +2508,14 @@ st.write(
 # Static hero
 # ---------------------------------------------------------------------
 st.header(
-    "A multimodal view of the policy geography"
+    "How demand modes moved across policy geographies"
 )
 
 st.write(
-    "Taxi Trips define horizontal position, FHVHV Trips define vertical "
-    "position, and bubble area represents Subway Ridership. Each policy "
-    "geography moves from an open pre-CP marker to a filled post-CP marker."
+    "The opening view follows three demand measures at once. **Taxi Trips** set the "
+    "horizontal position, **FHVHV Trips** set the vertical position, and bubble area "
+    "represents **Subway Ridership**. Each policy geography moves from an open pre-CP "
+    "marker to a filled post-CP marker, so both direction and relative movement are visible."
 )
 
 with st.spinner(
@@ -2604,794 +2624,831 @@ else:
 # ---------------------------------------------------------------------
 # Interactive explorer
 # ---------------------------------------------------------------------
-st.divider()
-st.header(
-    "Explore multimodal relationships"
-)
-
-st.write(
-    "Choose two mobility measures and a geographic frame, then use the "
-    "tabs to compare relationships across places or across the ordered "
-    "time-of-week buckets."
-)
-
-if "raw05_saved_view" not in st.session_state:
-    st.session_state[
-        "raw05_saved_view"
-    ] = "Multimodal demand landscape"
-
-saved_view = st.selectbox(
-    "Start with a saved configuration",
-    options=SAVED_VIEW_OPTIONS,
-    index=0,
-    help=(
-        "Saved configurations provide curated starting points for the "
-        "across-geographies view. Changing any shared control switches "
-        "the selection to Custom."
+with exploration_section(
+    key="raw05_exploration_area",
+    title="Explore multimodal relationships",
+    description=(
+        "Choose two mobility measures and a geographic frame, then compare "
+        "relationships across places or across the ordered time-of-week buckets."
     ),
-    key="raw05_saved_view",
-)
-
-if (
-    saved_view != "Custom"
-    and st.session_state.get(
-        "_raw05_applied_saved_view"
-    )
-    != saved_view
 ):
-    _apply_saved_view(
-        saved_view
-    )
+    if "raw05_saved_view" not in st.session_state:
+        st.session_state[
+            "raw05_saved_view"
+        ] = "Multimodal demand landscape"
 
-    st.session_state[
-        "_raw05_applied_saved_view"
-    ] = saved_view
-
-    st.rerun()
-
-if saved_view == "Custom":
-    st.caption(
-        "Custom view · adjust any measure or geography control."
-    )
-else:
-    st.caption(
-        SAVED_VIEWS[saved_view][
-            "description"
-        ]
-    )
-
-st.markdown("**Shared measures**")
-
-measure_col1, measure_col2 = st.columns(2)
-
-with measure_col1:
-    x_metric = st.selectbox(
-        "X measure",
-        options=CORE_METRICS,
-        index=(
-            CORE_METRICS.index(TAXI_METRIC)
-            if TAXI_METRIC in CORE_METRICS
-            else 0
+    saved_view = st.selectbox(
+        "Start with a saved configuration",
+        options=SAVED_VIEW_OPTIONS,
+        help=(
+            "Saved configurations provide curated starting points for the "
+            "across-geographies view. Changing any shared control switches "
+            "the selection to Custom."
         ),
-        format_func=_metric_display_label,
-        key="raw05_x_metric",
-        on_change=_mark_saved_view_custom,
+        key="raw05_saved_view",
     )
-
-with measure_col2:
-    y_options = [
-        metric
-        for metric in CORE_METRICS
-        if metric != x_metric
-    ]
 
     if (
-        st.session_state.get(
-            "raw05_y_metric"
+        saved_view != "Custom"
+        and st.session_state.get(
+            "_raw05_applied_saved_view"
         )
-        not in y_options
+        != saved_view
     ):
+        _apply_saved_view(
+            saved_view
+        )
+
         st.session_state[
-            "raw05_y_metric"
-        ] = (
-            FHVHV_METRIC
-            if FHVHV_METRIC in y_options
-            else y_options[0]
-        )
+            "_raw05_applied_saved_view"
+        ] = saved_view
 
-    y_metric = st.selectbox(
-        "Y measure",
-        options=y_options,
-        index=(
-            y_options.index(FHVHV_METRIC)
-            if FHVHV_METRIC in y_options
-            else 0
-        ),
-        format_func=_metric_display_label,
-        key="raw05_y_metric",
-        on_change=_mark_saved_view_custom,
-    )
+        st.rerun()
 
-st.markdown("**Shared geography**")
-
-geography_col1, geography_col2 = st.columns(2)
-
-with geography_col1:
-    display_mode = st.selectbox(
-        "Geography display",
-        options=DISPLAY_MODE_OPTIONS,
-        index=0,
-        help=(
-            "Taxi Zones preserves local observations. Aggregated "
-            "geographies combines the underlying zones into Borough "
-            "or policy-geography summaries."
-        ),
-        key="raw05_display_mode",
-        on_change=_mark_saved_view_custom,
-    )
-
-if display_mode == "Taxi Zones":
-    geography_level = "Taxi Zone"
-
-    with geography_col2:
-        filter_scope = st.selectbox(
-            "Filter Taxi Zones",
-            options=TAXI_ZONE_FILTER_OPTIONS,
-            index=0,
-            key="raw05_taxi_zone_filter_scope",
-            on_change=_mark_saved_view_custom,
-        )
-
-    aggregate_by = None
-else:
-    filter_scope = "All Taxi Zones"
-    taxi_zone_color = "Geo-policy group"
-
-    with geography_col2:
-        aggregate_by = st.selectbox(
-            "Aggregate geographies by",
-            options=AGGREGATION_OPTIONS,
-            index=0,
-            key="raw05_aggregate_by",
-            on_change=_mark_saved_view_custom,
-        )
-
-    geography_level = aggregate_by
-
-with st.spinner(
-    "Preparing the shared geography sample..."
-):
-    shared_relationship_data = build_relationship_long_data(
-        metrics=[x_metric, y_metric],
-        temporal_bucket=ALL_TEMPORAL_BUCKETS_LABEL,
-        aggregation_level=geography_level,
-        apply_reliability_thresholds=False,
-    )
-
-    shared_pair_data = build_metric_pair_data(
-        shared_relationship_data,
-        x_metric=x_metric,
-        y_metric=y_metric,
-    )
-
-    if display_mode == "Taxi Zones":
-        shared_pair_data = attach_mobility_regime_cluster_context(
-            shared_pair_data,
-            assignment_period="post_cp",
-        )
-
-filter_value: str | None = None
-
-if (
-    display_mode == "Taxi Zones"
-    and filter_scope != "All Taxi Zones"
-):
-    filter_values = _available_filter_values(
-        shared_pair_data,
-        filter_scope=filter_scope,
-    )
-
-    if filter_values:
-        filter_label = (
-            "Borough"
-            if filter_scope == "Borough"
-            else "Geo-policy group"
-            if filter_scope == "Geo-policy group"
-            else "Mobility regime cluster"
-        )
-
-        filter_value = st.selectbox(
-            filter_label,
-            options=filter_values,
-            index=0,
-            key="raw05_taxi_zone_filter_value",
-            on_change=_mark_saved_view_custom,
-            format_func=(
-                (lambda value: value)
-                if filter_scope in {
-                    "Borough",
-                    "Geo-policy group",
-                }
-                else format_mobility_regime_cluster_label
-            ),
+    if saved_view == "Custom":
+        st.caption(
+            "Custom view · adjust any measure or geography control."
         )
     else:
-        st.warning(
-            "No geographic values are available for this combination "
-            "of measures."
+        st.caption(
+            SAVED_VIEWS[saved_view][
+                "description"
+            ]
         )
 
-metric_labels = _metric_label_lookup(
-    shared_relationship_data
-)
+    st.markdown("**Shared measures**")
 
-x_label = metric_labels.get(
-    x_metric,
-    _metric_display_label(x_metric),
-)
+    measure_col1, measure_col2 = st.columns(2)
 
-y_label = metric_labels.get(
-    y_metric,
-    _metric_display_label(y_metric),
-)
+    with measure_col1:
+        x_metric = st.selectbox(
+            "X measure",
+            options=CORE_METRICS,
+            format_func=_metric_display_label,
+            key="raw05_x_metric",
+            on_change=_mark_saved_view_custom,
+        )
 
-if display_mode == "Taxi Zones":
-    geography_context = (
-        "all eligible Taxi Zones"
-        if filter_scope == "All Taxi Zones"
-        else (
-            f"{filter_scope}: {filter_value}"
-            if filter_scope != "Mobility regime cluster"
-            else format_mobility_regime_cluster_label(
-                filter_value
+    with measure_col2:
+        y_options = [
+            metric
+            for metric in CORE_METRICS
+            if metric != x_metric
+        ]
+
+        if (
+            st.session_state.get(
+                "raw05_y_metric"
             )
+            not in y_options
+        ):
+            st.session_state[
+                "raw05_y_metric"
+            ] = (
+                FHVHV_METRIC
+                if FHVHV_METRIC in y_options
+                else y_options[0]
+            )
+
+        y_metric = st.selectbox(
+            "Y measure",
+            options=y_options,
+            format_func=_metric_display_label,
+            key="raw05_y_metric",
+            on_change=_mark_saved_view_custom,
         )
-    )
-    geography_label = "Taxi Zone observations"
-else:
-    geography_context = f"geographies aggregated by {aggregate_by}"
-    geography_label = f"{aggregate_by.lower()} groups"
 
-across_tab, temporal_tab = st.tabs(
-    [
-        "Across geographies",
-        "By time of week",
-    ]
-)
+    st.markdown("**Shared geography**")
 
-with across_tab:
-    st.markdown(
-        "Compare where the selected modes sit across the city and how each "
-        "geography moved from the pre-CP to post-CP period."
-    )
+    geography_col1, geography_col2 = st.columns(2)
 
-    st.markdown("**Chart-specific measures**")
+    with geography_col1:
+        display_mode = st.selectbox(
+            "Geography display",
+            options=DISPLAY_MODE_OPTIONS,
+            help=(
+                "Taxi Zones preserves local observations. Aggregated "
+                "geographies combines the underlying zones into Borough "
+                "or policy-geography summaries."
+            ),
+            key="raw05_display_mode",
+            on_change=_mark_saved_view_custom,
+        )
 
-    bubble_metric = st.selectbox(
-        "Bubble-area measure",
-        options=[
-            None,
-            *[
-                metric
-                for metric in CORE_METRICS
-                if metric not in {
-                    x_metric,
-                    y_metric,
-                }
-            ],
-        ],
-        format_func=_metric_display_label,
-        help=(
-            "Bubble area adds a third quantitative measure. "
-            "Select None to use fixed-size markers."
-        ),
-        key="raw05_bubble_metric",
-        on_change=_mark_saved_view_custom,
-    )
+    if display_mode == "Taxi Zones":
+        geography_level = "Taxi Zone"
 
-    chart_control1, chart_control2, chart_control3 = st.columns(3)
-
-    with chart_control1:
-        if display_mode == "Taxi Zones":
-            taxi_zone_color = st.selectbox(
-                "Color Taxi Zones by",
-                options=TAXI_ZONE_COLOR_OPTIONS,
-                index=0,
-                key="raw05_taxi_zone_color",
+        with geography_col2:
+            filter_scope = st.selectbox(
+                "Filter Taxi Zones",
+                options=TAXI_ZONE_FILTER_OPTIONS,
+                format_func=_format_geography_term,
+                key="raw05_taxi_zone_filter_scope",
                 on_change=_mark_saved_view_custom,
             )
-        else:
-            taxi_zone_color = "Geo-policy group"
-            st.markdown(
-                f"**Color grouping**  \n{aggregate_by}"
+
+        aggregate_by = None
+    else:
+        filter_scope = "All Taxi Zones"
+        taxi_zone_color = "Geo-policy group"
+
+        with geography_col2:
+            aggregate_by = st.selectbox(
+                "Aggregate geographies by",
+                options=AGGREGATION_OPTIONS,
+                format_func=_format_geography_term,
+                key="raw05_aggregate_by",
+                on_change=_mark_saved_view_custom,
             )
 
-    with chart_control2:
-        temporal_bucket = st.selectbox(
-            "Time bucket",
-            options=TEMPORAL_BUCKET_OPTIONS,
-            format_func=lambda value: (
-                TEMPORAL_BUCKET_LABELS[value]
-            ),
-            index=0,
-            key="raw05_temporal_bucket",
-            on_change=_mark_saved_view_custom,
-        )
-
-    with chart_control3:
-        period_view = st.selectbox(
-            "Period view",
-            options=PERIOD_OPTIONS,
-            index=0,
-            key="raw05_period_view",
-            on_change=_mark_saved_view_custom,
-        )
-
-    selected_metrics = [
-        x_metric,
-        y_metric,
-    ]
-
-    if (
-        bubble_metric is not None
-        and bubble_metric not in selected_metrics
-    ):
-        selected_metrics.append(
-            bubble_metric
-        )
+        geography_level = aggregate_by
 
     with st.spinner(
-        "Updating the geographic relationship view..."
+        "Preparing the shared geography sample..."
     ):
-        explorer_data = build_relationship_long_data(
-            metrics=selected_metrics,
-            temporal_bucket=temporal_bucket,
+        shared_relationship_data = build_relationship_long_data(
+            metrics=[x_metric, y_metric],
+            temporal_bucket=ALL_TEMPORAL_BUCKETS_LABEL,
             aggregation_level=geography_level,
             apply_reliability_thresholds=False,
         )
 
-        xy_pair_data = build_metric_pair_data(
-            explorer_data,
+        shared_pair_data = build_metric_pair_data(
+            shared_relationship_data,
             x_metric=x_metric,
             y_metric=y_metric,
         )
 
-        xy_geography_count = int(
-            xy_pair_data["geography_id"]
-            .nunique()
-        )
-
-        pair_data = _attach_bubble_metric(
-            xy_pair_data,
-            explorer_data,
-            bubble_metric=bubble_metric,
-        )
-
         if display_mode == "Taxi Zones":
-            pair_data = attach_mobility_regime_cluster_context(
-                pair_data,
+            shared_pair_data = attach_mobility_regime_cluster_context(
+                shared_pair_data,
                 assignment_period="post_cp",
             )
+
+    filter_value: str | None = None
 
     if (
         display_mode == "Taxi Zones"
         and filter_scope != "All Taxi Zones"
     ):
-        pair_data = _filter_taxi_zone_pair_data(
-            pair_data,
+        filter_values = _available_filter_values(
+            shared_pair_data,
             filter_scope=filter_scope,
-            filter_value=filter_value,
         )
 
-    pair_data = pair_data[
-        pair_data["x_value"].gt(0)
-        & pair_data["y_value"].gt(0)
-    ].copy()
+        if filter_values:
+            filter_label = (
+                "Borough"
+                if filter_scope == "Borough"
+                else "Policy geography"
+                if filter_scope == "Geo-policy group"
+                else "Mobility environment"
+            )
 
-    if bubble_metric is not None:
-        pair_data = pair_data[
-            pair_data["bubble_value"].gt(0)
-        ].copy()
-
-    comparison = build_pre_post_pair_comparison(
-        pair_data
-    )
-
-    comparison = _build_bubble_comparison(
-        comparison,
-        pair_data,
-        bubble_metric=bubble_metric,
-    )
-
-    correlations = calculate_pair_correlations(
-        pair_data
-    )
-
-    if comparison.empty or pair_data.empty:
-        st.info(
-            "No complete positive observations were available for this "
-            "combination of measures and filters."
-        )
-    else:
-        bubble_label = (
-            metric_labels.get(
-                bubble_metric,
-                _metric_display_label(
-                    bubble_metric
+            filter_value = st.selectbox(
+                filter_label,
+                options=filter_values,
+                index=0,
+                key="raw05_taxi_zone_filter_value",
+                on_change=_mark_saved_view_custom,
+                format_func=(
+                    (lambda value: value)
+                    if filter_scope in {
+                        "Borough",
+                        "Geo-policy group",
+                    }
+                    else format_mobility_regime_cluster_label
                 ),
             )
-            if bubble_metric is not None
-            else "Fixed marker size"
+        else:
+            st.warning(
+                "No geographic values are available for this combination "
+                "of measures."
+            )
+
+    metric_labels = _metric_label_lookup(
+        shared_relationship_data
+    )
+
+    x_label = metric_labels.get(
+        x_metric,
+        _metric_display_label(x_metric),
+    )
+
+    y_label = metric_labels.get(
+        y_metric,
+        _metric_display_label(y_metric),
+    )
+
+    if display_mode == "Taxi Zones":
+        geography_context = (
+            "all eligible Taxi Zones"
+            if filter_scope == "All Taxi Zones"
+            else (
+                f"{_format_geography_term(filter_scope)}: {filter_value}"
+                if filter_scope != "Mobility regime cluster"
+                else f"Mobility environment: {format_mobility_regime_cluster_label(filter_value)}"
+            )
+        )
+        geography_label = "Taxi Zone observations"
+    else:
+        geography_context = (
+            f"geographies aggregated by {_format_geography_term(aggregate_by).lower()}"
+        )
+        geography_label = f"{_format_geography_term(aggregate_by).lower()} groups"
+
+    across_tab, temporal_tab = st.tabs(
+        [
+            "Across geographies",
+            "By time of week",
+        ]
+    )
+
+    with across_tab:
+        st.markdown(
+            "Compare where the selected modes sit across the city and how each "
+            "geography moved from the pre-CP to post-CP period."
         )
 
-        displayed_geography_count = int(
-            comparison["geography_id"]
-            .nunique()
-        )
+        st.markdown("**Chart-specific measures**")
 
-        pre_correlation = _get_period_correlation(
-            correlations,
-            period="Pre-CP",
-        )
-
-        post_correlation = _get_period_correlation(
-            correlations,
-            period="Post-CP",
-        )
-
-        complete_pairs = comparison[
-            [
-                "x_percent_change",
-                "y_percent_change",
-            ]
-        ].dropna()
-
-        moved_together_share = (
-            comparison["moved_together"]
-            .fillna(False)
-            .sum()
-            / len(complete_pairs)
-            if len(complete_pairs)
-            else np.nan
-        )
-
-        card1, card2, card3, card4 = st.columns(4)
-
-        card1.metric(
-            (
-                "Taxi Zones shown"
-                if display_mode == "Taxi Zones"
-                else "Geographic groups"
+        bubble_metric = st.selectbox(
+            "Bubble-area measure",
+            options=[
+                None,
+                *[
+                    metric
+                    for metric in CORE_METRICS
+                    if metric not in {
+                        x_metric,
+                        y_metric,
+                    }
+                ],
+            ],
+            format_func=_metric_display_label,
+            help=(
+                "Bubble area adds a third quantitative measure. "
+                "Select None to use fixed-size markers."
             ),
-            f"{displayed_geography_count:,}",
+            key="raw05_bubble_metric",
+            on_change=_mark_saved_view_custom,
         )
 
-        card2.metric(
-            "Pre-CP correlation",
-            _format_correlation(
-                pre_correlation
-            ),
-        )
+        chart_control1, chart_control2, chart_control3 = st.columns(3)
 
-        card3.metric(
-            "Post-CP correlation",
-            _format_correlation(
-                post_correlation
-            ),
-        )
-
-        card4.metric(
-            "Moved together",
-            (
-                f"{moved_together_share:.1%}"
-                if pd.notna(
-                    moved_together_share
+        with chart_control1:
+            if display_mode == "Taxi Zones":
+                taxi_zone_color = st.selectbox(
+                    "Color Taxi Zones by",
+                    options=TAXI_ZONE_COLOR_OPTIONS,
+                    format_func=_format_geography_term,
+                    key="raw05_taxi_zone_color",
+                    on_change=_mark_saved_view_custom,
                 )
-                else "Unavailable"
-            ),
-        )
+            else:
+                taxi_zone_color = "Geo-policy group"
+                st.markdown(
+                    f"**Color grouping**  \n{aggregate_by}"
+                )
 
-        color_label = (
-            taxi_zone_color
-            if display_mode == "Taxi Zones"
-            else aggregate_by
-        )
+        with chart_control2:
+            temporal_bucket = st.selectbox(
+                "Time bucket",
+                options=TEMPORAL_BUCKET_OPTIONS,
+                format_func=lambda value: (
+                    TEMPORAL_BUCKET_LABELS[value]
+                ),
+                key="raw05_temporal_bucket",
+                on_change=_mark_saved_view_custom,
+            )
 
-        st.caption(
-            f"X: {x_label} · "
-            f"Y: {y_label} · "
-            f"Bubble area: {bubble_label} · "
-            f"{geography_context} · "
-            f"Color: {color_label} · "
-            f"{TEMPORAL_BUCKET_LABELS[temporal_bucket]} · "
-            f"{period_view}"
-        )
+        with chart_control3:
+            period_view = st.selectbox(
+                "Period view",
+                options=PERIOD_OPTIONS,
+                key="raw05_period_view",
+                on_change=_mark_saved_view_custom,
+            )
+
+        selected_metrics = [
+            x_metric,
+            y_metric,
+        ]
 
         if (
             bubble_metric is not None
-            and displayed_geography_count
-            < xy_geography_count
+            and bubble_metric not in selected_metrics
         ):
-            excluded_count = (
-                xy_geography_count
-                - displayed_geography_count
+            selected_metrics.append(
+                bubble_metric
             )
 
-            st.caption(
-                f"Adding {bubble_label} reduced the complete geographic "
-                f"sample by {excluded_count:,} because bubble sizing requires "
-                "a positive value for all three selected measures."
+        with st.spinner(
+            "Updating the geographic relationship view..."
+        ):
+            explorer_data = build_relationship_long_data(
+                metrics=selected_metrics,
+                temporal_bucket=temporal_bucket,
+                aggregation_level=geography_level,
+                apply_reliability_thresholds=False,
             )
 
-        selected_metric_set = {
-            x_metric,
-            y_metric,
-            bubble_metric,
-        }
-
-        if SUBWAY_METRIC in selected_metric_set:
-            st.caption(
-                "Subway Ridership does not cover Staten Island, so Staten "
-                "Island cannot appear when this measure is required."
+            xy_pair_data = build_metric_pair_data(
+                explorer_data,
+                x_metric=x_metric,
+                y_metric=y_metric,
             )
 
-        explorer_takeaway = _build_explorer_insight(
+            xy_geography_count = int(
+                xy_pair_data["geography_id"]
+                .nunique()
+            )
+
+            pair_data = _attach_bubble_metric(
+                xy_pair_data,
+                explorer_data,
+                bubble_metric=bubble_metric,
+            )
+
+            if display_mode == "Taxi Zones":
+                pair_data = attach_mobility_regime_cluster_context(
+                    pair_data,
+                    assignment_period="post_cp",
+                )
+
+        if (
+            display_mode == "Taxi Zones"
+            and filter_scope != "All Taxi Zones"
+        ):
+            pair_data = _filter_taxi_zone_pair_data(
+                pair_data,
+                filter_scope=filter_scope,
+                filter_value=filter_value,
+            )
+
+        pair_data = pair_data[
+            pair_data["x_value"].gt(0)
+            & pair_data["y_value"].gt(0)
+        ].copy()
+
+        if bubble_metric is not None:
+            pair_data = pair_data[
+                pair_data["bubble_value"].gt(0)
+            ].copy()
+
+        comparison = build_pre_post_pair_comparison(
+            pair_data
+        )
+
+        comparison = _build_bubble_comparison(
             comparison,
-            correlations,
-            x_label=x_label,
-            y_label=y_label,
-            geography_label=geography_label,
-            bubble_label=bubble_label,
+            pair_data,
             bubble_metric=bubble_metric,
         )
 
-        relationship_fig = (
-            build_interactive_relationship_chart(
-                pair_data,
+        correlations = calculate_pair_correlations(
+            pair_data
+        )
+
+        if comparison.empty or pair_data.empty:
+            st.info(
+                "No complete positive observations were available for this "
+                "combination of measures and filters."
+            )
+        else:
+            bubble_label = (
+                metric_labels.get(
+                    bubble_metric,
+                    _metric_display_label(
+                        bubble_metric
+                    ),
+                )
+                if bubble_metric is not None
+                else "Fixed marker size"
+            )
+
+            displayed_geography_count = int(
+                comparison["geography_id"]
+                .nunique()
+            )
+
+            pre_correlation = _get_period_correlation(
+                correlations,
+                period="Pre-CP",
+            )
+
+            post_correlation = _get_period_correlation(
+                correlations,
+                period="Post-CP",
+            )
+
+            complete_comparison = comparison.loc[
+                comparison[
+                    [
+                        "x_percent_change",
+                        "y_percent_change",
+                    ]
+                ]
+                .notna()
+                .all(axis=1)
+            ].copy()
+
+            moved_together_share = (
+                complete_comparison["moved_together"]
+                .fillna(False)
+                .mean()
+                if not complete_comparison.empty
+                else np.nan
+            )
+
+            card1, card2, card3, card4 = st.columns(4)
+
+            card1.metric(
+                (
+                    "Taxi Zones shown"
+                    if display_mode == "Taxi Zones"
+                    else "Geographic groups"
+                ),
+                f"{displayed_geography_count:,}",
+            )
+
+            card2.metric(
+                "Pre-CP correlation",
+                _format_correlation(
+                    pre_correlation
+                ),
+            )
+
+            card3.metric(
+                "Post-CP correlation",
+                _format_correlation(
+                    post_correlation
+                ),
+            )
+
+            card4.metric(
+                "Moved together",
+                (
+                    f"{moved_together_share:.1%}"
+                    if pd.notna(
+                        moved_together_share
+                    )
+                    else "Unavailable"
+                ),
+            )
+
+            color_label = _format_geography_term(
+                taxi_zone_color
+                if display_mode == "Taxi Zones"
+                else aggregate_by
+            )
+
+            st.caption(
+                f"X: {x_label} · "
+                f"Y: {y_label} · "
+                f"Bubble area: {bubble_label} · "
+                f"{geography_context} · "
+                f"Color: {color_label} · "
+                f"{TEMPORAL_BUCKET_LABELS[temporal_bucket]} · "
+                f"{period_view}"
+            )
+
+            if (
+                bubble_metric is not None
+                and displayed_geography_count
+                < xy_geography_count
+            ):
+                excluded_count = (
+                    xy_geography_count
+                    - displayed_geography_count
+                )
+
+                st.caption(
+                    f"Adding {bubble_label} reduced the complete geographic "
+                    f"sample by {excluded_count:,} because bubble sizing requires "
+                    "a positive value for all three selected measures."
+                )
+
+            selected_metric_set = {
+                x_metric,
+                y_metric,
+                bubble_metric,
+            }
+
+            if SUBWAY_METRIC in selected_metric_set:
+                st.caption(
+                    "Subway Ridership does not cover Staten Island, so Staten "
+                    "Island cannot appear when this measure is required."
+                )
+
+            explorer_takeaway = _build_explorer_insight(
                 comparison,
-                geography_level=geography_level,
-                period_view=period_view,
-                taxi_zone_color=taxi_zone_color,
+                correlations,
+                x_label=x_label,
+                y_label=y_label,
+                geography_label=geography_label,
+                bubble_label=bubble_label,
                 bubble_metric=bubble_metric,
             )
+
+            relationship_fig = (
+                build_interactive_relationship_chart(
+                    pair_data,
+                    comparison,
+                    geography_level=geography_level,
+                    period_view=period_view,
+                    taxi_zone_color=taxi_zone_color,
+                    bubble_metric=bubble_metric,
+                )
+            )
+
+            st.plotly_chart(
+                relationship_fig,
+                width="stretch",
+                config={
+                    "displayModeBar": False,
+                    "responsive": True,
+                },
+                key=(
+                    f"raw05_geographic_"
+                    f"{x_metric}_{y_metric}_"
+                    f"{bubble_metric}_"
+                    f"{display_mode}_"
+                    f"{geography_level}_"
+                    f"{filter_scope}_"
+                    f"{filter_value}_"
+                    f"{taxi_zone_color}_"
+                    f"{temporal_bucket}_"
+                    f"{period_view}"
+                ),
+            )
+            render_chart_insight(explorer_takeaway)
+
+            if bubble_metric is not None:
+                st.caption(
+                    f"Bubble area—not radius—is proportional to {bubble_label}. "
+                    "Open markers show pre-CP values; filled markers show post-CP "
+                    "values. Logarithmic axes require positive X and Y values."
+                )
+            else:
+                st.caption(
+                    "Marker size is fixed. Open markers show pre-CP values; "
+                    "filled markers show post-CP values. Logarithmic axes require "
+                    "positive X and Y values."
+                )
+
+            with st.expander(
+                "Inspect the paired pre- and post-CP values",
+                expanded=False,
+            ):
+                st.caption(
+                    "Rows are sorted by the largest combined absolute percentage "
+                    "movement across the displayed measures."
+                )
+
+                detail = _build_detail_table(
+                    comparison,
+                    x_label=x_label,
+                    y_label=y_label,
+                    bubble_label=bubble_label,
+                    bubble_metric=bubble_metric,
+                )
+
+                column_config: dict[
+                    str,
+                    st.column_config.Column
+                ] = {
+                    f"{x_label} · Pre-CP": (
+                        st.column_config.NumberColumn(
+                            format="%,.2f",
+                        )
+                    ),
+                    f"{x_label} · Post-CP": (
+                        st.column_config.NumberColumn(
+                            format="%,.2f",
+                        )
+                    ),
+                    f"{x_label} · Change": (
+                        st.column_config.NumberColumn(
+                            format="%+,.1f%%",
+                        )
+                    ),
+                    f"{y_label} · Pre-CP": (
+                        st.column_config.NumberColumn(
+                            format="%,.2f",
+                        )
+                    ),
+                    f"{y_label} · Post-CP": (
+                        st.column_config.NumberColumn(
+                            format="%,.2f",
+                        )
+                    ),
+                    f"{y_label} · Change": (
+                        st.column_config.NumberColumn(
+                            format="%+,.1f%%",
+                        )
+                    ),
+                }
+
+                if bubble_metric is not None:
+                    column_config.update(
+                        {
+                            f"{bubble_label} · Pre-CP": (
+                                st.column_config.NumberColumn(
+                                    format="%,.2f",
+                                )
+                            ),
+                            f"{bubble_label} · Post-CP": (
+                                st.column_config.NumberColumn(
+                                    format="%,.2f",
+                                )
+                            ),
+                            f"{bubble_label} · Change": (
+                                st.column_config.NumberColumn(
+                                    format="%+,.1f%%",
+                                )
+                            ),
+                        }
+                    )
+
+                st.dataframe(
+                    detail,
+                    width="stretch",
+                    hide_index=True,
+                    column_config=column_config,
+                )
+
+    with temporal_tab:
+        st.markdown(
+            "Compare the same mode pair across every ordered temporal bucket. "
+            "Each row reports the Pearson relationship before congestion pricing, "
+            "after congestion pricing, and the post-minus-pre change."
+        )
+
+        with st.spinner(
+            "Calculating relationships across temporal buckets..."
+        ):
+            temporal_matrix = _build_temporal_relationship_matrix(
+                x_metric=x_metric,
+                y_metric=y_metric,
+                geography_level=geography_level,
+                display_mode=display_mode,
+                filter_scope=filter_scope,
+                filter_value=filter_value,
+            )
+
+        heatmap_summary = _build_heatmap_summary(
+            temporal_matrix
+        )
+
+        _render_heatmap_summary_cards(
+            heatmap_summary
+        )
+
+        st.caption(
+            f"{x_label} versus {y_label} · {geography_context} · "
+            "Pearson correlations across displayed geographies"
+        )
+
+        heatmap_takeaway = _build_heatmap_insight(
+            temporal_matrix,
+            x_label=x_label,
+            y_label=y_label,
+            geography_context=geography_context,
+        )
+
+        temporal_fig = build_temporal_relationship_heatmap(
+            temporal_matrix
         )
 
         st.plotly_chart(
-            relationship_fig,
+            temporal_fig,
             width="stretch",
             config={
                 "displayModeBar": False,
                 "responsive": True,
             },
             key=(
-                f"raw05_geographic_"
+                f"raw05_temporal_heatmap_"
                 f"{x_metric}_{y_metric}_"
-                f"{bubble_metric}_"
-                f"{display_mode}_"
-                f"{geography_level}_"
-                f"{filter_scope}_"
-                f"{filter_value}_"
-                f"{taxi_zone_color}_"
-                f"{temporal_bucket}_"
-                f"{period_view}"
+                f"{display_mode}_{geography_level}_"
+                f"{filter_scope}_{filter_value}"
             ),
         )
-        render_chart_insight(explorer_takeaway)
+        render_chart_insight(heatmap_takeaway)
 
-        if bubble_metric is not None:
+        st.caption(
+            "For the Pre-CP and Post-CP columns, teal indicates a positive "
+            "relationship and terracotta an inverse relationship. In the Post − pre "
+            "column, teal means the correlation coefficient moved upward and "
+            "terracotta means it moved downward; that is not always the same as "
+            "strengthening or weakening. Hover over a cell to see the number of "
+            "paired geographies supporting that estimate."
+        )
+
+        if SUBWAY_METRIC in {
+            x_metric,
+            y_metric,
+        }:
             st.caption(
-                f"Bubble area—not radius—is proportional to {bubble_label}. "
-                "Open markers show pre-CP values; filled markers show post-CP "
-                "values. Logarithmic axes require positive X and Y values."
-            )
-        else:
-            st.caption(
-                "Marker size is fixed. Open markers show pre-CP values; "
-                "filled markers show post-CP values. Logarithmic axes require "
-                "positive X and Y values."
+                "Subway Ridership does not cover Staten Island, so Staten Island "
+                "cannot contribute when Subway Ridership is selected."
             )
 
         with st.expander(
-            "Inspect the paired pre- and post-CP values",
+            "Inspect temporal-bucket correlations",
             expanded=False,
         ):
-            st.caption(
-                "Rows are sorted by the largest combined absolute percentage "
-                "movement across the displayed measures."
+            heatmap_table = temporal_matrix[
+                [
+                    "temporal_bucket_label",
+                    "pre_correlation",
+                    "post_correlation",
+                    "correlation_change",
+                    "pre_observation_count",
+                    "post_observation_count",
+                ]
+            ].copy()
+
+            heatmap_table = heatmap_table.rename(
+                columns={
+                    "temporal_bucket_label": "Temporal bucket",
+                    "pre_correlation": "Pre-CP correlation",
+                    "post_correlation": "Post-CP correlation",
+                    "correlation_change": "Post minus pre",
+                    "pre_observation_count": "Pre-CP paired geographies",
+                    "post_observation_count": "Post-CP paired geographies",
+                }
             )
-
-            detail = _build_detail_table(
-                comparison,
-                x_label=x_label,
-                y_label=y_label,
-                bubble_label=bubble_label,
-                bubble_metric=bubble_metric,
-            )
-
-            column_config: dict[
-                str,
-                st.column_config.Column
-            ] = {
-                f"{x_label} · Pre-CP": (
-                    st.column_config.NumberColumn(
-                        format="%,.2f",
-                    )
-                ),
-                f"{x_label} · Post-CP": (
-                    st.column_config.NumberColumn(
-                        format="%,.2f",
-                    )
-                ),
-                f"{x_label} · Change": (
-                    st.column_config.NumberColumn(
-                        format="%+,.1f%%",
-                    )
-                ),
-                f"{y_label} · Pre-CP": (
-                    st.column_config.NumberColumn(
-                        format="%,.2f",
-                    )
-                ),
-                f"{y_label} · Post-CP": (
-                    st.column_config.NumberColumn(
-                        format="%,.2f",
-                    )
-                ),
-                f"{y_label} · Change": (
-                    st.column_config.NumberColumn(
-                        format="%+,.1f%%",
-                    )
-                ),
-            }
-
-            if bubble_metric is not None:
-                column_config.update(
-                    {
-                        f"{bubble_label} · Pre-CP": (
-                            st.column_config.NumberColumn(
-                                format="%,.2f",
-                            )
-                        ),
-                        f"{bubble_label} · Post-CP": (
-                            st.column_config.NumberColumn(
-                                format="%,.2f",
-                            )
-                        ),
-                        f"{bubble_label} · Change": (
-                            st.column_config.NumberColumn(
-                                format="%+,.1f%%",
-                            )
-                        ),
-                    }
-                )
 
             st.dataframe(
-                detail,
+                heatmap_table,
                 width="stretch",
                 hide_index=True,
-                column_config=column_config,
+                column_config={
+                    "Pre-CP correlation": st.column_config.NumberColumn(
+                        format="%+.3f",
+                    ),
+                    "Post-CP correlation": st.column_config.NumberColumn(
+                        format="%+.3f",
+                    ),
+                    "Post minus pre": st.column_config.NumberColumn(
+                        format="%+.3f",
+                    ),
+                    "Pre-CP paired geographies": st.column_config.NumberColumn(
+                        format="%d",
+                    ),
+                    "Post-CP paired geographies": st.column_config.NumberColumn(
+                        format="%d",
+                    ),
+                },
             )
 
-with temporal_tab:
+st.markdown("### What this page establishes")
+st.markdown(
+    "Mode relationships add information that separate pre/post averages cannot. Two "
+    "measures may rise together overall yet have a weak local relationship, or their "
+    "association may change across geography and time of day. The page therefore treats "
+    "co-movement as a pattern to measure rather than assuming that citywide changes imply "
+    "the same neighborhood-level behavior."
+)
+
+with st.expander("How this page works", expanded=False):
     st.markdown(
-        "Compare the same mode pair across every ordered temporal bucket. "
-        "Each row reports the Pearson relationship before congestion pricing, "
-        "after congestion pricing, and the post-minus-pre change."
+        """
+        **1. Compare modes on the same geographic units.** Relationship views pair
+        mobility measures within the selected geography so each point represents a
+        like-for-like place comparison.
+
+        **2. Use the hero to show three demand measures at once.** Taxi Trips determine
+        horizontal position, FHVHV Trips determine vertical position, and Subway
+        Ridership determines bubble area. Open markers are pre-CP and filled markers
+        are post-CP.
+
+        **3. Separate movement from association.** A geography moving upward or to the
+        right shows a change in its own mobility level. Correlation asks a different
+        question: whether places with higher values on one measure also tend to have
+        higher values on the other.
+
+        **4. Compare relationships before and after launch.** The temporal heatmap shows
+        Pearson correlations for the pre-CP and post-CP periods and their numerical
+        difference. A higher post-minus-pre coefficient is not automatically the same
+        thing as a stronger relationship; the sign and starting value matter.
+
+        **5. Respect coverage.** Relationship estimates use only geographies with both
+        selected measures available. Subway Ridership does not cover Staten Island, so
+        Staten Island cannot contribute when Subway Ridership is selected.
+
+        **6. Keep correlation descriptive.** Co-movement can identify places and times
+        where two measures behave similarly or differently. It does not show that one
+        mode caused the other to change.
+        """
     )
 
-    with st.spinner(
-        "Calculating relationships across temporal buckets..."
-    ):
-        temporal_matrix = _build_temporal_relationship_matrix(
-            x_metric=x_metric,
-            y_metric=y_metric,
-            geography_level=geography_level,
-            display_mode=display_mode,
-            filter_scope=filter_scope,
-            filter_value=filter_value,
-        )
+st.caption(
+    "Evidence scope: observed NYC mobility before and after the January 5, 2025 "
+    "congestion-pricing launch. Relationships and correlations describe co-movement "
+    "among the selected measures and geographies; they do not establish substitution "
+    "between modes or a causal effect of congestion pricing."
+)
 
-    heatmap_summary = _build_heatmap_summary(
-        temporal_matrix
-    )
-
-    _render_heatmap_summary_cards(
-        heatmap_summary
-    )
-
-    st.caption(
-        f"{x_label} versus {y_label} · {geography_context} · "
-        "Pearson correlations across displayed geographies"
-    )
-
-    heatmap_takeaway = _build_heatmap_insight(
-        temporal_matrix,
-        x_label=x_label,
-        y_label=y_label,
-        geography_context=geography_context,
-    )
-
-    temporal_fig = build_temporal_relationship_heatmap(
-        temporal_matrix
-    )
-
-    st.plotly_chart(
-        temporal_fig,
-        width="stretch",
-        config={
-            "displayModeBar": False,
-            "responsive": True,
-        },
-        key=(
-            f"raw05_temporal_heatmap_"
-            f"{x_metric}_{y_metric}_"
-            f"{display_mode}_{geography_level}_"
-            f"{filter_scope}_{filter_value}"
-        ),
-    )
-    render_chart_insight(heatmap_takeaway)
-
-    st.caption(
-        "Teal indicates a positive relationship or strengthening; terracotta "
-        "indicates an inverse relationship or weakening. The Change column is "
-        "Post-CP minus Pre-CP. Hover over a cell to see the number of paired "
-        "geographies supporting that estimate."
-    )
-
-    if SUBWAY_METRIC in {
-        x_metric,
-        y_metric,
-    }:
-        st.caption(
-            "Subway Ridership does not cover Staten Island, so Staten Island "
-            "cannot contribute when Subway Ridership is selected."
-        )
-
-    with st.expander(
-        "Inspect temporal-bucket correlations",
-        expanded=False,
-    ):
-        heatmap_table = temporal_matrix[
-            [
-                "temporal_bucket_label",
-                "pre_correlation",
-                "post_correlation",
-                "correlation_change",
-                "pre_observation_count",
-                "post_observation_count",
-            ]
-        ].copy()
-
-        heatmap_table = heatmap_table.rename(
-            columns={
-                "temporal_bucket_label": "Temporal bucket",
-                "pre_correlation": "Pre-CP correlation",
-                "post_correlation": "Post-CP correlation",
-                "correlation_change": "Post minus pre",
-                "pre_observation_count": "Pre-CP paired geographies",
-                "post_observation_count": "Post-CP paired geographies",
-            }
-        )
-
-        st.dataframe(
-            heatmap_table,
-            width="stretch",
-            hide_index=True,
-            column_config={
-                "Pre-CP correlation": st.column_config.NumberColumn(
-                    format="%+.3f",
-                ),
-                "Post-CP correlation": st.column_config.NumberColumn(
-                    format="%+.3f",
-                ),
-                "Post minus pre": st.column_config.NumberColumn(
-                    format="%+.3f",
-                ),
-                "Pre-CP paired geographies": st.column_config.NumberColumn(
-                    format="%d",
-                ),
-                "Post-CP paired geographies": st.column_config.NumberColumn(
-                    format="%d",
-                ),
-            },
-        )

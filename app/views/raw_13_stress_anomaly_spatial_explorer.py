@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import date
-from html import escape
 from pathlib import Path
 
 import numpy as np
@@ -15,7 +14,10 @@ from app.data_access.anomalies import (
     SELECTED_FINALIST_FLAG,
     load_selected_anomaly_events,
 )
-from app.data_access.loaders import load_analysis_panel
+from app.data_access.loaders import (
+    CONGESTION_PRICING_START_DATE,
+    load_analysis_panel,
+)
 from app.data_access.aggregations import apply_common_filters
 from app.data_access.mobility_environments import (
     format_mobility_regime_cluster_label,
@@ -25,7 +27,9 @@ from app.data_access.spatial_visuals import get_zone_geojson
 from app.utils.project_branding import (
     BRAND_COLORS,
     apply_branding,
+    exploration_section,
     inject_app_css,
+    render_chart_insight,
 )
 
 
@@ -37,14 +41,6 @@ st.markdown(
         font-size: clamp(1.30rem, 1.75vw, 1.85rem);
         line-height: 1.15;
     }
-    .raw13-chart-insight {
-        background: #EDF6F9;
-        border-left: 4px solid #006D77;
-        border-radius: 0.45rem;
-        color: #163F45;
-        margin: 0.35rem 0 1.15rem 0;
-        padding: 0.80rem 1rem;
-    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -54,7 +50,7 @@ st.markdown(
 # ---------------------------------------------------------------------
 # Page configuration
 # ---------------------------------------------------------------------
-CP_START_DATE = pd.Timestamp("2025-01-05")
+CP_START_DATE = CONGESTION_PRICING_START_DATE
 CONGESTION_FLAG = "has_congestion_oriented"
 DEMAND_FLAG = "has_positive_demand_shock"
 FAMILY_COLUMN = "stress_family_exclusive"
@@ -172,14 +168,14 @@ def _load_spatial_universe() -> pd.DataFrame:
     missing = sorted(set(EVENT_COLUMNS).difference(frame.columns))
     if missing:
         raise ValueError(
-            "The 3.3.6 event universe is missing Page 13 columns: "
+            "The stress-anomaly event data are missing required spatial fields: "
             + ", ".join(missing)
         )
 
     frame = frame.copy()
     frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
     if frame["date"].isna().any():
-        raise ValueError("The 3.3.6 event universe contains unparseable dates.")
+        raise ValueError("The stress-anomaly event data contain unparseable dates.")
 
     frame["taxi_zone_id"] = pd.to_numeric(
         frame["taxi_zone_id"], errors="coerce"
@@ -672,12 +668,8 @@ def _scope_narrative(
 
 
 def _render_chart_takeaway(text: str) -> None:
-    """Render the page's single, consistent chart-insight treatment."""
-    st.markdown(
-        f'<div class="raw13-chart-insight"><strong>Takeaway.</strong> '
-        f"{escape(text)}</div>",
-        unsafe_allow_html=True,
-    )
+    """Render the shared Showcase takeaway treatment."""
+    render_chart_insight(text)
 
 
 def _hero_period_narrative(hero: pd.DataFrame, period: str) -> str:
@@ -763,11 +755,16 @@ def _timeline_narrative(timeline: pd.DataFrame) -> str:
         .mean()
         .sort_index()
     )
+    policy_month = CP_START_DATE.to_period("M").to_timestamp()
+    first_full_post_month = policy_month + pd.offsets.MonthBegin(1)
+
+    # January 2025 straddles the Jan 5 launch. Exclude that mixed month from
+    # the pre/post averages rather than assigning the whole month to one side.
     pre_values = valid.loc[
-        valid["month"].lt(CP_START_DATE), "incidence_per_1k"
+        valid["month"].lt(policy_month), "incidence_per_1k"
     ]
     post_values = valid.loc[
-        valid["month"].ge(CP_START_DATE), "incidence_per_1k"
+        valid["month"].ge(first_full_post_month), "incidence_per_1k"
     ]
     if not pre_values.empty and not post_values.empty:
         pre_mean = float(pre_values.mean())
@@ -1172,7 +1169,12 @@ def _get_mobility_environment_zone_ids(
 ) -> tuple[int, ...]:
     """Return zones assigned to one period-aware mobility environment."""
     panel = load_analysis_panel(
-        columns=["taxi_zone_id", "date", "pre_post_cp"]
+        columns=[
+            "taxi_zone_id",
+            "date",
+            "pre_post_cp",
+            "mobility_regime_cluster_label",
+        ]
     ).copy()
     panel["date"] = pd.to_datetime(panel["date"], errors="coerce")
 
@@ -1292,8 +1294,8 @@ def _build_zone_timeline_chart(
         BRAND_COLORS["dark_teal"],
         BRAND_COLORS["terracotta"],
         BRAND_COLORS["seafoam"],
-        "#5B5F97",
-        "#335C67",
+        "#4F8F92",
+        "#C77E63",
     ]
 
     for index, zone_name in enumerate(zone_names):
@@ -1437,9 +1439,11 @@ def _event_display_table(events: pd.DataFrame) -> pd.DataFrame:
 st.caption("STRESS ANOMALY SPATIAL EXPLORER")
 st.title("Where were stress anomalies concentrated—and how did that geography change?")
 st.write(
-    "Compare Taxi Zone stress-anomaly incidence before and after congestion "
-    "pricing. Incidence uses the full eligible observation universe so zones "
-    "and periods remain directly comparable."
+    "A citywide anomaly rate can tell us whether unusual mobility stress became "
+    "more or less common, but it cannot show whether the same places remained "
+    "stressed. This page compares Taxi Zone stress-anomaly incidence before and "
+    "after congestion pricing began so we can see where stress persisted, emerged, "
+    "or receded across the city."
 )
 
 try:
@@ -1472,36 +1476,13 @@ map_insights = _hero_insights(map_table)
 increase_row = insights["largest_increase"]
 decrease_row = insights["largest_decrease"]
 
-card1, card2, card3, card4 = st.columns(4)
-card1.metric(
-    "Largest increase",
-    str(increase_row["zone"]),
-    delta=f"{increase_row['post_minus_pre_incidence_delta']:+.1f} per 1,000",
-    help="Largest absolute Post-CP minus Pre-CP incidence increase.",
+st.markdown("### Where did stress-anomaly incidence change?")
+st.markdown(
+    "The **Change** map subtracts each zone's Pre-CP incidence from its Post-CP "
+    "incidence: teal means stress anomalies became more common and terracotta means "
+    "they became less common. The **Pre-CP** and **Post-CP** tabs use one shared "
+    "incidence scale so the two periods can be compared directly."
 )
-card2.metric(
-    "Largest decrease",
-    str(decrease_row["zone"]),
-    delta=f"{decrease_row['post_minus_pre_incidence_delta']:+.1f} per 1,000",
-    help="Largest absolute Post-CP minus Pre-CP incidence decrease.",
-)
-card3.metric(
-    "Hotspot turnover",
-    f"{insights['emerging_hotspots']} emerging",
-    delta=f"{insights['receding_hotspots']} receding",
-    delta_color="off",
-    help=(
-        "Emerging zones crossed above the Post-CP 75th-percentile threshold; "
-        "receding zones fell below it."
-    ),
-)
-card4.metric(
-    "Top-10 continuity",
-    f"{insights['top10_overlap']} of 10 retained",
-    help="Zones appearing in both the Pre-CP and Post-CP incidence Top 10.",
-)
-
-st.markdown("### Stress-anomaly geography changed sharply")
 change_tab, pre_tab, post_tab = st.tabs(["Change", "Pre-CP", "Post-CP"])
 
 with change_tab:
@@ -1516,7 +1497,8 @@ with change_tab:
         ),
         width="stretch",
         config={"displayModeBar": False},
-    )
+            key="raw13_plotly_01",
+)
     st.caption(
         f"The diverging scale is capped symmetrically at ±{change_bound:.1f} "
         "per 1,000 (the 95th percentile of absolute zone changes). Exact "
@@ -1531,6 +1513,37 @@ with change_tab:
         f"{map_insights['persistent_hotspots']} remained elevated in both periods."
     )
 
+    card1, card2, card3, card4 = st.columns(4)
+    card1.metric(
+        "Largest increase",
+        str(increase_row["zone"]),
+        delta=f"{increase_row['post_minus_pre_incidence_delta']:+.1f} per 1,000",
+        delta_color="off",
+        help="Largest positive Post-CP minus Pre-CP incidence change.",
+    )
+    card2.metric(
+        "Largest decrease",
+        str(decrease_row["zone"]),
+        delta=f"{decrease_row['post_minus_pre_incidence_delta']:+.1f} per 1,000",
+        delta_color="off",
+        help="Largest negative Post-CP minus Pre-CP incidence change.",
+    )
+    card3.metric(
+        "Hotspot turnover",
+        f"{insights['emerging_hotspots']} emerging",
+        delta=f"{insights['receding_hotspots']} receding",
+        delta_color="off",
+        help=(
+            "Emerging zones crossed above the Post-CP 75th-percentile threshold; "
+            "receding zones fell below it."
+        ),
+    )
+    card4.metric(
+        "Top-10 continuity",
+        f"{insights['top10_overlap']} of 10 retained",
+        help="Zones appearing in both the Pre-CP and Post-CP incidence Top 10.",
+    )
+
 with pre_tab:
     st.caption("Pre-CP stress anomalies per 1,000 eligible observations")
     st.plotly_chart(
@@ -1543,7 +1556,8 @@ with pre_tab:
         ),
         width="stretch",
         config={"displayModeBar": False},
-    )
+            key="raw13_plotly_02",
+)
     st.caption(
         f"Uses the shared 0–{shared_incidence_cap:.1f} per 1,000 scale. "
         "Tooltips retain exact values above the color cap."
@@ -1562,688 +1576,736 @@ with post_tab:
         ),
         width="stretch",
         config={"displayModeBar": False},
-    )
+            key="raw13_plotly_03",
+)
     st.caption(
         f"Uses the shared 0–{shared_incidence_cap:.1f} per 1,000 scale. "
         "Tooltips retain exact values above the color cap."
     )
     _render_chart_takeaway(_hero_period_narrative(map_table, "Post-CP"))
 
-with st.expander("How to read this view", expanded=False):
-    st.markdown(
-        """
-        - **Change** subtracts each zone's Pre-CP incidence from its Post-CP incidence. Teal indicates an increase; terracotta indicates a decrease.
-        - **Pre-CP and Post-CP** use one shared sequential color scale, so the same color represents the same incidence in both tabs.
-        - **Incidence** is distinct selected stress anomalies divided by all distinct eligible observations in the matching zone and period, multiplied by 1,000.
-        - **Emerging, receding, and persistent hotspots** use the period-specific 75th percentile of Taxi Zone incidence. They are descriptive categories, not causal estimates.
-        - The maps describe spatial change around the policy date; they do not establish that congestion pricing caused a zone's change.
-        """
-    )
-
-st.divider()
-st.markdown("## Explore spatial stress patterns")
-st.write(
-    "Change the stress family, time scope, temporal bucket, or geographic "
-    "segmentation to locate concentrations beyond the frozen policy-period hero."
-)
-
-reference = _load_zone_reference()
-borough_options = [
-    *[
-        value
-        for value in sorted(reference["borough"].dropna().astype(str).unique())
-        if value.lower() not in {"unknown", "ewr"}
-    ],
-]
-policy_geography_options = [
-    *sorted(reference["policy_geography"].dropna().astype(str).unique()),
-]
-mobility_environment_options = [
-    *get_mobility_regime_cluster_options(),
-]
-temporal_bucket_options = [
-    ALL_TEMPORAL_BUCKETS,
-    *sorted(
-        _load_spatial_universe()["temporal_bucket"]
-        .dropna()
-        .astype(str)
-        .unique()
+with exploration_section(
+    key="raw13_exploration_area",
+    title="Explore spatial stress patterns",
+    description=(
+        "Change the stress family, time scope, time-of-week bucket, or "
+        "geographic segmentation, then select Taxi Zones to compare their "
+        "incidence, rankings, timelines, and event detail."
     ),
-]
-
-default_saved_view = "All-stress policy shift"
-default_config = SAVED_VIEWS[default_saved_view]
-st.session_state.setdefault("raw13_saved_view", default_saved_view)
-st.session_state.setdefault("raw13_family", default_config["family"])
-st.session_state.setdefault("raw13_time_view", default_config["time_view"])
-st.session_state.setdefault("raw13_bucket", default_config["temporal_bucket"])
-st.session_state.setdefault(
-    "raw13_geography_scheme", default_config["geography_scheme"]
-)
-st.session_state.setdefault(
-    "raw13_geography_value", default_config["geography_value"]
-)
-st.session_state.setdefault("raw13_start_date", date(2023, 1, 1))
-st.session_state.setdefault("raw13_end_date", date(2026, 3, 31))
-
-st.selectbox(
-    "Saved view",
-    options=list(SAVED_VIEWS),
-    key="raw13_saved_view",
-    on_change=_apply_saved_view,
-    help="Saved views apply immediately; changing another control marks the view Custom.",
-)
-
-control1, control2, control3 = st.columns(3)
-with control1:
-    selected_family = st.selectbox(
-        "Stress family",
-        options=["All stress anomalies", *FAMILY_ORDER],
-        key="raw13_family",
-        on_change=_mark_saved_view_custom,
-    )
-with control2:
-    selected_time_view = st.selectbox(
-        "Time scope",
-        options=TIME_VIEW_OPTIONS,
-        key="raw13_time_view",
-        on_change=_mark_saved_view_custom,
-    )
-with control3:
-    selected_bucket = st.selectbox(
-        "Temporal bucket",
-        options=temporal_bucket_options,
-        format_func=_format_temporal_bucket,
-        key="raw13_bucket",
-        on_change=_mark_saved_view_custom,
-    )
-scope1, scope2 = st.columns(2)
-with scope1:
-    selected_geography_scheme = st.selectbox(
-        "Geographic segmentation",
-        options=GEOGRAPHY_SCHEMES,
-        key="raw13_geography_scheme",
-        on_change=_change_geography_scheme,
-        help=(
-            "Borough, policy geography, and mobility environment are competing "
-            "ways to segment Taxi Zones; only one can be active at a time."
+):
+    reference = _load_zone_reference()
+    borough_options = [
+        *[
+            value
+            for value in sorted(reference["borough"].dropna().astype(str).unique())
+            if value.lower() not in {"unknown", "ewr"}
+        ],
+    ]
+    policy_geography_options = [
+        *sorted(
+            value
+            for value in reference["policy_geography"].dropna().astype(str).unique()
+            if value != "Unknown"
         ),
-    )
-with scope2:
-    if selected_geography_scheme == "Borough":
-        geography_value_options = borough_options
-        geography_value_format = str
-    elif selected_geography_scheme == "Policy geography":
-        geography_value_options = policy_geography_options
-        geography_value_format = str
-    elif selected_geography_scheme == "Mobility environment":
-        geography_value_options = mobility_environment_options
-        geography_value_format = format_mobility_regime_cluster_label
-    else:
-        geography_value_options = []
-        geography_value_format = str
+    ]
+    mobility_environment_options = [
+        *get_mobility_regime_cluster_options(),
+    ]
+    temporal_bucket_options = [
+        ALL_TEMPORAL_BUCKETS,
+        *sorted(
+            _load_spatial_universe()["temporal_bucket"]
+            .dropna()
+            .astype(str)
+            .unique()
+        ),
+    ]
 
-    if geography_value_options:
-        if st.session_state.get("raw13_geography_value") not in geography_value_options:
-            st.session_state["raw13_geography_value"] = geography_value_options[0]
-        selected_geography_value = st.selectbox(
-            "Segment",
-            options=geography_value_options,
-            format_func=geography_value_format,
-            key="raw13_geography_value",
+    default_saved_view = "All-stress policy shift"
+    default_config = SAVED_VIEWS[default_saved_view]
+    st.session_state.setdefault("raw13_saved_view", default_saved_view)
+    st.session_state.setdefault("raw13_family", default_config["family"])
+    st.session_state.setdefault("raw13_time_view", default_config["time_view"])
+    st.session_state.setdefault("raw13_bucket", default_config["temporal_bucket"])
+    st.session_state.setdefault(
+        "raw13_geography_scheme", default_config["geography_scheme"]
+    )
+    st.session_state.setdefault(
+        "raw13_geography_value", default_config["geography_value"]
+    )
+    st.session_state.setdefault("raw13_start_date", date(2023, 1, 1))
+    st.session_state.setdefault("raw13_end_date", date(2026, 3, 31))
+
+    st.selectbox(
+        "Saved view",
+        options=list(SAVED_VIEWS),
+        key="raw13_saved_view",
+        on_change=_apply_saved_view,
+        help="Saved views apply immediately; changing another control marks the view Custom.",
+    )
+
+    control1, control2, control3 = st.columns(3)
+    with control1:
+        selected_family = st.selectbox(
+            "Stress family",
+            options=["All stress anomalies", *FAMILY_ORDER],
+            key="raw13_family",
             on_change=_mark_saved_view_custom,
+        )
+    with control2:
+        selected_time_view = st.selectbox(
+            "Time scope",
+            options=TIME_VIEW_OPTIONS,
+            key="raw13_time_view",
+            on_change=_mark_saved_view_custom,
+        )
+    with control3:
+        selected_bucket = st.selectbox(
+            "Temporal bucket",
+            options=temporal_bucket_options,
+            format_func=_format_temporal_bucket,
+            key="raw13_bucket",
+            on_change=_mark_saved_view_custom,
+        )
+    scope1, scope2 = st.columns(2)
+    with scope1:
+        selected_geography_scheme = st.selectbox(
+            "Geographic segmentation",
+            options=GEOGRAPHY_SCHEMES,
+            key="raw13_geography_scheme",
+            on_change=_change_geography_scheme,
             help=(
-                "Mobility-environment membership is period-aware; a policy-period "
-                "comparison includes zones assigned in either period."
-                if selected_geography_scheme == "Mobility environment"
-                else None
+                "Borough, policy geography, and mobility environment are competing "
+                "ways to segment Taxi Zones; only one can be active at a time."
             ),
         )
-    else:
-        selected_geography_value = None
-        st.caption("All Taxi Zones are included.")
-
-if selected_time_view == "Custom dates":
-    date1, date2 = st.columns(2)
-    with date1:
-        selected_start_date = st.date_input(
-            "Start date",
-            min_value=date(2023, 1, 1),
-            max_value=date(2026, 3, 31),
-            key="raw13_start_date",
-            on_change=_mark_saved_view_custom,
-        )
-    with date2:
-        selected_end_date = st.date_input(
-            "End date",
-            min_value=date(2023, 1, 1),
-            max_value=date(2026, 3, 31),
-            key="raw13_end_date",
-            on_change=_mark_saved_view_custom,
-        )
-else:
-    selected_start_date = st.session_state["raw13_start_date"]
-    selected_end_date = st.session_state["raw13_end_date"]
-
-if selected_start_date > selected_end_date:
-    st.warning("Start date must be on or before end date.")
-    st.stop()
-
-custom_table = _build_custom_table(
-    selected_family,
-    selected_time_view,
-    selected_bucket,
-    selected_start_date,
-    selected_end_date,
-)
-
-if selected_geography_scheme == "Borough":
-    custom_table = custom_table.loc[
-        custom_table["borough"].eq(selected_geography_value)
-    ].copy()
-elif selected_geography_scheme == "Policy geography":
-    custom_table = custom_table.loc[
-        custom_table["policy_geography"].eq(selected_geography_value)
-    ].copy()
-elif selected_geography_scheme == "Mobility environment":
-    mobility_environment_zone_ids = set(
-        _get_mobility_environment_zone_ids(
-            int(selected_geography_value),
-            selected_time_view,
-            selected_start_date,
-            selected_end_date,
-        )
-    )
-    custom_table = custom_table.loc[
-        custom_table["taxi_zone_id"].astype(int).isin(
-            mobility_environment_zone_ids
-        )
-    ].copy()
-
-custom_map_table = custom_table.loc[
-    custom_table["taxi_zone_id"].astype(int).isin(geometry_zone_ids)
-].copy()
-
-if custom_table.empty:
-    st.info("No eligible observations were available for this combination of controls.")
-    st.stop()
-
-scope_label = (
-    "Post-CP minus Pre-CP incidence"
-    if selected_time_view == "Policy-period change"
-    else f"{selected_time_view} incidence"
-)
-geography_scope_label = (
-    ALL_ZONES
-    if selected_geography_scheme == ALL_ZONES
-    else (
-        format_mobility_regime_cluster_label(selected_geography_value)
-        if selected_geography_scheme == "Mobility environment"
-        else f"{selected_geography_scheme}: {selected_geography_value}"
-    )
-)
-st.markdown(f"### {scope_label} · {selected_family}")
-st.caption(
-    f"{_format_temporal_bucket(selected_bucket)} · {geography_scope_label} · "
-    f"{len(custom_table):,} zones in scope"
-)
-
-scope_insights = _custom_scope_insights(
-    custom_table,
-    time_view=selected_time_view,
-)
-if not scope_insights["zones"]:
-    st.info("No comparable incidence values were available for this scope.")
-    st.stop()
-insight1, insight2, insight3, insight4 = st.columns(4)
-if selected_time_view == "Policy-period change":
-    scope_increase = scope_insights["increase"]
-    scope_decrease = scope_insights["decrease"]
-    increase_card_label = (
-        "Largest increase" if scope_increase["value"] > 0 else "Smallest decrease"
-    )
-    decrease_card_label = (
-        "Largest decrease" if scope_decrease["value"] < 0 else "Smallest increase"
-    )
-    insight1.metric(
-        increase_card_label,
-        str(scope_increase["zone"]),
-        delta=f"{scope_increase['value']:+.1f} per 1,000",
-    )
-    insight2.metric(
-        decrease_card_label,
-        str(scope_decrease["zone"]),
-        delta=f"{scope_decrease['value']:+.1f} per 1,000",
-    )
-    insight3.metric(
-        "Zones increasing",
-        f"{scope_insights['increased_count']} of {scope_insights['zones']}",
-        delta=f"{scope_insights['increased_share']:.1f}% of scope",
-        delta_color="off",
-    )
-    insight4.metric(
-        "Median zone change",
-        f"{scope_insights['median']:+.1f}",
-        delta="per 1,000",
-        delta_color="off",
-    )
-else:
-    scope_peak = scope_insights["peak"]
-    insight1.metric(
-        "Highest incidence",
-        str(scope_peak["zone"]),
-        delta=f"{scope_peak['value']:.1f} per 1,000",
-        delta_color="off",
-    )
-    insight2.metric(
-        "Median zone incidence",
-        f"{scope_insights['median']:.1f}",
-        delta="per 1,000",
-        delta_color="off",
-    )
-    insight3.metric(
-        "Matching stress anomalies",
-        f"{scope_insights['stress_anomalies']:,}",
-        delta=f"across {scope_insights['zones']} zones",
-        delta_color="off",
-    )
-    insight4.metric(
-        "Upper-quartile threshold",
-        f"{scope_insights['upper_quartile']:.1f}",
-        delta="per 1,000",
-        delta_color="off",
-    )
-
-st.session_state.setdefault("raw13_selected_zones", [])
-st.session_state.setdefault("raw13_map_revision", 0)
-available_zone_ids = custom_table["taxi_zone_id"].dropna().astype(int).tolist()
-available_zone_id_set = set(available_zone_ids)
-st.session_state["raw13_selected_zones"] = [
-    int(value)
-    for value in st.session_state["raw13_selected_zones"]
-    if int(value) in available_zone_id_set
-]
-
-zone_label_lookup = {
-    int(row.taxi_zone_id): f"{row.zone} · {row.borough}"
-    for row in custom_table[["taxi_zone_id", "zone", "borough"]]
-    .drop_duplicates("taxi_zone_id")
-    .itertuples(index=False)
-}
-current_zone_ids = list(st.session_state["raw13_selected_zones"])
-selection_summary, clear_selection = st.columns([5, 1])
-with selection_summary:
-    if current_zone_ids:
-        selected_labels = [
-            zone_label_lookup.get(zone_id, f"Zone {zone_id}")
-            for zone_id in current_zone_ids
-        ]
-        visible_labels = selected_labels[:8]
-        remaining_label = (
-            f" · +{len(selected_labels) - 8} more"
-            if len(selected_labels) > 8
-            else ""
-        )
-        st.caption(
-            f"Selected ({len(current_zone_ids)}): "
-            + " · ".join(visible_labels)
-            + remaining_label
-        )
-    else:
-        st.caption("Selected (0): click a map polygon or use the selector below.")
-with clear_selection:
-    st.button(
-        "Clear selections",
-        on_click=_clear_zone_selection,
-        disabled=not current_zone_ids,
-        width="stretch",
-    )
-
-if custom_map_table.empty:
-    st.info(
-        "The matching analysis zones do not have an exact drawable polygon. "
-        "Use the Taxi Zone selector below to inspect them."
-    )
-    map_selection = None
-else:
-    map_selection = st.plotly_chart(
-        _build_explorer_map(
-            custom_map_table,
-            zone_geojson,
-            time_view=selected_time_view,
-            selected_zone_ids=tuple(current_zone_ids),
-        ),
-        width="stretch",
-        config={"displayModeBar": False},
-        key=f"raw13_custom_map_{st.session_state['raw13_map_revision']}",
-        on_select="rerun",
-        selection_mode="points",
-    )
-    _render_chart_takeaway(
-        _scope_narrative(
-            _custom_scope_insights(
-                custom_map_table,
-                time_view=selected_time_view,
-            ),
-            time_view=selected_time_view,
-            family=selected_family,
-            geography_label=geography_scope_label,
-        )
-    )
-
-try:
-    selected_points = map_selection.selection.points
-except (AttributeError, TypeError):
-    selected_points = []
-
-clicked_zone_ids: list[int] = []
-for point in selected_points:
-    customdata = point.get("customdata") if isinstance(point, dict) else None
-    if customdata is not None and len(customdata) > 0:
-        try:
-            clicked_zone_ids.append(int(customdata[0]))
-        except (TypeError, ValueError):
-            continue
-
-if clicked_zone_ids:
-    updated_ids = list(current_zone_ids)
-    for clicked_zone_id in dict.fromkeys(clicked_zone_ids):
-        if clicked_zone_id not in available_zone_id_set:
-            continue
-        if clicked_zone_id in updated_ids:
-            updated_ids.remove(clicked_zone_id)
+    with scope2:
+        if selected_geography_scheme == "Borough":
+            geography_value_options = borough_options
+            geography_value_format = str
+        elif selected_geography_scheme == "Policy geography":
+            geography_value_options = policy_geography_options
+            geography_value_format = str
+        elif selected_geography_scheme == "Mobility environment":
+            geography_value_options = mobility_environment_options
+            geography_value_format = format_mobility_regime_cluster_label
         else:
-            updated_ids.append(clicked_zone_id)
-    st.session_state["raw13_selected_zones"] = updated_ids
-    st.session_state["raw13_map_revision"] += 1
-    st.rerun()
+            geography_value_options = []
+            geography_value_format = str
 
-selected_zone_ids = st.multiselect(
-    "Taxi Zones to inspect",
-    options=available_zone_ids,
-    format_func=lambda value: zone_label_lookup.get(int(value), f"Zone {value}"),
-    key="raw13_selected_zones",
-    on_change=_zone_multiselect_changed,
-    help=(
-        "Click map polygons or select any number of Taxi Zones. One zone opens "
-        "a focused profile; multiple zones produce a comparison. The monthly "
-        "line chart displays the first five selections."
-    ),
-)
-
-ranking_source = custom_table
-ranking_scope_suffix = ""
-if selected_zone_ids:
-    selected_zone_id_set = {int(value) for value in selected_zone_ids}
-    ranking_source = custom_table.loc[
-        custom_table["taxi_zone_id"].astype(int).isin(selected_zone_id_set)
-    ].copy()
-    ranking_scope_suffix = " · selected zones"
-
-if selected_time_view == "Policy-period change":
-    rank_options = [
-        "Highest change",
-        "Lowest change",
-        "Largest absolute change",
-    ]
-else:
-    rank_options = ["Highest incidence"]
-
-ranking_heading, ranking_control = st.columns([4, 1.4], vertical_alignment="bottom")
-with ranking_control:
-    rank_by = (
-        st.selectbox("Rank zones by", options=rank_options)
-        if len(rank_options) > 1
-        else rank_options[0]
-    )
-with ranking_heading:
-    st.markdown(f"### {rank_by}{ranking_scope_suffix}")
-
-ranking_figure, ranking_table = _build_ranking_chart(
-    ranking_source,
-    time_view=selected_time_view,
-    rank_by=rank_by,
-)
-if selected_zone_ids:
-    st.caption(
-        f"Ranking {len(ranking_source):,} selected zones; clear the selection "
-        "to restore the full in-scope ranking."
-    )
-st.plotly_chart(
-    ranking_figure,
-    width="stretch",
-    config={"displayModeBar": False},
-)
-_render_chart_takeaway(
-    _ranking_narrative(
-        ranking_source,
-        time_view=selected_time_view,
-        rank_by=rank_by,
-    )
-)
-
-with st.expander("View ranked zone data", expanded=False):
-    st.dataframe(ranking_table, width="stretch", hide_index=True)
-
-
-st.divider()
-st.markdown("## Investigate selected Taxi Zones")
-
-if not selected_zone_ids:
-    st.info(
-        "Click a polygon on the custom map or use the Taxi Zone multiselect "
-        "to open the zone-level stress-anomaly drill-down."
-    )
-else:
-    selected_zone_ids_tuple = tuple(int(value) for value in selected_zone_ids)
-    selected_comparison = custom_table.loc[
-        custom_table["taxi_zone_id"].astype(int).isin(selected_zone_ids_tuple)
-    ].copy()
-
-    comparison_columns = [
-        "taxi_zone_id",
-        "zone",
-        "borough",
-        "policy_geography",
-    ]
-    if selected_time_view == "Policy-period change":
-        comparison_columns.extend(
-            ["pre_incidence_per_1k", "post_incidence_per_1k", "value"]
-        )
-    else:
-        comparison_columns.extend(
-            ["eligible_observations", "stress_anomalies", "value"]
-        )
-
-    comparison_display = selected_comparison[comparison_columns].copy().rename(
-        columns={
-            "pre_incidence_per_1k": "Pre-CP per 1,000",
-            "post_incidence_per_1k": "Post-CP per 1,000",
-            "eligible_observations": "Eligible observations",
-            "stress_anomalies": "Stress anomalies",
-            "value": (
-                "Change per 1,000"
-                if selected_time_view == "Policy-period change"
-                else "Incidence per 1,000"
-            ),
-        }
-    )
-    rate_columns = [
-        column for column in comparison_display.columns if "per 1,000" in column
-    ]
-    comparison_display[rate_columns] = comparison_display[rate_columns].round(1)
-
-    if len(selected_zone_ids_tuple) == 1:
-        selected_zone_name = comparison_display.iloc[0]["zone"]
-        st.markdown(f"### {selected_zone_name} stress profile")
-    else:
-        st.markdown(f"### Comparing {len(selected_zone_ids_tuple)} Taxi Zones")
-
-    st.dataframe(comparison_display, width="stretch", hide_index=True)
-
-    if len(selected_zone_ids_tuple) == 1:
-        selected_row = selected_comparison.iloc[0]
-        if selected_time_view == "Policy-period change":
-            selected_narrative = (
-                f"{selected_row['zone']} moved from "
-                f"{selected_row['pre_incidence_per_1k']:.1f} Pre-CP to "
-                f"{selected_row['post_incidence_per_1k']:.1f} Post-CP stress "
-                f"anomalies per 1,000—a change of {selected_row['value']:+.1f}."
+        if geography_value_options:
+            if st.session_state.get("raw13_geography_value") not in geography_value_options:
+                st.session_state["raw13_geography_value"] = geography_value_options[0]
+            selected_geography_value = st.selectbox(
+                "Segment",
+                options=geography_value_options,
+                format_func=geography_value_format,
+                key="raw13_geography_value",
+                on_change=_mark_saved_view_custom,
+                help=(
+                    "Mobility-environment membership is period-aware; a policy-period "
+                    "comparison includes zones assigned in either period."
+                    if selected_geography_scheme == "Mobility environment"
+                    else None
+                ),
             )
         else:
-            selected_narrative = (
-                f"{selected_row['zone']} recorded {int(selected_row['stress_anomalies']):,} "
-                f"matching stress anomalies across "
-                f"{int(selected_row['eligible_observations']):,} eligible observations, "
-                f"or {selected_row['value']:.1f} per 1,000."
+            selected_geography_value = None
+            st.caption("All Taxi Zones are included.")
+
+    if selected_time_view == "Custom dates":
+        date1, date2 = st.columns(2)
+        with date1:
+            selected_start_date = st.date_input(
+                "Start date",
+                min_value=date(2023, 1, 1),
+                max_value=date(2026, 3, 31),
+                key="raw13_start_date",
+                on_change=_mark_saved_view_custom,
+            )
+        with date2:
+            selected_end_date = st.date_input(
+                "End date",
+                min_value=date(2023, 1, 1),
+                max_value=date(2026, 3, 31),
+                key="raw13_end_date",
+                on_change=_mark_saved_view_custom,
             )
     else:
-        selected_insights = _custom_scope_insights(
-            selected_comparison,
-            time_view=selected_time_view,
-        )
-        selected_narrative = _scope_narrative(
-            selected_insights,
-            time_view=selected_time_view,
-            family=selected_family,
-            geography_label="the selected zones",
-        )
+        selected_start_date = st.session_state["raw13_start_date"]
+        selected_end_date = st.session_state["raw13_end_date"]
 
-    _render_chart_takeaway(selected_narrative)
+    if selected_start_date > selected_end_date:
+        st.warning("Start date must be on or before end date.")
+        st.stop()
 
-    timeline_zone_ids = selected_zone_ids_tuple[:5]
-    monthly_timeline = _build_zone_monthly_timeline(
-        timeline_zone_ids,
+    custom_table = _build_custom_table(
         selected_family,
         selected_time_view,
         selected_bucket,
         selected_start_date,
         selected_end_date,
     )
-    if not monthly_timeline.empty:
-        st.markdown("#### Monthly incidence")
-        if len(selected_zone_ids_tuple) > 5:
-            timeline_zone_names = [
-                zone_label_lookup.get(zone_id, f"Zone {zone_id}").split(" · ")[0]
-                for zone_id in timeline_zone_ids
-            ]
-            st.caption(
-                "Showing the first five selected zones: "
-                + ", ".join(timeline_zone_names)
-                + ". All selected zones remain included in the tables below."
+
+    if selected_geography_scheme == "Borough":
+        custom_table = custom_table.loc[
+            custom_table["borough"].eq(selected_geography_value)
+        ].copy()
+    elif selected_geography_scheme == "Policy geography":
+        custom_table = custom_table.loc[
+            custom_table["policy_geography"].eq(selected_geography_value)
+        ].copy()
+    elif selected_geography_scheme == "Mobility environment":
+        mobility_environment_zone_ids = set(
+            _get_mobility_environment_zone_ids(
+                int(selected_geography_value),
+                selected_time_view,
+                selected_start_date,
+                selected_end_date,
             )
-        st.plotly_chart(
-            _build_zone_timeline_chart(
-                monthly_timeline,
-                selected_zone_count=len(timeline_zone_ids),
+        )
+        custom_table = custom_table.loc[
+            custom_table["taxi_zone_id"].astype(int).isin(
+                mobility_environment_zone_ids
+            )
+        ].copy()
+
+    custom_map_table = custom_table.loc[
+        custom_table["taxi_zone_id"].astype(int).isin(geometry_zone_ids)
+    ].copy()
+
+    if custom_table.empty:
+        st.info("No eligible observations were available for this combination of controls.")
+        st.stop()
+
+    scope_label = (
+        "Post-CP minus Pre-CP incidence"
+        if selected_time_view == "Policy-period change"
+        else f"{selected_time_view} incidence"
+    )
+    geography_scope_label = (
+        ALL_ZONES
+        if selected_geography_scheme == ALL_ZONES
+        else (
+            format_mobility_regime_cluster_label(selected_geography_value)
+            if selected_geography_scheme == "Mobility environment"
+            else f"{selected_geography_scheme}: {selected_geography_value}"
+        )
+    )
+    st.markdown(f"### {scope_label} · {selected_family}")
+    st.caption(
+        f"{_format_temporal_bucket(selected_bucket)} · {geography_scope_label} · "
+        f"{len(custom_table):,} zones in scope"
+    )
+
+    scope_insights = _custom_scope_insights(
+        custom_table,
+        time_view=selected_time_view,
+    )
+    if not scope_insights["zones"]:
+        st.info("No comparable incidence values were available for this scope.")
+        st.stop()
+    insight1, insight2, insight3, insight4 = st.columns(4)
+    if selected_time_view == "Policy-period change":
+        scope_increase = scope_insights["increase"]
+        scope_decrease = scope_insights["decrease"]
+        increase_card_label = (
+            "Largest increase" if scope_increase["value"] > 0 else "Smallest decrease"
+        )
+        decrease_card_label = (
+            "Largest decrease" if scope_decrease["value"] < 0 else "Smallest increase"
+        )
+        insight1.metric(
+            increase_card_label,
+            str(scope_increase["zone"]),
+            delta=f"{scope_increase['value']:+.1f} per 1,000",
+            delta_color="off",
+        )
+        insight2.metric(
+            decrease_card_label,
+            str(scope_decrease["zone"]),
+            delta=f"{scope_decrease['value']:+.1f} per 1,000",
+            delta_color="off",
+        )
+        insight3.metric(
+            "Zones increasing",
+            f"{scope_insights['increased_count']} of {scope_insights['zones']}",
+            delta=f"{scope_insights['increased_share']:.1f}% of scope",
+            delta_color="off",
+        )
+        insight4.metric(
+            "Median zone change",
+            f"{scope_insights['median']:+.1f}",
+            delta="per 1,000",
+            delta_color="off",
+        )
+    else:
+        scope_peak = scope_insights["peak"]
+        insight1.metric(
+            "Highest incidence",
+            str(scope_peak["zone"]),
+            delta=f"{scope_peak['value']:.1f} per 1,000",
+            delta_color="off",
+        )
+        insight2.metric(
+            "Median zone incidence",
+            f"{scope_insights['median']:.1f}",
+            delta="per 1,000",
+            delta_color="off",
+        )
+        insight3.metric(
+            "Matching stress anomalies",
+            f"{scope_insights['stress_anomalies']:,}",
+            delta=f"across {scope_insights['zones']} zones",
+            delta_color="off",
+        )
+        insight4.metric(
+            "Upper-quartile threshold",
+            f"{scope_insights['upper_quartile']:.1f}",
+            delta="per 1,000",
+            delta_color="off",
+        )
+
+    st.session_state.setdefault("raw13_selected_zones", [])
+    st.session_state.setdefault("raw13_map_revision", 0)
+    available_zone_ids = custom_table["taxi_zone_id"].dropna().astype(int).tolist()
+    available_zone_id_set = set(available_zone_ids)
+    st.session_state["raw13_selected_zones"] = [
+        int(value)
+        for value in st.session_state["raw13_selected_zones"]
+        if int(value) in available_zone_id_set
+    ]
+
+    zone_label_lookup = {
+        int(row.taxi_zone_id): f"{row.zone} · {row.borough}"
+        for row in custom_table[["taxi_zone_id", "zone", "borough"]]
+        .drop_duplicates("taxi_zone_id")
+        .itertuples(index=False)
+    }
+    current_zone_ids = list(st.session_state["raw13_selected_zones"])
+    selection_summary, clear_selection = st.columns([5, 1])
+    with selection_summary:
+        if current_zone_ids:
+            selected_labels = [
+                zone_label_lookup.get(zone_id, f"Zone {zone_id}")
+                for zone_id in current_zone_ids
+            ]
+            visible_labels = selected_labels[:8]
+            remaining_label = (
+                f" · +{len(selected_labels) - 8} more"
+                if len(selected_labels) > 8
+                else ""
+            )
+            st.caption(
+                f"Selected ({len(current_zone_ids)}): "
+                + " · ".join(visible_labels)
+                + remaining_label
+            )
+        else:
+            st.caption("Selected (0): click a map polygon or use the selector below.")
+    with clear_selection:
+        st.button(
+            "Clear selections",
+            on_click=_clear_zone_selection,
+            disabled=not current_zone_ids,
+            width="stretch",
+        )
+
+    if custom_map_table.empty:
+        st.info(
+            "The matching analysis zones do not have an exact drawable polygon. "
+            "Use the Taxi Zone selector below to inspect them."
+        )
+        map_selection = None
+    else:
+        map_selection = st.plotly_chart(
+            _build_explorer_map(
+                custom_map_table,
+                zone_geojson,
+                time_view=selected_time_view,
+                selected_zone_ids=tuple(current_zone_ids),
             ),
             width="stretch",
             config={"displayModeBar": False},
+            key=f"raw13_custom_map_{st.session_state['raw13_map_revision']}",
+            on_select="rerun",
+            selection_mode="points",
         )
-        _render_chart_takeaway(_timeline_narrative(monthly_timeline))
+        _render_chart_takeaway(
+            _scope_narrative(
+                _custom_scope_insights(
+                    custom_map_table,
+                    time_view=selected_time_view,
+                ),
+                time_view=selected_time_view,
+                family=selected_family,
+                geography_label=geography_scope_label,
+            )
+        )
 
-    if len(selected_zone_ids_tuple) == 1:
-        all_family_zone_events = _load_zone_event_rows(
-            selected_zone_ids_tuple,
-            "All stress anomalies",
+    try:
+        selected_points = map_selection.selection.points
+    except (AttributeError, TypeError):
+        selected_points = []
+
+    clicked_zone_ids: list[int] = []
+    for point in selected_points:
+        customdata = point.get("customdata") if isinstance(point, dict) else None
+        if customdata is not None and len(customdata) > 0:
+            try:
+                clicked_zone_ids.append(int(customdata[0]))
+            except (TypeError, ValueError):
+                continue
+
+    if clicked_zone_ids:
+        updated_ids = list(current_zone_ids)
+        for clicked_zone_id in dict.fromkeys(clicked_zone_ids):
+            if clicked_zone_id not in available_zone_id_set:
+                continue
+            if clicked_zone_id in updated_ids:
+                updated_ids.remove(clicked_zone_id)
+            else:
+                updated_ids.append(clicked_zone_id)
+        st.session_state["raw13_selected_zones"] = updated_ids
+        st.session_state["raw13_map_revision"] += 1
+        st.rerun()
+
+    selected_zone_ids = st.multiselect(
+        "Taxi Zones to inspect",
+        options=available_zone_ids,
+        format_func=lambda value: zone_label_lookup.get(int(value), f"Zone {value}"),
+        key="raw13_selected_zones",
+        on_change=_zone_multiselect_changed,
+        help=(
+            "Click map polygons or select any number of Taxi Zones. One zone opens "
+            "a focused profile; multiple zones produce a comparison. The monthly "
+            "line chart displays the first five selections."
+        ),
+    )
+
+    ranking_source = custom_table
+    ranking_scope_suffix = ""
+    if selected_zone_ids:
+        selected_zone_id_set = {int(value) for value in selected_zone_ids}
+        ranking_source = custom_table.loc[
+            custom_table["taxi_zone_id"].astype(int).isin(selected_zone_id_set)
+        ].copy()
+        ranking_scope_suffix = " · selected zones"
+
+    if selected_time_view == "Policy-period change":
+        rank_options = [
+            "Highest change",
+            "Lowest change",
+            "Largest absolute change",
+        ]
+    else:
+        rank_options = ["Highest incidence"]
+
+    ranking_heading, ranking_control = st.columns([4, 1.4], vertical_alignment="bottom")
+    with ranking_control:
+        rank_by = (
+            st.selectbox("Rank zones by", options=rank_options)
+            if len(rank_options) > 1
+            else rank_options[0]
+        )
+    with ranking_heading:
+        st.markdown(f"### {rank_by}{ranking_scope_suffix}")
+
+    ranking_figure, ranking_table = _build_ranking_chart(
+        ranking_source,
+        time_view=selected_time_view,
+        rank_by=rank_by,
+    )
+    if selected_zone_ids:
+        st.caption(
+            f"Ranking {len(ranking_source):,} selected zones; clear the selection "
+            "to restore the full in-scope ranking."
+        )
+    st.plotly_chart(
+        ranking_figure,
+        width="stretch",
+        config={"displayModeBar": False},
+            key="raw13_plotly_05",
+)
+    _render_chart_takeaway(
+        _ranking_narrative(
+            ranking_source,
+            time_view=selected_time_view,
+            rank_by=rank_by,
+        )
+    )
+
+    with st.expander("View ranked zone data", expanded=False):
+        st.dataframe(ranking_table, width="stretch", hide_index=True)
+
+
+    st.divider()
+    st.markdown("## Investigate selected Taxi Zones")
+
+    if not selected_zone_ids:
+        st.info(
+            "Click a polygon on the custom map or use the Taxi Zone multiselect "
+            "to open the zone-level stress-anomaly drill-down."
+        )
+    else:
+        selected_zone_ids_tuple = tuple(int(value) for value in selected_zone_ids)
+        selected_comparison = custom_table.loc[
+            custom_table["taxi_zone_id"].astype(int).isin(selected_zone_ids_tuple)
+        ].copy()
+
+        comparison_columns = [
+            "taxi_zone_id",
+            "zone",
+            "borough",
+            "policy_geography",
+        ]
+        if selected_time_view == "Policy-period change":
+            comparison_columns.extend(
+                ["pre_incidence_per_1k", "post_incidence_per_1k", "value"]
+            )
+        else:
+            comparison_columns.extend(
+                ["eligible_observations", "stress_anomalies", "value"]
+            )
+
+        comparison_display = selected_comparison[comparison_columns].copy().rename(
+            columns={
+                "pre_incidence_per_1k": "Pre-CP per 1,000",
+                "post_incidence_per_1k": "Post-CP per 1,000",
+                "eligible_observations": "Eligible observations",
+                "stress_anomalies": "Stress anomalies",
+                "value": (
+                    "Change per 1,000"
+                    if selected_time_view == "Policy-period change"
+                    else "Incidence per 1,000"
+                ),
+            }
+        )
+        rate_columns = [
+            column for column in comparison_display.columns if "per 1,000" in column
+        ]
+        comparison_display[rate_columns] = comparison_display[rate_columns].round(1)
+
+        if len(selected_zone_ids_tuple) == 1:
+            selected_zone_name = comparison_display.iloc[0]["zone"]
+            st.markdown(f"### {selected_zone_name} stress profile")
+        else:
+            st.markdown(f"### Comparing {len(selected_zone_ids_tuple)} Taxi Zones")
+
+        st.dataframe(comparison_display, width="stretch", hide_index=True)
+
+        if len(selected_zone_ids_tuple) == 1:
+            selected_row = selected_comparison.iloc[0]
+            if selected_time_view == "Policy-period change":
+                selected_narrative = (
+                    f"{selected_row['zone']} moved from "
+                    f"{selected_row['pre_incidence_per_1k']:.1f} Pre-CP to "
+                    f"{selected_row['post_incidence_per_1k']:.1f} Post-CP stress "
+                    f"anomalies per 1,000—a change of {selected_row['value']:+.1f}."
+                )
+            else:
+                selected_narrative = (
+                    f"{selected_row['zone']} recorded {int(selected_row['stress_anomalies']):,} "
+                    f"matching stress anomalies across "
+                    f"{int(selected_row['eligible_observations']):,} eligible observations, "
+                    f"or {selected_row['value']:.1f} per 1,000."
+                )
+        else:
+            selected_insights = _custom_scope_insights(
+                selected_comparison,
+                time_view=selected_time_view,
+            )
+            selected_narrative = _scope_narrative(
+                selected_insights,
+                time_view=selected_time_view,
+                family=selected_family,
+                geography_label="the selected zones",
+            )
+
+        _render_chart_takeaway(selected_narrative)
+
+        timeline_zone_ids = selected_zone_ids_tuple[:5]
+        monthly_timeline = _build_zone_monthly_timeline(
+            timeline_zone_ids,
+            selected_family,
             selected_time_view,
             selected_bucket,
             selected_start_date,
             selected_end_date,
         )
-        if not all_family_zone_events.empty:
-            family_summary = (
-                all_family_zone_events.groupby(FAMILY_COLUMN, observed=True)
-                .size()
-                .rename("Stress anomalies")
-                .reset_index()
-                .rename(columns={FAMILY_COLUMN: "Stress family"})
-            )
-            family_summary["Share"] = (
-                family_summary["Stress anomalies"]
-                .div(family_summary["Stress anomalies"].sum())
-                .mul(100)
-                .round(1)
-                .map(lambda value: f"{value:.1f}%")
-            )
-            bucket_summary = (
-                all_family_zone_events.groupby("temporal_bucket", observed=True)
-                .size()
-                .rename("Stress anomalies")
-                .reset_index()
-                .sort_values("Stress anomalies", ascending=False)
-                .head(10)
-                .rename(columns={"temporal_bucket": "Temporal bucket"})
-            )
-            bucket_summary["Temporal bucket"] = bucket_summary[
-                "Temporal bucket"
-            ].map(_format_temporal_bucket)
-
-            mix_column, bucket_column = st.columns(2)
-            with mix_column:
-                st.markdown("#### Stress-family mix")
-                st.dataframe(family_summary, width="stretch", hide_index=True)
-            with bucket_column:
-                st.markdown("#### Leading temporal buckets")
-                st.dataframe(bucket_summary, width="stretch", hide_index=True)
-
-    zone_events = _load_zone_event_rows(
-        selected_zone_ids_tuple,
-        selected_family,
-        selected_time_view,
-        selected_bucket,
-        selected_start_date,
-        selected_end_date,
-    )
-    st.markdown("#### Stress-anomaly events")
-    st.caption(
-        f"{len(zone_events):,} selected events match the current spatial-explorer scope."
-    )
-
-    if zone_events.empty:
-        st.info("No stress-anomaly events matched the selected zones and controls.")
-    else:
-        display_events = _event_display_table(zone_events.head(500))
-        st.dataframe(display_events, width="stretch", hide_index=True, height=360)
-        if len(zone_events) > 500:
-            st.caption("Showing the 500 most recent matching events.")
-
-        event_label_lookup: dict[str, str] = {}
-        for row in zone_events.head(2_000).itertuples(index=False):
-            event_id = str(getattr(row, EVENT_ID_COLUMN))
-            event_date = pd.Timestamp(getattr(row, "date")).strftime("%b %d, %Y")
-            zone_name = str(getattr(row, "zone", f"Zone {getattr(row, 'taxi_zone_id')}"))
-            daypart = str(getattr(row, "daypart", getattr(row, "temporal_bucket", "")))
-            family_value = str(getattr(row, FAMILY_COLUMN))
-            event_label_lookup[event_id] = (
-                f"{event_date} · {zone_name} · {daypart} · {family_value}"
-            )
-
-        event_options = list(event_label_lookup)
-        selected_event_id = st.selectbox(
-            "Event to diagnose",
-            options=event_options,
-            format_func=lambda value: event_label_lookup[value],
-            help="Choose one Taxi Zone × date × daypart event for Page 15.",
-        )
-        st.session_state["raw15_selected_event_id"] = selected_event_id
-
-        if EVENT_PROFILER_PAGE.exists():
-            st.page_link(
-                "views/raw_15_stress_anomaly_event_profiler.py",
-                label="Open this event in Stress Anomaly Event Profiler",
-                icon=":material/troubleshoot:",
-            )
-        else:
-            st.button(
-                "Open this event in Stress Anomaly Event Profiler",
-                disabled=True,
-                help=(
-                    "The selected event ID has been saved, but Page 15 "
-                    "could not be found at the expected path."
+        if not monthly_timeline.empty:
+            st.markdown("#### Monthly incidence")
+            if len(selected_zone_ids_tuple) > 5:
+                timeline_zone_names = [
+                    zone_label_lookup.get(zone_id, f"Zone {zone_id}").split(" · ")[0]
+                    for zone_id in timeline_zone_ids
+                ]
+                st.caption(
+                    "Showing the first five selected zones: "
+                    + ", ".join(timeline_zone_names)
+                    + ". All selected zones remain included in the tables below."
+                )
+            st.plotly_chart(
+                _build_zone_timeline_chart(
+                    monthly_timeline,
+                    selected_zone_count=len(timeline_zone_ids),
                 ),
+                width="stretch",
+                config={"displayModeBar": False},
+                            key="raw13_plotly_06",
+)
+            _render_chart_takeaway(_timeline_narrative(monthly_timeline))
+
+        if len(selected_zone_ids_tuple) == 1:
+            all_family_zone_events = _load_zone_event_rows(
+                selected_zone_ids_tuple,
+                "All stress anomalies",
+                selected_time_view,
+                selected_bucket,
+                selected_start_date,
+                selected_end_date,
             )
-            st.caption(
-                "The selected event is ready to pass to Stress Anomaly "
-                "Event Profiler once the page is available."
+            if not all_family_zone_events.empty:
+                family_summary = (
+                    all_family_zone_events.groupby(FAMILY_COLUMN, observed=True)
+                    .size()
+                    .rename("Stress anomalies")
+                    .reset_index()
+                    .rename(columns={FAMILY_COLUMN: "Stress family"})
+                )
+                family_summary["Share"] = (
+                    family_summary["Stress anomalies"]
+                    .div(family_summary["Stress anomalies"].sum())
+                    .mul(100)
+                    .round(1)
+                    .map(lambda value: f"{value:.1f}%")
+                )
+                bucket_summary = (
+                    all_family_zone_events.groupby("temporal_bucket", observed=True)
+                    .size()
+                    .rename("Stress anomalies")
+                    .reset_index()
+                    .sort_values("Stress anomalies", ascending=False)
+                    .head(10)
+                    .rename(columns={"temporal_bucket": "Temporal bucket"})
+                )
+                bucket_summary["Temporal bucket"] = bucket_summary[
+                    "Temporal bucket"
+                ].map(_format_temporal_bucket)
+
+                mix_column, bucket_column = st.columns(2)
+                with mix_column:
+                    st.markdown("#### Stress-family mix")
+                    st.dataframe(family_summary, width="stretch", hide_index=True)
+                with bucket_column:
+                    st.markdown("#### Leading temporal buckets")
+                    st.dataframe(bucket_summary, width="stretch", hide_index=True)
+
+        zone_events = _load_zone_event_rows(
+            selected_zone_ids_tuple,
+            selected_family,
+            selected_time_view,
+            selected_bucket,
+            selected_start_date,
+            selected_end_date,
+        )
+        st.markdown("#### Stress-anomaly events")
+        st.caption(
+            f"{len(zone_events):,} selected events match the current spatial-explorer scope."
+        )
+
+        if zone_events.empty:
+            st.info("No stress-anomaly events matched the selected zones and controls.")
+        else:
+            display_events = _event_display_table(zone_events.head(500))
+            st.dataframe(display_events, width="stretch", hide_index=True, height=360)
+            if len(zone_events) > 500:
+                st.caption("Showing the 500 most recent matching events.")
+
+            event_label_lookup: dict[str, str] = {}
+            for row in zone_events.head(2_000).itertuples(index=False):
+                event_id = str(getattr(row, EVENT_ID_COLUMN))
+                event_date = pd.Timestamp(getattr(row, "date")).strftime("%b %d, %Y")
+                zone_name = str(getattr(row, "zone", f"Zone {getattr(row, 'taxi_zone_id')}"))
+                daypart = str(getattr(row, "daypart", getattr(row, "temporal_bucket", "")))
+                family_value = str(getattr(row, FAMILY_COLUMN))
+                event_label_lookup[event_id] = (
+                    f"{event_date} · {zone_name} · {daypart} · {family_value}"
+                )
+
+            event_options = list(event_label_lookup)
+            selected_event_id = st.selectbox(
+                "Event to diagnose",
+                options=event_options,
+                format_func=lambda value: event_label_lookup[value],
+                help="Choose one Taxi Zone × date × daypart event for Page 15.",
             )
+            st.session_state["raw15_selected_event_id"] = selected_event_id
+
+            if EVENT_PROFILER_PAGE.exists():
+                st.page_link(
+                    "views/raw_15_stress_anomaly_event_profiler.py",
+                    label="Open this event in Stress Anomaly Event Profiler",
+                    icon=":material/troubleshoot:",
+                )
+            else:
+                st.button(
+                    "Open this event in Stress Anomaly Event Profiler",
+                    disabled=True,
+                    help=(
+                        "The selected event ID has been saved, but Page 15 "
+                        "could not be found at the expected path."
+                    ),
+                )
+                st.caption(
+                    "The event profiler is not available in this deployment."
+                )
+
+# ---------------------------------------------------------------------
+# Closing synthesis
+# ---------------------------------------------------------------------
+st.divider()
+
+st.markdown("### What this page establishes")
+st.markdown(
+    "Stress-anomaly geography was not fixed. Some Taxi Zones remained relatively "
+    "elevated across both periods, while others entered or left the upper end of the "
+    "city's stress distribution. That turnover matters because a citywide anomaly rate "
+    "can remain fairly stable even while the places carrying the most unusual mobility "
+    "stress change substantially."
+)
+
+with st.expander("How this page works", expanded=False):
+    st.markdown(
+        """
+        **1. Use the full eligible observation universe.** For each Taxi Zone and
+        period, incidence is the number of distinct selected stress anomalies divided
+        by all eligible Taxi Zone × date × daypart observations, multiplied by **1,000**.
+
+        **2. Compare change and level separately.** The **Change** view subtracts
+        Pre-CP incidence from Post-CP incidence. Teal indicates an increase and
+        terracotta a decrease. The **Pre-CP** and **Post-CP** maps use one shared
+        sequential scale, so the same color means the same incidence in both tabs.
+
+        **3. Keep extreme values from flattening the map.** The displayed color range
+        is capped using robust percentiles so most spatial differences remain visible.
+        Exact uncapped values remain available in the tooltips.
+
+        **4. Treat hotspot labels as relative spatial categories.** Emerging, receding,
+        and persistent hotspots are based on the period-specific **75th percentile** of
+        Taxi Zone incidence. They describe where a zone sits in the citywide
+        distribution; they are not statistical significance tests.
+
+        **5. Let the explorer change the analytical scope.** Stress family, time
+        window, time-of-week bucket, and geography can be changed while retaining the
+        same incidence definition. Selecting zones then exposes rankings, timelines,
+        family mix, and the underlying events.
+        """
+    )
+
+st.caption(
+    "Evidence scope: selected stress anomalies among eligible Taxi Zone × date × "
+    "daypart observations. The maps describe spatial differences before and after "
+    "January 5, 2025; they do not establish that congestion pricing caused a zone's "
+    "change in anomaly incidence."
+)

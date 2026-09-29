@@ -19,6 +19,7 @@ from app.data_access.zone_rankings import (
 from app.utils.project_branding import (
     BRAND_COLORS,
     apply_branding,
+    exploration_section,
     inject_app_css,
     render_chart_insight,
 )
@@ -138,6 +139,15 @@ def _format_geo_policy(value: object) -> str:
         return GEO_POLICY_LABELS[text]
 
     return text.replace("_", " ").title()
+
+
+def _format_geography_scope(value: str) -> str:
+    """Translate internal geography keys into reader-facing terminology."""
+    mapping = {
+        "Geo-policy group": "Policy geography",
+        "Mobility regime cluster": "Mobility environment",
+    }
+    return mapping.get(value, value)
 
 
 def _wrap_zone_label(
@@ -273,8 +283,8 @@ def _hover_template() -> str:
     return (
         "<b>%{customdata[0]}</b><br>"
         "Borough: %{customdata[1]}<br>"
-        "Geo-policy group: %{customdata[2]}<br>"
-        "Mobility regime cluster: %{customdata[3]}<br>"
+        "Policy geography: %{customdata[2]}<br>"
+        "Mobility environment: %{customdata[3]}<br>"
         "Pre-CP daily average: %{customdata[4]}<br>"
         "Post-CP daily average: %{customdata[5]}<br>"
         "Daily-average change: %{customdata[6]}<br>"
@@ -1463,7 +1473,6 @@ def build_detail_table(
             "zone",
             "borough",
             "cbd_spatial_category",
-            "mobility_environment",
             "mobility_regime_cluster_label",
             "pre_daily_average",
             "post_daily_average",
@@ -1477,7 +1486,7 @@ def build_detail_table(
         .fillna("Unavailable")
         .map(_format_geo_policy)
     )
-    display["mobility_regime_cluster"] = (
+    display["mobility_environment"] = (
         display["mobility_regime_cluster_label"]
         .map(format_mobility_regime_cluster_label)
     )
@@ -1486,13 +1495,18 @@ def build_detail_table(
         columns={
             "zone": "Taxi Zone",
             "borough": "Borough",
-            "cbd_spatial_category": "Geo-policy group",
-            "mobility_regime_cluster": "Mobility regime cluster",
+            "cbd_spatial_category": "Policy geography",
+            "mobility_environment": "Mobility environment",
             "pre_daily_average": "Pre-CP daily avg",
             "post_daily_average": "Post-CP daily avg",
             "absolute_change": "Daily-average change",
             "percent_change": "Percent change",
         }
+    )
+
+    display = display.drop(
+        columns=["mobility_regime_cluster_label"],
+        errors="ignore",
     )
 
     return display
@@ -1546,11 +1560,12 @@ def _distribution_hover_template() -> str:
     return (
         "<b>%{customdata[0]}</b><br>"
         "Borough: %{customdata[1]}<br>"
-        "Geo-policy group: %{customdata[2]}<br>"
-        "Pre-CP daily average: %{customdata[3]}<br>"
-        "Post-CP daily average: %{customdata[4]}<br>"
-        "Daily-average change: %{customdata[5]}<br>"
-        "Percent change: %{customdata[6]}"
+        "Policy geography: %{customdata[2]}<br>"
+        "Mobility environment: %{customdata[3]}<br>"
+        "Pre-CP daily average: %{customdata[4]}<br>"
+        "Post-CP daily average: %{customdata[5]}<br>"
+        "Daily-average change: %{customdata[6]}<br>"
+        "Percent change: %{customdata[7]}"
         "<extra></extra>"
     )
 
@@ -1962,8 +1977,10 @@ st.caption("ZONE RANKINGS")
 st.title("Which zones changed most?")
 
 st.write(
-    "The largest reliable pre- versus post-congestion-pricing changes "
-    "across New York City's mobility system."
+    "Citywide averages can hide neighborhoods at the edges of the distribution. "
+    "This page ranks the Taxi Zones with the largest reliable pre/post changes, then "
+    "checks whether those extremes were isolated cases or part of a broader local "
+    "pattern."
 )
 
 with st.spinner("Preparing zone rankings..."):
@@ -2009,8 +2026,9 @@ available_metrics = [
 st.header("Where the largest changes appeared")
 
 st.write(
-    "Each panel shows the five largest reliable increases and decreases "
-    "within one mobility measure."
+    "Each panel shows the five largest reliable increases and decreases for one "
+    "mobility measure. Rankings use percentage change after excluding zones whose "
+    "pre-CP activity is too limited for a stable comparison."
 )
 
 for row_start in range(0, len(available_metrics), 2):
@@ -2120,345 +2138,392 @@ st.caption(
 # ---------------------------------------------------------------------
 # Interactive explorer
 # ---------------------------------------------------------------------
-st.divider()
-st.header("Explore zone rankings")
-
-st.write(
-    "Choose a mobility measure, geographic scope, and time context, then use "
-    "the tabs below to inspect either the largest changes or the full zone distribution."
-)
-
-control1, control2, control3 = st.columns(
-    [1.2, 1.0, 1.0]
-)
-
-with control1:
-    selected_metric = st.selectbox(
-        "Mobility measure",
-        options=available_metrics,
-        format_func=lambda metric: metric_labels[metric],
-        index=0,
-        key="raw04_metric",
+with exploration_section(
+    key="raw04_exploration_area",
+    title="Explore zone rankings",
+    description=(
+        "Choose a mobility measure, geography, and time context, then compare "
+        "the largest changes with the full distribution of eligible Taxi Zones."
+    ),
+):
+    control1, control2, control3 = st.columns(
+        [1.2, 1.0, 1.0]
     )
 
-with control2:
-    geography_scope = st.selectbox(
-        "Geography",
-        options=[
-            "Citywide",
-            "Borough",
-            "Geo-policy group",
-            "Mobility regime cluster",
-        ],
-        index=0,
-        key="raw04_geography_scope",
+    with control1:
+        selected_metric = st.selectbox(
+            "Mobility measure",
+            options=available_metrics,
+            format_func=lambda metric: metric_labels[metric],
+            index=0,
+            key="raw04_metric",
+        )
+
+    with control2:
+        geography_scope = st.selectbox(
+            "Geography",
+            options=[
+                "Citywide",
+                "Borough",
+                "Geo-policy group",
+                "Mobility regime cluster",
+            ],
+            format_func=_format_geography_scope,
+            index=0,
+            key="raw04_geography_scope",
+        )
+
+    with control3:
+        time_context = st.selectbox(
+            "Time context",
+            options=[
+                "Overall",
+                "Weekday",
+                "Weekend",
+                "Specific time bucket",
+            ],
+            index=0,
+            key="raw04_time_context",
+        )
+
+    temporal_bucket: str | None = None
+
+    if time_context == "Specific time bucket":
+        temporal_bucket = st.selectbox(
+            "Time bucket",
+            options=TEMPORAL_BUCKET_OPTIONS,
+            format_func=lambda bucket: TEMPORAL_BUCKET_LABELS[bucket],
+            index=1,
+            key="raw04_temporal_bucket",
+        )
+
+    with st.spinner("Updating zone rankings..."):
+        explorer_base = _get_explorer_base(
+            metric=selected_metric,
+            time_context=time_context,
+            temporal_bucket=temporal_bucket,
+        )
+
+    geography_value: str | None = None
+    citywide_explorer_base = explorer_base.copy()
+
+    if geography_scope != "Citywide":
+        geography_values = _get_geography_values(
+            explorer_base,
+            geography_scope=geography_scope,
+        )
+
+        if geography_values:
+            geography_value = st.selectbox(
+                (
+                    "Borough"
+                    if geography_scope == "Borough"
+                    else "Policy geography"
+                    if geography_scope == "Geo-policy group"
+                    else "Mobility environment"
+                ),
+                options=geography_values,
+                format_func=(
+                    (lambda value: value)
+                    if geography_scope == "Borough"
+                    else _format_geo_policy
+                    if geography_scope == "Geo-policy group"
+                    else format_mobility_regime_cluster_label
+                ),
+                key="raw04_geography_value",
+            )
+        else:
+            st.warning(
+                f"No {geography_scope.lower()} values are available "
+                "for the selected measure and time context."
+            )
+
+    explorer_base = _filter_geography(
+        explorer_base,
+        geography_scope=geography_scope,
+        geography_value=geography_value,
     )
 
-with control3:
-    time_context = st.selectbox(
-        "Time context",
-        options=[
-            "Overall",
-            "Weekday",
-            "Weekend",
-            "Specific time bucket",
-        ],
-        index=0,
-        key="raw04_time_context",
-    )
 
-temporal_bucket: str | None = None
-
-if time_context == "Specific time bucket":
-    temporal_bucket = st.selectbox(
-        "Time bucket",
-        options=TEMPORAL_BUCKET_OPTIONS,
-        format_func=lambda bucket: TEMPORAL_BUCKET_LABELS[bucket],
-        index=1,
-        key="raw04_temporal_bucket",
-    )
-
-with st.spinner("Updating zone rankings..."):
-    explorer_base = _get_explorer_base(
-        metric=selected_metric,
+    context_label = _build_context_label(
+        geography_scope=geography_scope,
+        geography_value=geography_value,
         time_context=time_context,
         temporal_bucket=temporal_bucket,
     )
 
-geography_value: str | None = None
-citywide_explorer_base = explorer_base.copy()
+    largest_tab, distribution_tab = st.tabs([
+        "Largest changes",
+        "Full zone distribution",
+    ])
 
-if geography_scope != "Citywide":
-    geography_values = _get_geography_values(
-        explorer_base,
-        geography_scope=geography_scope,
-    )
-
-    if geography_values:
-        geography_value = st.selectbox(
-            (
-                "Borough"
-                if geography_scope == "Borough"
-                else "Geo-policy group"
-                if geography_scope == "Geo-policy group"
-                else "Mobility regime cluster"
-            ),
-            options=geography_values,
-            format_func=(
-                (lambda value: value)
-                if geography_scope == "Borough"
-                else _format_geo_policy
-                if geography_scope == "Geo-policy group"
-                else format_mobility_regime_cluster_label
-            ),
-            key="raw04_geography_value",
+    with largest_tab:
+        st.markdown(
+            "Identify the zones with the largest reliable increases and decreases "
+            "within the selected context."
         )
-    else:
-        st.warning(
-            f"No {geography_scope.lower()} values are available "
-            "for the selected measure and time context."
-        )
-
-explorer_base = _filter_geography(
-    explorer_base,
-    geography_scope=geography_scope,
-    geography_value=geography_value,
-)
-
-
-context_label = _build_context_label(
-    geography_scope=geography_scope,
-    geography_value=geography_value,
-    time_context=time_context,
-    temporal_bucket=temporal_bucket,
-)
-
-largest_tab, distribution_tab = st.tabs([
-    "Largest changes",
-    "Full zone distribution",
-])
-
-with largest_tab:
-    st.markdown(
-        "Identify the zones with the largest reliable increases and decreases "
-        "within the selected context."
-    )
-    st.caption(
-        f"{metric_labels[selected_metric]} · "
-        f"{context_label} · Percent change · Reliability thresholds on"
-    )
-
-    explorer_summary = _build_explorer_summary(explorer_base)
-    _render_explorer_summary_cards(explorer_summary)
-
-    explorer_takeaway = _build_explorer_insight(
-        explorer_base,
-        metric_label=metric_labels[selected_metric],
-        context_label=context_label,
-    )
-
-    explorer_increases, explorer_decreases = _get_metric_leaders(
-        explorer_base,
-        metric=selected_metric,
-        n=10,
-    )
-
-    if explorer_increases.empty and explorer_decreases.empty:
-        st.info(
-            "No eligible increases or decreases were available for this "
-            "combination of filters."
-        )
-    else:
-        explorer_fig = build_split_lollipop_leaderboard(
-            explorer_increases,
-            explorer_decreases,
-        )
-        st.plotly_chart(
-            explorer_fig,
-            width="stretch",
-            config={"displayModeBar": False, "responsive": True},
-            key=(
-                f"explorer_rankings_{selected_metric}_"
-                f"{geography_scope}_{geography_value}_"
-                f"{time_context}_{temporal_bucket}"
-            ),
-        )
-        render_chart_insight(explorer_takeaway)
         st.caption(
-            "The chart shows up to ten increases and ten decreases. Hover over "
-            "a zone to compare its pre-CP average, post-CP average, "
-            "daily-average change, and percent change."
+            f"{metric_labels[selected_metric]} · "
+            f"{context_label} · Percent change · Reliability thresholds on"
         )
 
-        with st.expander(
-            "Compare the underlying daily averages",
-            expanded=False,
-        ):
-            detail_table = build_detail_table(
+        explorer_summary = _build_explorer_summary(explorer_base)
+        _render_explorer_summary_cards(explorer_summary)
+
+        explorer_takeaway = _build_explorer_insight(
+            explorer_base,
+            metric_label=metric_labels[selected_metric],
+            context_label=context_label,
+        )
+
+        explorer_increases, explorer_decreases = _get_metric_leaders(
+            explorer_base,
+            metric=selected_metric,
+            n=10,
+        )
+
+        if explorer_increases.empty and explorer_decreases.empty:
+            st.info(
+                "No eligible increases or decreases were available for this "
+                "combination of filters."
+            )
+        else:
+            explorer_fig = build_split_lollipop_leaderboard(
                 explorer_increases,
                 explorer_decreases,
             )
-            st.dataframe(
-                detail_table,
+            st.plotly_chart(
+                explorer_fig,
                 width="stretch",
-                hide_index=True,
-                column_config={
-                    "Rank": st.column_config.NumberColumn(format="%d"),
-                    "Pre-CP daily avg": st.column_config.NumberColumn(
-                        format="%,.1f"
-                    ),
-                    "Post-CP daily avg": st.column_config.NumberColumn(
-                        format="%,.1f"
-                    ),
-                    "Daily-average change": st.column_config.NumberColumn(
-                        format="%+,.1f"
-                    ),
-                    "Percent change": st.column_config.NumberColumn(
-                        format="%+,.1f%%"
-                    ),
-                },
+                config={"displayModeBar": False, "responsive": True},
+                key=(
+                    f"explorer_rankings_{selected_metric}_"
+                    f"{geography_scope}_{geography_value}_"
+                    f"{time_context}_{temporal_bucket}"
+                ),
+            )
+            render_chart_insight(explorer_takeaway)
+            st.caption(
+                "The chart shows up to ten increases and ten decreases. Hover over "
+                "a zone to compare its pre-CP average, post-CP average, "
+                "daily-average change, and percent change."
             )
 
-with distribution_tab:
-    st.markdown(
-        "See whether the ranked zones are isolated extremes or part of a broader "
-        "geographic pattern."
-    )
-    distribution_measure = st.selectbox(
-        "Distribution measure",
-        options=list(DISTRIBUTION_MEASURES),
-        index=0,
-        key="raw04_distribution_measure",
-        help=(
-            "Percent change compares relative movement across zones. "
-            "Daily-average change preserves the original metric units and "
-            "helps reveal percentage outliers driven by small baselines."
-        ),
-    )
-    measure_column, axis_title, tick_suffix = DISTRIBUTION_MEASURES[
-        distribution_measure
-    ]
+            with st.expander(
+                "Compare the underlying daily averages",
+                expanded=False,
+            ):
+                detail_table = build_detail_table(
+                    explorer_increases,
+                    explorer_decreases,
+                )
+                st.dataframe(
+                    detail_table,
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "Rank": st.column_config.NumberColumn(format="%d"),
+                        "Pre-CP daily avg": st.column_config.NumberColumn(
+                            format="%,.1f"
+                        ),
+                        "Post-CP daily avg": st.column_config.NumberColumn(
+                            format="%,.1f"
+                        ),
+                        "Daily-average change": st.column_config.NumberColumn(
+                            format="%+,.1f"
+                        ),
+                        "Percent change": st.column_config.NumberColumn(
+                            format="%+,.1f%%"
+                        ),
+                    },
+                )
 
-    if geography_scope == "Citywide":
-        active_reference_label = "Citywide aggregate"
-    elif geography_scope == "Borough":
-        active_reference_label = f"{geography_value} aggregate"
-    else:
-        active_reference_label = (
-            f"{_format_geo_policy(geography_value)} aggregate"
+    with distribution_tab:
+        st.markdown(
+            "See whether the ranked zones are isolated extremes or part of a broader "
+            "geographic pattern."
+        )
+        distribution_measure = st.selectbox(
+            "Distribution measure",
+            options=list(DISTRIBUTION_MEASURES),
+            index=0,
+            key="raw04_distribution_measure",
+            help=(
+                "Percent change compares relative movement across zones. "
+                "Daily-average change preserves the original metric units and "
+                "helps reveal percentage outliers driven by small baselines."
+            ),
+        )
+        measure_column, axis_title, tick_suffix = DISTRIBUTION_MEASURES[
+            distribution_measure
+        ]
+
+        if geography_scope == "Citywide":
+            active_reference_label = "Citywide aggregate"
+        elif geography_scope == "Borough":
+            active_reference_label = f"{geography_value} aggregate"
+        elif geography_scope == "Mobility regime cluster":
+            active_reference_label = (
+                f"{format_mobility_regime_cluster_label(geography_value)} aggregate"
+            )
+        else:
+            active_reference_label = (
+                f"{_format_geo_policy(geography_value)} aggregate"
+            )
+
+        st.caption(
+            f"{metric_labels[selected_metric]} · {context_label} · "
+            f"{distribution_measure} · Reliability thresholds on"
         )
 
-    st.caption(
-        f"{metric_labels[selected_metric]} · {context_label} · "
-        f"{distribution_measure} · Reliability thresholds on"
-    )
-
-    summary = _distribution_summary(
-        explorer_base,
-        metric=selected_metric,
-        measure_column=measure_column,
-    )
-    _render_distribution_cards(
-        summary,
-        measure_column=measure_column,
-    )
-
-    distribution_takeaway = _build_distribution_insight(
-        explorer_base,
-        citywide_base=citywide_explorer_base,
-        metric=selected_metric,
-        metric_label=metric_labels[selected_metric],
-        context_label=context_label,
-        measure_column=measure_column,
-        active_reference_label=active_reference_label,
-    )
-
-    if int(summary["eligible"]) == 0:
-        st.info(
-            "No eligible zones were available for this combination of filters."
+        summary = _distribution_summary(
+            explorer_base,
+            metric=selected_metric,
+            measure_column=measure_column,
         )
-    else:
-        distribution_fig = build_distribution_chart(
+        _render_distribution_cards(
+            summary,
+            measure_column=measure_column,
+        )
+
+        distribution_takeaway = _build_distribution_insight(
             explorer_base,
             citywide_base=citywide_explorer_base,
             metric=selected_metric,
+            metric_label=metric_labels[selected_metric],
+            context_label=context_label,
             measure_column=measure_column,
-            axis_title=axis_title,
-            tick_suffix=tick_suffix,
             active_reference_label=active_reference_label,
         )
-        st.plotly_chart(
-            distribution_fig,
-            width="stretch",
-            config={"displayModeBar": False, "responsive": True},
-            key=(
-                f"explorer_distribution_{selected_metric}_"
-                f"{geography_scope}_{geography_value}_"
-                f"{time_context}_{temporal_bucket}_{measure_column}"
-            ),
-        )
-        render_chart_insight(distribution_takeaway)
-        st.caption(
-            "The violin shows the full eligible-zone distribution. Points are "
-            "individual Taxi Zones; the dotted line marks the median zone, the "
-            "solid teal line marks the active-geography aggregate when it differs "
-            "from citywide, and the dashed terracotta line marks the citywide "
-            "aggregate. The two labeled points are the filtered extremes."
-        )
 
-        with st.expander("Inspect all eligible zones", expanded=False):
-            table = explorer_base[
-                explorer_base["metric"].eq(selected_metric)
-            ][
-                [
-                    "zone",
-                    "borough",
-                    "cbd_spatial_category",
-                    "mobility_environment",
-                    "pre_daily_average",
-                    "post_daily_average",
-                    "absolute_change",
-                    "percent_change",
-                ]
-            ].copy()
-
-            table = table.sort_values(
-                measure_column,
-                ascending=False,
-            ).rename(
-                columns={
-            "zone": "Taxi Zone",
-            "borough": "Borough",
-            "cbd_spatial_category": "Geo-policy group",
-            "mobility_regime_cluster": "Mobility regime cluster",
-            "pre_daily_average": "Pre-CP daily avg",
-            "post_daily_average": "Post-CP daily avg",
-            "absolute_change": "Daily-average change",
-            "percent_change": "Percent change",
-        }
+        if int(summary["eligible"]) == 0:
+            st.info(
+                "No eligible zones were available for this combination of filters."
             )
-            table["Geo-policy group"] = (
-                table["Geo-policy group"]
-                .fillna("Unavailable")
-                .map(_format_geo_policy)
+        else:
+            distribution_fig = build_distribution_chart(
+                explorer_base,
+                citywide_base=citywide_explorer_base,
+                metric=selected_metric,
+                measure_column=measure_column,
+                axis_title=axis_title,
+                tick_suffix=tick_suffix,
+                active_reference_label=active_reference_label,
             )
-
-            st.dataframe(
-                table,
+            st.plotly_chart(
+                distribution_fig,
                 width="stretch",
-                hide_index=True,
-                column_config={
-                    "Pre-CP daily avg": st.column_config.NumberColumn(
-                        format="%,.1f"
-                    ),
-                    "Post-CP daily avg": st.column_config.NumberColumn(
-                        format="%,.1f"
-                    ),
-                    "Daily-average change": st.column_config.NumberColumn(
-                        format="%+,.1f"
-                    ),
-                    "Percent change": st.column_config.NumberColumn(
-                        format="%+,.1f%%"
-                    ),
-                },
+                config={"displayModeBar": False, "responsive": True},
+                key=(
+                    f"explorer_distribution_{selected_metric}_"
+                    f"{geography_scope}_{geography_value}_"
+                    f"{time_context}_{temporal_bucket}_{measure_column}"
+                ),
             )
+            render_chart_insight(distribution_takeaway)
+            st.caption(
+                "The violin shows the full eligible-zone distribution. Points are "
+                "individual Taxi Zones; the dotted line marks the median zone, the "
+                "solid teal line marks the active-geography aggregate when it differs "
+                "from citywide, and the dashed terracotta line marks the citywide "
+                "aggregate. The two labeled points are the filtered extremes."
+            )
+
+            with st.expander("Inspect all eligible zones", expanded=False):
+                table = explorer_base[
+                    explorer_base["metric"].eq(selected_metric)
+                ][
+                    [
+                        "zone",
+                        "borough",
+                        "cbd_spatial_category",
+                        "mobility_environment",
+                        "pre_daily_average",
+                        "post_daily_average",
+                        "absolute_change",
+                        "percent_change",
+                    ]
+                ].copy()
+
+                table = table.sort_values(
+                    measure_column,
+                    ascending=False,
+                ).rename(
+                    columns={
+                "zone": "Taxi Zone",
+                "borough": "Borough",
+                "cbd_spatial_category": "Policy geography",
+                "mobility_environment": "Mobility environment",
+                "pre_daily_average": "Pre-CP daily avg",
+                "post_daily_average": "Post-CP daily avg",
+                "absolute_change": "Daily-average change",
+                "percent_change": "Percent change",
+            }
+                )
+                table["Policy geography"] = (
+                    table["Policy geography"]
+                    .fillna("Unavailable")
+                    .map(_format_geo_policy)
+                )
+
+                st.dataframe(
+                    table,
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "Pre-CP daily avg": st.column_config.NumberColumn(
+                            format="%,.1f"
+                        ),
+                        "Post-CP daily avg": st.column_config.NumberColumn(
+                            format="%,.1f"
+                        ),
+                        "Daily-average change": st.column_config.NumberColumn(
+                            format="%+,.1f"
+                        ),
+                        "Percent change": st.column_config.NumberColumn(
+                            format="%+,.1f%%"
+                        ),
+                    },
+                )
+
+st.markdown("### What this page establishes")
+st.markdown(
+    "The largest neighborhood changes are not interchangeable with the citywide "
+    "pattern. Ranking the extremes shows where the strongest observed shifts occurred, "
+    "while the distribution view shows whether those zones sit far from their peers or "
+    "belong to a broader local pattern."
+)
+
+with st.expander("How this page works", expanded=False):
+    st.markdown(
+        """
+        **1. Rank comparable pre/post changes.** The opening panels compare each Taxi
+        Zone's post-CP daily average with its pre-CP daily average and surface the five
+        largest reliable increases and decreases for each mobility measure.
+
+        **2. Protect rankings from unstable percentage changes.** Zones must pass the
+        project's metric-specific pre-CP activity threshold before they can enter a
+        percentage-change ranking. This keeps very small baselines from dominating the
+        extremes.
+
+        **3. Put an extreme back into its distribution.** A ranking tells us which zones
+        changed most, but not whether those zones were isolated. The distribution view
+        compares individual Taxi Zones with the median zone, the selected geography's
+        aggregate when applicable, and the citywide aggregate.
+
+        **4. Use the 1.5-IQR rule as a descriptive flag.** Zones beyond the conventional
+        1.5-IQR fences are treated as unusually far into the distribution. That is a
+        distributional diagnostic, not a claim that the observation is erroneous.
+
+        **5. Keep the comparison descriptive.** These rankings identify where observed
+        pre/post differences were largest. They do not explain why a particular zone
+        changed or estimate what would have happened without congestion pricing.
+        """
+    )
+
+st.caption(
+    "Evidence scope: observed NYC mobility before and after the January 5, 2025 "
+    "congestion-pricing launch, summarized at Taxi-Zone level. Rankings and outlier "
+    "flags describe the observed pre/post distribution; they are not causal estimates."
+)
+

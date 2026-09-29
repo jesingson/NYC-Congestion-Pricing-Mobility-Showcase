@@ -25,7 +25,11 @@ from app.data_access.spatial_visuals import (
     get_continuous_map_kpis,
     get_kpi_labels,
 )
-from app.utils.project_branding import inject_app_css, render_chart_insight
+from app.utils.project_branding import (
+    exploration_section,
+    inject_app_css,
+    render_chart_insight,
+)
 
 
 inject_app_css()
@@ -33,8 +37,10 @@ inject_app_css()
 st.caption("SPATIAL PATTERNS")
 st.title("Where did mobility change?")
 st.write(
-    "Mobility shifted differently across the city. Start with a curated "
-    "spatial story, then explore every core metric and time window."
+    "A citywide average can hide neighborhoods moving in very different directions. "
+    "This page maps the observed pre/post change across Taxi Zones, then asks whether "
+    "Taxi, FHVHV, and Subway demand tended to move together or whether some parts of "
+    "the city followed a different multimodal pattern."
 )
 
 STORY_CONFIGS = {
@@ -71,6 +77,13 @@ STORY_CONFIGS = {
 }
 
 st.header("Where the largest spatial shifts appeared")
+st.markdown(
+    "Choose a fixed spatial story below. **Taxi volume** shows added daily trips, "
+    "while the growth and shift views compare percentage changes after filtering "
+    "out zones with too little baseline activity for a stable percentage comparison. "
+    "**All modes** switches from magnitude to whether the three demand modes moved "
+    "in the same or different directions."
+)
 
 hero_story = st.segmented_control(
     "Choose a spatial story",
@@ -98,7 +111,8 @@ if hero_story == "All modes":
         fig,
         width="stretch",
         config=MAP_CONFIG,
-    )
+            key="raw03_plotly_01",
+)
     render_chart_insight(hero_insight)
 
     counts = get_agreement_category_counts(agreement)
@@ -135,7 +149,8 @@ else:
         fig,
         width="stretch",
         config=MAP_CONFIG,
-    )
+            key="raw03_plotly_02",
+)
     render_chart_insight(hero_insight)
 
     kpis = get_continuous_map_kpis(
@@ -164,25 +179,6 @@ else:
         help=kpis["largest_zone"],
     )
 
-with st.expander("How to read this view", expanded=False):
-    st.markdown(
-        """
-        Maps compare average daily mobility before and after congestion
-        pricing. Count metrics are summed by Taxi Zone and day; speed metrics
-        use weighted averages where supporting activity volume is available.
-
-        Percentage-change maps apply baseline reliability thresholds. Speed
-        thresholds use supporting trip or bus volume—not the speed value itself.
-        Low-support zones remain neutral, and change maps use robust
-        95th-percentile clipping so isolated extremes do not wash out the broader
-        citywide pattern.
-
-        **Divergent demand pattern** identifies zones where Taxi trips and Subway
-        ridership increased while FHVHV trips declined. It describes co-movement;
-        it does not establish why the modes changed differently.
-        """
-    )
-
 if hero_story != "All modes":
     st.divider()
     st.header("Did the demand modes move together?")
@@ -201,13 +197,11 @@ if hero_story != "All modes":
         fig,
         width="stretch",
         config=MAP_CONFIG,
-    )
+            key="raw03_plotly_03",
+)
     render_chart_insight(
         build_hero_interpretation(hero_summary, story="All modes")
     )
-
-st.divider()
-st.header("Explore spatial patterns")
 
 SAVED_VIEWS = {
     "None": None,
@@ -308,191 +302,245 @@ if "raw03_temporal_bucket" not in st.session_state:
 if "raw03_apply_threshold" not in st.session_state:
     st.session_state.raw03_apply_threshold = True
 
-st.selectbox(
-    "Saved view",
-    options=list(SAVED_VIEWS),
-    key="raw03_saved_view",
-    on_change=_apply_saved_view,
-)
-
-control1, control2, control3 = st.columns([1.25, 1.15, 1.35])
-
-with control1:
+with exploration_section(
+    key="raw03_exploration_area",
+    title="Explore spatial patterns",
+    description=(
+        "Choose a saved view or build your own to compare mobility levels and "
+        "pre/post changes across metrics and temporal buckets."
+    ),
+):
     st.selectbox(
-        "Metric",
-        options=list(METRIC_OPTIONS.values()),
-        format_func=lambda value: METRIC_LABEL_BY_VALUE[value],
-        key="raw03_metric",
-        on_change=_mark_custom_view,
+        "Saved view",
+        options=list(SAVED_VIEWS),
+        key="raw03_saved_view",
+        on_change=_apply_saved_view,
     )
 
-with control2:
-    st.selectbox(
-        "Map value",
-        options=list(VALUE_COLUMNS),
-        key="raw03_value_mode",
-        on_change=_mark_custom_view,
-    )
+    control1, control2, control3 = st.columns([1.25, 1.15, 1.35])
 
-with control3:
-    st.selectbox(
-        "Temporal bucket",
-        options=TEMPORAL_OPTIONS,
-        format_func=lambda value: (
-            value
-            if value == ALL_TEMPORAL_BUCKETS_LABEL
-            else TEMPORAL_BUCKET_LABELS.get(
-                value,
-                value.replace("_", " ").title(),
-            )
-        ),
-        key="raw03_temporal_bucket",
-        on_change=_mark_custom_view,
-    )
-
-if st.session_state.raw03_value_mode == "Percent change":
-    st.toggle(
-        "Apply reliability threshold",
-        key="raw03_apply_threshold",
-        on_change=_mark_custom_view,
-        help=(
-            "Demand thresholds use the metric baseline. Speed thresholds use "
-            "supporting trip or bus volume."
-        ),
-    )
-    threshold_active = st.session_state.raw03_apply_threshold
-else:
-    threshold_active = False
-    st.caption(
-        "Reliability thresholds apply only to percentage-change maps."
-    )
-
-selected_metric = st.session_state.raw03_metric
-selected_value_mode = st.session_state.raw03_value_mode
-selected_bucket = st.session_state.raw03_temporal_bucket
-value_column = VALUE_COLUMNS[selected_value_mode]
-
-explore_summary = get_zone_pre_post_metric_summary(
-    metrics=[selected_metric],
-    temporal_bucket=selected_bucket,
-)
-
-title_parts = [
-    METRIC_LABELS.get(selected_metric, selected_metric),
-    selected_value_mode.lower(),
-]
-if selected_bucket != ALL_TEMPORAL_BUCKETS_LABEL:
-    title_parts.append(
-        TEMPORAL_BUCKET_LABELS.get(
-            selected_bucket,
-            selected_bucket.replace("_", " ").title(),
+    with control1:
+        st.selectbox(
+            "Metric",
+            options=list(METRIC_OPTIONS.values()),
+            format_func=lambda value: METRIC_LABEL_BY_VALUE[value],
+            key="raw03_metric",
+            on_change=_mark_custom_view,
         )
+
+    with control2:
+        st.selectbox(
+            "Map value",
+            options=list(VALUE_COLUMNS),
+            key="raw03_value_mode",
+            on_change=_mark_custom_view,
+        )
+
+    with control3:
+        st.selectbox(
+            "Temporal bucket",
+            options=TEMPORAL_OPTIONS,
+            format_func=lambda value: (
+                value
+                if value == ALL_TEMPORAL_BUCKETS_LABEL
+                else TEMPORAL_BUCKET_LABELS.get(
+                    value,
+                    value.replace("_", " ").title(),
+                )
+            ),
+            key="raw03_temporal_bucket",
+            on_change=_mark_custom_view,
+        )
+
+    if st.session_state.raw03_value_mode == "Percent change":
+        st.toggle(
+            "Apply reliability threshold",
+            key="raw03_apply_threshold",
+            on_change=_mark_custom_view,
+            help=(
+                "Demand thresholds use the metric baseline. Speed thresholds use "
+                "supporting trip or bus volume."
+            ),
+        )
+        threshold_active = st.session_state.raw03_apply_threshold
+    else:
+        threshold_active = False
+        st.caption(
+            "Reliability thresholds apply only to percentage-change maps."
+        )
+
+    selected_metric = st.session_state.raw03_metric
+    selected_value_mode = st.session_state.raw03_value_mode
+    selected_bucket = st.session_state.raw03_temporal_bucket
+    value_column = VALUE_COLUMNS[selected_value_mode]
+
+    explore_summary = get_zone_pre_post_metric_summary(
+        metrics=[selected_metric],
+        temporal_bucket=selected_bucket,
     )
 
-fig = build_continuous_zone_map(
-    explore_summary,
-    metric=selected_metric,
-    value_column=value_column,
-    title=" · ".join(title_parts),
-    apply_threshold=threshold_active,
-)
-st.plotly_chart(
-    fig,
-    width="stretch",
-    config=MAP_CONFIG,
-)
+    title_parts = [
+        METRIC_LABELS.get(selected_metric, selected_metric),
+        selected_value_mode.lower(),
+    ]
+    if selected_bucket != ALL_TEMPORAL_BUCKETS_LABEL:
+        title_parts.append(
+            TEMPORAL_BUCKET_LABELS.get(
+                selected_bucket,
+                selected_bucket.replace("_", " ").title(),
+            )
+        )
 
-explorer_insight = build_explorer_interpretation(
-    explore_summary,
-    metric=selected_metric,
-    value_column=value_column,
-    temporal_bucket=selected_bucket,
-    apply_threshold=threshold_active,
-)
-render_chart_insight(explorer_insight)
-
-kpis = get_continuous_map_kpis(
-    explore_summary,
-    metric=selected_metric,
-    value_column=value_column,
-    apply_threshold=threshold_active,
-)
-
-labels = get_kpi_labels(value_column)
-suffix = "%" if value_column == "percent_change" else ""
-
-first_value = (
-    kpis["zones_shown"]
-    if value_column in {"pre_daily_average", "post_daily_average"}
-    else kpis["zones_increasing"]
-)
-
-c1, c2, c3 = st.columns(3)
-c1.metric(labels[0], f"{first_value:,}")
-c2.metric(
-    labels[1],
-    (
-        f"{kpis['median_change']:+,.2f}{suffix}"
-        if pd.notna(kpis["median_change"])
-        else "Unknown"
-    ),
-)
-c3.metric(
-    labels[2],
-    (
-        f"{kpis['largest_value']:+,.2f}{suffix}"
-        if pd.notna(kpis["largest_value"])
-        else "Unknown"
-    ),
-    help=kpis["largest_zone"],
-)
-
-with st.expander("Explore zone rankings", expanded=False):
-    sort_mode = st.selectbox(
-        "Sort",
-        [
-            "High to low",
-            "Low to high",
-            "Largest absolute shift",
-        ],
-        key="raw03_ranking_sort",
-    )
-
-    ranking_source = explore_summary.copy()
-
-    if value_column == "percent_change" and threshold_active:
-        ranking_source = add_reliability_flags(ranking_source)
-        ranking_source = ranking_source[
-            ranking_source["eligible_for_percent_change"]
-        ]
-
-    rankings = get_zone_rankings(
-        ranking_source,
+    fig = build_continuous_zone_map(
+        explore_summary,
         metric=selected_metric,
         value_column=value_column,
-        sort_mode=sort_mode,
-        limit=25,
+        title=" · ".join(title_parts),
+        apply_threshold=threshold_active,
     )
-
-    st.dataframe(
-        format_zone_summary_for_display(rankings),
+    st.plotly_chart(
+        fig,
         width="stretch",
-        hide_index=True,
+        config=MAP_CONFIG,
+            key="raw03_plotly_04",
+)
+
+    explorer_insight = build_explorer_interpretation(
+        explore_summary,
+        metric=selected_metric,
+        value_column=value_column,
+        temporal_bucket=selected_bucket,
+        apply_threshold=threshold_active,
+    )
+    render_chart_insight(explorer_insight)
+
+    kpis = get_continuous_map_kpis(
+        explore_summary,
+        metric=selected_metric,
+        value_column=value_column,
+        apply_threshold=threshold_active,
     )
 
-with st.expander("Reliability details", expanded=False):
-    if selected_value_mode == "Percent change":
-        threshold = MEANINGFUL_BASELINE_THRESHOLDS[selected_metric]
-        support_metric = explore_summary["support_metric"].iloc[0]
-        support_label = METRIC_LABELS.get(
-            support_metric,
-            support_metric.replace("_", " "),
+    labels = get_kpi_labels(value_column)
+    suffix = "%" if value_column == "percent_change" else ""
+
+    first_value = (
+        kpis["zones_shown"]
+        if value_column in {"pre_daily_average", "post_daily_average"}
+        else kpis["zones_increasing"]
+    )
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric(labels[0], f"{first_value:,}")
+    c2.metric(
+        labels[1],
+        (
+            f"{kpis['median_change']:+,.2f}{suffix}"
+            if pd.notna(kpis["median_change"])
+            else "Unknown"
+        ),
+    )
+    c3.metric(
+        labels[2],
+        (
+            f"{kpis['largest_value']:+,.2f}{suffix}"
+            if pd.notna(kpis["largest_value"])
+            else "Unknown"
+        ),
+        help=kpis["largest_zone"],
+    )
+
+    with st.expander("Explore zone rankings", expanded=False):
+        sort_mode = st.selectbox(
+            "Sort",
+            [
+                "High to low",
+                "Low to high",
+                "Largest absolute shift",
+            ],
+            key="raw03_ranking_sort",
         )
-        st.write(
-            f"The threshold is a pre-CP daily average of at least "
-            f"**{threshold:,.0f}** for **{support_label}**."
+
+        ranking_source = explore_summary.copy()
+
+        if value_column == "percent_change" and threshold_active:
+            ranking_source = add_reliability_flags(ranking_source)
+            ranking_source = ranking_source[
+                ranking_source["eligible_for_percent_change"]
+            ]
+
+        rankings = get_zone_rankings(
+            ranking_source,
+            metric=selected_metric,
+            value_column=value_column,
+            sort_mode=sort_mode,
+            limit=25,
         )
-    else:
-        st.write(
-            "Thresholds are not used for level or absolute-change maps."
+
+        st.dataframe(
+            format_zone_summary_for_display(rankings),
+            width="stretch",
+            hide_index=True,
         )
+
+    with st.expander("Reliability details", expanded=False):
+        if selected_value_mode == "Percent change":
+            threshold = MEANINGFUL_BASELINE_THRESHOLDS[selected_metric]
+            support_metric = explore_summary["support_metric"].iloc[0]
+            support_label = METRIC_LABELS.get(
+                support_metric,
+                support_metric.replace("_", " "),
+            )
+            st.write(
+                f"The threshold is a pre-CP daily average of at least "
+                f"**{threshold:,.0f}** for **{support_label}**."
+            )
+        else:
+            st.write(
+                "Thresholds are not used for level or absolute-change maps."
+            )
+
+st.markdown("### What this page establishes")
+st.markdown(
+    "The citywide pre/post change was not spatially uniform. Some Taxi Zones moved much "
+    "more than others, and Taxi, FHVHV, and Subway demand did not always move together in "
+    "the same places. A single citywide average can therefore describe the overall direction "
+    "while concealing substantially different local mobility patterns."
+)
+
+with st.expander("How this page works", expanded=False):
+    st.markdown(
+        """
+        **1. Compare the same geography before and after launch.** Each map summarizes
+        average daily mobility within Taxi Zones before and after congestion pricing began.
+
+        **2. Treat counts and speeds differently.** Count metrics are summed by Taxi Zone
+        and day. Speed metrics use activity-weighted averages where supporting trip or bus
+        volume is available.
+
+        **3. Protect percentage changes from tiny baselines.** Percentage-change maps can
+        apply a minimum pre-CP activity threshold. For speed measures, the threshold uses
+        the supporting trip or bus volume rather than the speed value itself. Zones without
+        enough support remain neutral.
+
+        **4. Keep extreme values from flattening the rest of the map.** Change maps use
+        robust 95th-percentile clipping for the color scale. Extreme zones still exist in
+        the data, but they do not wash out more typical spatial differences.
+
+        **5. Separate magnitude from multimodal direction.** The continuous maps show how
+        much one measure changed. The agreement map asks whether Taxi, FHVHV, and Subway
+        demand moved in the same direction. **Divergent demand pattern** identifies zones
+        where Taxi trips and Subway ridership increased while FHVHV trips declined.
+
+        **6. Keep the claim descriptive.** Co-movement shows which modes changed together;
+        it does not explain why their patterns differed.
+        """
+    )
+
+st.caption(
+    "Evidence scope: observed NYC mobility before and after the January 5, 2025 "
+    "congestion-pricing launch, summarized at Taxi-Zone level. These maps describe "
+    "where pre/post differences appeared and how demand modes co-moved; they do not "
+    "by themselves establish that congestion pricing caused the spatial differences."
+)
+

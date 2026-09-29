@@ -36,6 +36,7 @@ from app.data_access.anomalies import (
 from app.utils.project_branding import (
     BRAND_COLORS,
     apply_branding,
+    exploration_section,
     inject_app_css,
     render_chart_insight,
 )
@@ -1189,7 +1190,7 @@ def _build_trend_takeaway(
 
         return (
             f"**{metric_label} {direction} by "
-            f"{_format_percent(abs(zone_change))} in {zone_name}** "
+            f"{abs(float(zone_change)):.1f}% in {zone_name}** "
             "from the pre-CP to post-CP daily average."
         )
 
@@ -1291,9 +1292,10 @@ st.title(
 )
 
 st.write(
-    "A neighborhood can gain activity in one mode while losing it in another. "
-    "Follow those local changes across time, mobility measures, dayparts, rankings, "
-    "and mode disagreements."
+    "Citywide and borough averages can conceal a neighborhood whose mobility profile "
+    "changed in a very different way. This page brings the measures together for one "
+    "Taxi Zone so we can see how its demand, speeds, timing, relative standing, and "
+    "cross-mode disagreements fit into one local story."
 )
 
 catalog = get_recommended_zone_catalog()
@@ -1360,20 +1362,32 @@ if not hero_matches.empty:
             else hero_reliable.loc[hero_reliable["zone_percent_change"].idxmin()]
         )
 
-        st.header("Alphabet City moved in different directions across modes")
+        increase_card_label = (
+            f"Largest increase · {hero_largest_increase['metric_label']}"
+            if not hero_increases.empty
+            else f"Smallest decrease · {hero_largest_increase['metric_label']}"
+        )
+        decrease_card_label = (
+            f"Largest decrease · {hero_largest_decrease['metric_label']}"
+            if not hero_decreases.empty
+            else f"Smallest increase · {hero_largest_decrease['metric_label']}"
+        )
+
+        st.header("How did Alphabet City's mobility profile change?")
         st.write(
-            "No single measure captures what happened here. These six core mobility "
-            "measures show which parts of Alphabet City’s transportation profile grew "
-            "after congestion pricing began—and which moved the other way."
+            "The fixed opening profile compares five core mobility measures for Alphabet "
+            "City using the same pre/post percentage-change scale. Bars to the right "
+            "increased after launch; bars to the left decreased. The cards summarize the "
+            "largest reliable movements without treating one measure as the whole story."
         )
 
         hero_card_1, hero_card_2, hero_card_3, hero_card_4 = st.columns(4)
         hero_card_1.metric(
-            f"Largest increase · {hero_largest_increase['metric_label']}",
+            increase_card_label,
             _format_percent(hero_largest_increase["zone_percent_change"]),
         )
         hero_card_2.metric(
-            f"Largest decrease · {hero_largest_decrease['metric_label']}",
+            decrease_card_label,
             _format_percent(hero_largest_decrease["zone_percent_change"]),
         )
         hero_card_3.metric(
@@ -1385,7 +1399,7 @@ if not hero_matches.empty:
             f"{int(hero_reliable['zone_percent_change'].lt(0).sum())} of {len(hero_reliable)}",
         )
 
-        st.subheader("How the six core mobility measures changed")
+        st.subheader("How the five core mobility measures changed")
         st.plotly_chart(
             _build_zone_hero_chart(hero_profile),
             width="stretch",
@@ -1413,8 +1427,6 @@ if not hero_matches.empty:
             "eligibility rule. Seafoam bars, if present, have a low Pre-CP baseline "
             "and should be read cautiously."
         )
-        st.divider()
-
 def _apply_saved_profile() -> None:
     """Apply the selected saved profile immediately."""
     saved_profile_name = st.session_state[
@@ -1477,597 +1489,626 @@ def _mark_profile_custom() -> None:
     ] = "Custom"
 
 
-st.markdown(
-    "## Explore any Taxi Zone"
-)
-
-st.write(
-    "Choose a saved starting point or build a custom profile. One selection then "
-    "coordinates the timeline, multimetric comparison, temporal pattern, rankings, "
-    "and mode-divergence views below."
-)
-
-st.markdown(
-    "### Choose a starting point"
-)
-
-st.selectbox(
-    "Start with a saved profile",
-    options=list(
-        SAVED_PROFILES
+with exploration_section(
+    key="raw07_exploration_area",
+    title="Explore any Taxi Zone",
+    description=(
+        "Choose a saved profile or build your own. One selection coordinates "
+        "the timeline, multimetric comparison, time-of-week pattern, rankings, "
+        "and mode-divergence views below."
     ),
-    index=0,
-    key="raw07_saved_profile",
-    on_change=_apply_saved_profile,
-    help=(
-        "Selecting a saved profile immediately updates all controls below. "
-        "Changing an individual control returns the view to Custom."
-    ),
-)
-
-saved_profile_error = st.session_state.get(
-    "raw07_saved_profile_error"
-)
-
-if saved_profile_error:
-    st.error(
-        saved_profile_error
-    )
-
-control1, control2 = st.columns(2)
-
-with control1:
-    selected_zone_id = st.selectbox(
-        "Taxi Zone",
-        options=zone_options,
-        index=zone_options.index(
-            default_zone_id
-        ),
-        format_func=lambda value: (
-            catalog.loc[
-                catalog[
-                    "taxi_zone_id"
-                ].eq(value),
-                "selector_label",
-            ].iloc[0]
-        ),
-        key="raw07_zone",
-        on_change=_mark_profile_custom,
-    )
-
-with control2:
-    selected_metric = st.selectbox(
-        "Primary metric",
-        options=BASE_METRICS,
-        index=(
-            BASE_METRICS.index(
-                DEFAULT_METRIC
-            )
-            if DEFAULT_METRIC
-               in BASE_METRICS
-            else 0
-        ),
-        format_func=lambda metric: (
-            METRIC_LABELS.get(
-                metric,
-                metric,
-            )
-        ),
-        key="raw07_metric",
-        on_change=_mark_profile_custom,
-    )
-
-control3, control4 = st.columns(2)
-
-with control3:
-    comparison_level = st.selectbox(
-        "Geographic comparison",
-        options=COMPARISON_LEVELS,
-        index=1,
-        key="raw07_comparison",
-        on_change=_mark_profile_custom,
-        help=(
-            "Comparison averages exclude the selected Taxi Zone. "
-            "These are geographic benchmarks, not statistically matched peers."
-        ),
-    )
-
-with control4:
-    temporal_bucket = st.selectbox(
-        "Temporal bucket",
-        options=TEMPORAL_BUCKET_OPTIONS,
-        index=0,
-        format_func=lambda bucket: (
-            TEMPORAL_BUCKET_LABELS.get(
-                bucket,
-                bucket,
-            )
-        ),
-        key="raw07_bucket",
-        on_change=_mark_profile_custom,
-    )
-
-display1, display2, display3 = st.columns(3)
-
-with display1:
-    scale_mode = st.selectbox(
-        "Trend view",
-        options=[
-            "Relative change",
-            "Actual values",
-        ],
-        index=0,
-        key="raw07_scale",
-        on_change=_mark_profile_custom,
-    )
-
-with display2:
-    smoothing_label = st.selectbox(
-        "Trend smoothing",
-        options=list(
-            SMOOTHING_OPTIONS
-        ),
-        index=2,
-        key="raw07_smoothing",
-        on_change=_mark_profile_custom,
-    )
-
-with display3:
-    show_anomalies = st.checkbox(
-        "Show stress anomalies",
-        value=False,
-        key="raw07_show_anomalies",
-        help=(
-            "Overlay selected stress anomalies where this metric "
-            "was identified as one of the event drivers."
-        ),
-    )
-
-metadata = get_zone_metadata(
-    selected_zone_id
-)
-
-metric_label = METRIC_LABELS.get(
-    selected_metric,
-    selected_metric,
-)
-
-comparison_label = get_comparison_label(
-    taxi_zone_id=selected_zone_id,
-    comparison_level=comparison_level,
-)
-
-show_comparison = (
-    comparison_level
-    != "No comparison"
-)
-
-with st.spinner(
-    "Preparing the coordinated zone profile..."
 ):
-    analytical_start = perf_counter()
+    if "raw07_saved_profile" not in st.session_state:
+        st.session_state["raw07_saved_profile"] = "Custom"
+    if "raw07_zone" not in st.session_state:
+        st.session_state["raw07_zone"] = default_zone_id
+    if "raw07_metric" not in st.session_state:
+        st.session_state["raw07_metric"] = DEFAULT_METRIC
+    if "raw07_comparison" not in st.session_state:
+        st.session_state["raw07_comparison"] = (
+            "Borough" if "Borough" in COMPARISON_LEVELS else COMPARISON_LEVELS[0]
+        )
+    if "raw07_bucket" not in st.session_state:
+        st.session_state["raw07_bucket"] = ALL_TEMPORAL_BUCKETS_LABEL
+    if "raw07_scale" not in st.session_state:
+        st.session_state["raw07_scale"] = "Relative change"
+    if "raw07_smoothing" not in st.session_state:
+        st.session_state["raw07_smoothing"] = "14-day rolling average"
+    if "raw07_show_anomalies" not in st.session_state:
+        st.session_state["raw07_show_anomalies"] = False
 
-    stage_start = perf_counter()
-    daily = get_zone_and_baseline_daily_series(
+    st.selectbox(
+        "Start with a saved profile",
+        options=list(
+            SAVED_PROFILES
+        ),
+        key="raw07_saved_profile",
+        on_change=_apply_saved_profile,
+        help=(
+            "Selecting a saved profile immediately updates all controls below. "
+            "Changing an individual control returns the view to Custom."
+        ),
+    )
+
+    saved_profile_error = st.session_state.get(
+        "raw07_saved_profile_error"
+    )
+
+    if saved_profile_error:
+        st.error(
+            saved_profile_error
+        )
+
+    control1, control2 = st.columns(2)
+
+    with control1:
+        selected_zone_id = st.selectbox(
+            "Taxi Zone",
+            options=zone_options,
+            format_func=lambda value: (
+                catalog.loc[
+                    catalog[
+                        "taxi_zone_id"
+                    ].eq(value),
+                    "selector_label",
+                ].iloc[0]
+            ),
+            key="raw07_zone",
+            on_change=_mark_profile_custom,
+        )
+
+    with control2:
+        selected_metric = st.selectbox(
+            "Primary metric",
+            options=BASE_METRICS,
+            format_func=lambda metric: (
+                METRIC_LABELS.get(
+                    metric,
+                    metric,
+                )
+            ),
+            key="raw07_metric",
+            on_change=_mark_profile_custom,
+        )
+
+    control3, control4 = st.columns(2)
+
+    with control3:
+        comparison_level = st.selectbox(
+            "Geographic comparison",
+            options=COMPARISON_LEVELS,
+            key="raw07_comparison",
+            on_change=_mark_profile_custom,
+            help=(
+                "Comparison averages exclude the selected Taxi Zone. "
+                "These are geographic benchmarks, not statistically matched peers."
+            ),
+        )
+
+    with control4:
+        temporal_bucket = st.selectbox(
+            "Temporal bucket",
+            options=TEMPORAL_BUCKET_OPTIONS,
+            format_func=lambda bucket: (
+                TEMPORAL_BUCKET_LABELS.get(
+                    bucket,
+                    bucket,
+                )
+            ),
+            key="raw07_bucket",
+            on_change=_mark_profile_custom,
+        )
+
+    display1, display2, display3 = st.columns(3)
+
+    with display1:
+        scale_mode = st.selectbox(
+            "Trend view",
+            options=[
+                "Relative change",
+                "Actual values",
+            ],
+            key="raw07_scale",
+            on_change=_mark_profile_custom,
+        )
+
+    with display2:
+        smoothing_label = st.selectbox(
+            "Trend smoothing",
+            options=list(
+                SMOOTHING_OPTIONS
+            ),
+            key="raw07_smoothing",
+            on_change=_mark_profile_custom,
+        )
+
+    with display3:
+        show_anomalies = st.checkbox(
+            "Show stress anomalies",
+            key="raw07_show_anomalies",
+            help=(
+                "Overlay selected stress anomalies where this metric "
+                "was identified as one of the event drivers."
+            ),
+        )
+
+    metadata = get_zone_metadata(
+        selected_zone_id
+    )
+
+    metric_label = METRIC_LABELS.get(
+        selected_metric,
+        selected_metric,
+    )
+
+    comparison_label = get_comparison_label(
         taxi_zone_id=selected_zone_id,
-        metric=selected_metric,
-        temporal_bucket=temporal_bucket,
         comparison_level=comparison_level,
     )
-    anomaly_events = pd.DataFrame()
 
-    if show_anomalies:
-        anomaly_events = get_zone_metric_driver_anomaly_events(
-            selected_zone_id,
+    show_comparison = (
+        comparison_level
+        != "No comparison"
+    )
+
+    with st.spinner(
+        "Preparing the coordinated zone profile..."
+    ):
+        analytical_start = perf_counter()
+
+        stage_start = perf_counter()
+        daily = get_zone_and_baseline_daily_series(
+            taxi_zone_id=selected_zone_id,
             metric=selected_metric,
             temporal_bucket=temporal_bucket,
+            comparison_level=comparison_level,
         )
+        anomaly_events = pd.DataFrame()
 
-        if not anomaly_events.empty:
-            # Finalist anomalies are Taxi Zone × date × daypart events,
-            # while this chart displays one selected metric per day.
-            # Collapse multiple qualifying dayparts to one daily marker.
-            anomaly_events = (
-                anomaly_events[
-                    [
-                        "date",
-                        "comparison_event_id",
-                    ]
-                ]
-                .groupby(
-                    "date",
-                    observed=True,
-                    as_index=False,
-                )
-                .agg(
-                    anomaly_event_count=(
-                        "comparison_event_id",
-                        "nunique",
-                    ),
-                )
+        if show_anomalies:
+            anomaly_events = get_zone_metric_driver_anomaly_events(
+                selected_zone_id,
+                metric=selected_metric,
+                temporal_bucket=temporal_bucket,
             )
 
-    _record_timing(
-        page_timings,
-        "Daily series",
-        stage_start,
+            if not anomaly_events.empty:
+                # Finalist anomalies are Taxi Zone × date × daypart events,
+                # while this chart displays one selected metric per day.
+                # Collapse multiple qualifying dayparts to one daily marker.
+                anomaly_events = (
+                    anomaly_events[
+                        [
+                            "date",
+                            "comparison_event_id",
+                        ]
+                    ]
+                    .groupby(
+                        "date",
+                        observed=True,
+                        as_index=False,
+                    )
+                    .agg(
+                        anomaly_event_count=(
+                            "comparison_event_id",
+                            "nunique",
+                        ),
+                    )
+                )
+
+        _record_timing(
+            page_timings,
+            "Daily series",
+            stage_start,
+        )
+
+        stage_start = perf_counter()
+        daily_summary = summarize_daily_comparison(
+            daily
+        )
+
+        smoothed_daily = _add_smoothed_columns(
+            daily,
+            window=SMOOTHING_OPTIONS[
+                smoothing_label
+            ],
+        )
+        _record_timing(
+            page_timings,
+            "Daily summary + smoothing",
+            stage_start,
+        )
+
+        stage_start = perf_counter()
+        metric_profile = get_zone_pre_post_profile(
+            taxi_zone_id=selected_zone_id,
+            comparison_level=comparison_level,
+            temporal_bucket=temporal_bucket,
+        )
+        _record_timing(
+            page_timings,
+            "Ten-metric profile",
+            stage_start,
+        )
+
+        stage_start = perf_counter()
+        temporal_profile = get_zone_temporal_profile(
+            taxi_zone_id=selected_zone_id,
+            metric=selected_metric,
+            comparison_level=comparison_level,
+        )
+        _record_timing(
+            page_timings,
+            "Temporal profile",
+            stage_start,
+        )
+
+        stage_start = perf_counter()
+        rank_context = get_zone_rank_context(
+            taxi_zone_id=selected_zone_id,
+            temporal_bucket=temporal_bucket,
+        )
+        _record_timing(
+            page_timings,
+            "Rank context",
+            stage_start,
+        )
+
+        stage_start = perf_counter()
+        divergences = get_zone_pairwise_divergences(
+            taxi_zone_id=selected_zone_id,
+            temporal_bucket=temporal_bucket,
+        )
+        _record_timing(
+            page_timings,
+            "Pairwise divergences",
+            stage_start,
+        )
+
+        _record_timing(
+            page_timings,
+            "Total analytical preparation",
+            analytical_start,
+        )
+
+    st.divider()
+
+    st.header(
+        f"{metadata['zone']} · "
+        f"{metadata['borough']} · "
+        f"Zone {metadata['taxi_zone_id']}"
     )
 
-    stage_start = perf_counter()
-    daily_summary = summarize_daily_comparison(
-        daily
+    st.caption(
+        f"Policy geography: "
+        f"{format_geo_policy_label(metadata['cbd_spatial_category'])} · "
+        f"{metric_label} · "
+        f"{comparison_label} · "
+        f"{TEMPORAL_BUCKET_LABELS.get(temporal_bucket, temporal_bucket)}"
     )
 
-    smoothed_daily = _add_smoothed_columns(
-        daily,
-        window=SMOOTHING_OPTIONS[
-            smoothing_label
-        ],
-    )
-    _record_timing(
-        page_timings,
-        "Daily summary + smoothing",
-        stage_start,
+    card1, card2, card3, card4 = (
+        st.columns(4)
     )
 
-    stage_start = perf_counter()
-    metric_profile = get_zone_pre_post_profile(
-        taxi_zone_id=selected_zone_id,
-        comparison_level=comparison_level,
-        temporal_bucket=temporal_bucket,
-    )
-    _record_timing(
-        page_timings,
-        "Ten-metric profile",
-        stage_start,
+    card1.metric(
+        "Pre-CP daily average",
+        _format_number(
+            daily_summary[
+                "zone_pre_average"
+            ]
+        ),
     )
 
-    stage_start = perf_counter()
-    temporal_profile = get_zone_temporal_profile(
-        taxi_zone_id=selected_zone_id,
-        metric=selected_metric,
-        comparison_level=comparison_level,
-    )
-    _record_timing(
-        page_timings,
-        "Temporal profile",
-        stage_start,
+    card2.metric(
+        "Post-CP daily average",
+        _format_number(
+            daily_summary[
+                "zone_post_average"
+            ]
+        ),
     )
 
-    stage_start = perf_counter()
-    rank_context = get_zone_rank_context(
-        taxi_zone_id=selected_zone_id,
-        temporal_bucket=temporal_bucket,
-    )
-    _record_timing(
-        page_timings,
-        "Rank context",
-        stage_start,
-    )
-
-    stage_start = perf_counter()
-    divergences = get_zone_pairwise_divergences(
-        taxi_zone_id=selected_zone_id,
-        temporal_bucket=temporal_bucket,
-    )
-    _record_timing(
-        page_timings,
-        "Pairwise divergences",
-        stage_start,
-    )
-
-    _record_timing(
-        page_timings,
-        "Total analytical preparation",
-        analytical_start,
-    )
-
-st.divider()
-
-st.header(
-    f"{metadata['zone']} · "
-    f"{metadata['borough']} · "
-    f"Zone {metadata['taxi_zone_id']}"
-)
-
-st.caption(
-    f"Geo-policy group: "
-    f"{format_geo_policy_label(metadata['cbd_spatial_category'])} · "
-    f"{metric_label} · "
-    f"{comparison_label} · "
-    f"{TEMPORAL_BUCKET_LABELS.get(temporal_bucket, temporal_bucket)}"
-)
-
-card1, card2, card3, card4 = (
-    st.columns(4)
-)
-
-card1.metric(
-    "Pre-CP daily average",
-    _format_number(
-        daily_summary[
-            "zone_pre_average"
-        ]
-    ),
-)
-
-card2.metric(
-    "Post-CP daily average",
-    _format_number(
-        daily_summary[
-            "zone_post_average"
-        ]
-    ),
-)
-
-card3.metric(
-    "Zone change",
-    _format_percent(
-        daily_summary[
-            "zone_percent_change"
-        ]
-    ),
-)
-
-comparison_metric_label = (
-    "Difference vs comparison"
-    if (
-        not show_comparison
-        or daily_summary[
-            "baseline_observations"
-        ]
-        > 0
-    )
-    else "Comparison unavailable"
-)
-
-card4.metric(
-    comparison_metric_label
-    if show_comparison
-    else "Observed days",
-    (
+    card3.metric(
+        "Zone change",
         _format_percent(
             daily_summary[
-                "change_gap"
+                "zone_percent_change"
             ]
+        ),
+    )
+
+    comparison_metric_label = (
+        "Difference vs comparison"
+        if (
+            not show_comparison
+            or daily_summary[
+                "baseline_observations"
+            ]
+            > 0
         )
+        else "Comparison unavailable"
+    )
+
+    card4.metric(
+        comparison_metric_label
         if show_comparison
-        else (
-            f"{daily_summary['zone_observations']:,}"
+        else "Observed days",
+        (
+            _format_percent(
+                daily_summary[
+                    "change_gap"
+                ]
+            )
+            if show_comparison
+            else (
+                f"{daily_summary['zone_observations']:,}"
+            )
+        ),
+    )
+
+    st.markdown(
+        "## What happened over time?"
+    )
+
+    if scale_mode == "Relative change":
+        st.write(
+            "Each displayed series is indexed to its own full pre-CP daily "
+            "average. A value of 100 represents the typical pre-CP level."
         )
-    ),
-)
+    else:
+        st.write(
+            "The chart uses the original metric units. Geographic comparisons "
+            "show the average across all other Taxi Zones in the selected group."
+        )
 
-st.markdown(
-    "## What happened over time?"
-)
-
-if scale_mode == "Relative change":
-    st.write(
-        "Each displayed series is indexed to its own full pre-CP daily "
-        "average. A value of 100 represents the typical pre-CP level."
-    )
-else:
-    st.write(
-        "The chart uses the original metric units. Geographic comparisons "
-        "show the average across all other Taxi Zones in the selected group."
-    )
-
-chart_stage_start = perf_counter()
-trend_fig = _build_trend_chart(
-    smoothed_daily,
-    zone_name=str(
-        metadata["zone"]
-    ),
-    baseline_label=comparison_label,
-    metric_label=metric_label,
-    scale_mode=scale_mode,
-    show_comparison=show_comparison,
-    anomaly_events=anomaly_events,
-)
-_record_timing(
-    page_timings,
-    "Trend chart",
-    chart_stage_start,
-)
-
-st.plotly_chart(
-    trend_fig,
-    width="stretch",
-    config={
-        "displayModeBar": False,
-        "responsive": True,
-    },
-    key=(
-        f"raw07_trend_{selected_zone_id}_"
-        f"{selected_metric}_{comparison_level}_"
-        f"{temporal_bucket}_{scale_mode}_"
-        f"{smoothing_label}"
-    ),
-)
-
-render_chart_insight(
-    _build_trend_takeaway(
+    chart_stage_start = perf_counter()
+    trend_fig = _build_trend_chart(
+        smoothed_daily,
         zone_name=str(
             metadata["zone"]
         ),
+        baseline_label=comparison_label,
         metric_label=metric_label,
-        comparison_label=comparison_label,
-        summary=daily_summary,
+        scale_mode=scale_mode,
+        show_comparison=show_comparison,
+        anomaly_events=anomaly_events,
+    )
+    _record_timing(
+        page_timings,
+        "Trend chart",
+        chart_stage_start,
+    )
+
+    st.plotly_chart(
+        trend_fig,
+        width="stretch",
+        config={
+            "displayModeBar": False,
+            "responsive": True,
+        },
+        key=(
+            f"raw07_trend_{selected_zone_id}_"
+            f"{selected_metric}_{comparison_level}_"
+            f"{temporal_bucket}_{scale_mode}_"
+            f"{smoothing_label}"
+        ),
+    )
+
+    render_chart_insight(
+        _build_trend_takeaway(
+            zone_name=str(
+                metadata["zone"]
+            ),
+            metric_label=metric_label,
+            comparison_label=comparison_label,
+            summary=daily_summary,
+            show_comparison=show_comparison,
+        )
+    )
+
+    if show_comparison:
+        st.caption(
+            f"The geographic comparison excludes {metadata['zone']}. "
+            "It is a geographic benchmark, not a statistically matched mobility-peer group."
+        )
+
+    st.divider()
+
+    st.markdown(
+        "## How did mobility measures change?"
+    )
+
+    st.write(
+        "Compare the selected zone across all ten clean base measures. Filled "
+        "markers show threshold-supported comparisons; open markers flag "
+        "low-baseline changes that should be interpreted cautiously."
+    )
+
+    st.caption(
+        "Low-baseline observations remain visible as open markers, but they are "
+        "excluded from the highlighted largest-gap statement."
+    )
+
+    chart_stage_start = perf_counter()
+    profile_fig = _build_multimetric_profile_chart(
+        metric_profile,
         show_comparison=show_comparison,
     )
-)
-
-if show_comparison:
-    st.caption(
-        f"The geographic comparison excludes {metadata['zone']}. "
-        "It is a geographic benchmark, not a statistically matched mobility-peer group."
+    _record_timing(
+        page_timings,
+        "Ten-metric chart",
+        chart_stage_start,
     )
 
-st.divider()
+    st.plotly_chart(
+        profile_fig,
+        width="stretch",
+        config={
+            "displayModeBar": False,
+            "responsive": True,
+        },
+        key=(
+            f"raw07_profile_{selected_zone_id}_"
+            f"{comparison_level}_{temporal_bucket}"
+        ),
+    )
 
-st.markdown(
-    "## How did mobility measures change?"
-)
+    reliable_profile = metric_profile[
+        metric_profile[
+            "zone_eligible_for_percent_change"
+        ]
+    ].copy()
 
-st.write(
-    "Compare the selected zone across all ten clean base measures. Filled "
-    "markers show threshold-supported comparisons; open markers flag "
-    "low-baseline changes that should be interpreted cautiously."
-)
-
-st.caption(
-    "Low-baseline observations remain visible as open markers, but they are "
-    "excluded from the highlighted largest-gap statement."
-)
-
-chart_stage_start = perf_counter()
-profile_fig = _build_multimetric_profile_chart(
-    metric_profile,
-    show_comparison=show_comparison,
-)
-_record_timing(
-    page_timings,
-    "Ten-metric chart",
-    chart_stage_start,
-)
-
-st.plotly_chart(
-    profile_fig,
-    width="stretch",
-    config={
-        "displayModeBar": False,
-        "responsive": True,
-    },
-    key=(
-        f"raw07_profile_{selected_zone_id}_"
-        f"{comparison_level}_{temporal_bucket}"
-    ),
-)
-
-reliable_profile = metric_profile[
-    metric_profile[
-        "zone_eligible_for_percent_change"
-    ]
-].copy()
-
-if (
-    show_comparison
-    and not reliable_profile.empty
-):
-    reliable_profile = reliable_profile[
-        reliable_profile[
-            "change_gap"
-        ].notna()
-    ]
-
-    if not reliable_profile.empty:
-        strongest = reliable_profile.loc[
+    if (
+        show_comparison
+        and not reliable_profile.empty
+    ):
+        reliable_profile = reliable_profile[
             reliable_profile[
                 "change_gap"
+            ].notna()
+        ]
+
+        if not reliable_profile.empty:
+            strongest = reliable_profile.loc[
+                reliable_profile[
+                    "change_gap"
+                ]
+                .abs()
+                .idxmax()
+            ]
+
+            render_chart_insight(
+                f"The largest displayed zone-versus-comparison gap is "
+                f"**{strongest['metric_label']}** at "
+                f"**{strongest['change_gap']:+.1f} percentage points**."
+            )
+        else:
+            render_chart_insight(
+                "No comparison gap met the baseline and data-quality requirements "
+                "needed to identify a reliable largest change in this view."
+            )
+
+    elif not reliable_profile.empty:
+        strongest = reliable_profile.loc[
+            reliable_profile[
+                "zone_percent_change"
             ]
             .abs()
             .idxmax()
         ]
 
         render_chart_insight(
-            f"The largest displayed zone-versus-comparison gap is "
+            f"The largest displayed selected-zone change is "
             f"**{strongest['metric_label']}** at "
-            f"**{strongest['change_gap']:+.1f} percentage points**."
+            f"**{strongest['zone_percent_change']:+.1f}%**."
         )
+
     else:
         render_chart_insight(
-            "No comparison gap met the baseline and data-quality requirements "
-            "needed to identify a reliable largest change in this view."
+            "No metric met the baseline and data-quality requirements needed "
+            "to identify a reliable largest change in this view."
         )
 
-elif not reliable_profile.empty:
-    strongest = reliable_profile.loc[
-        reliable_profile[
-            "zone_percent_change"
-        ]
-        .abs()
-        .idxmax()
-    ]
+    if selected_metric == "subway_ridership":
+        st.caption(
+            "Subway Ridership does not cover Staten Island and may be unavailable "
+            "for Taxi Zones without mapped subway activity."
+        )
 
-    render_chart_insight(
-        f"The largest displayed selected-zone change is "
-        f"**{strongest['metric_label']}** at "
-        f"**{strongest['zone_percent_change']:+.1f}%**."
+    st.divider()
+
+    st.markdown(
+        "## When was the difference strongest?"
     )
 
-else:
-    render_chart_insight(
-        "No metric met the baseline and data-quality requirements needed "
-        "to identify a reliable largest change in this view."
+    st.write(
+        "The selected metric is compared across all ten ordered temporal buckets. "
+        "Open selected-zone markers indicate low-baseline percentage changes."
     )
 
-if selected_metric == "subway_ridership":
     st.caption(
-        "Subway Ridership does not cover Staten Island and may be unavailable "
-        "for Taxi Zones without mapped subway activity."
+        "Only periods meeting the minimum baseline and data-quality requirements "
+        "are considered when the page identifies the largest displayed gap."
     )
 
-st.divider()
+    chart_stage_start = perf_counter()
+    temporal_fig = _build_temporal_profile_chart(
+        temporal_profile,
+        show_comparison=show_comparison,
+    )
+    _record_timing(
+        page_timings,
+        "Temporal chart",
+        chart_stage_start,
+    )
 
-st.markdown(
-    "## When was the difference strongest?"
-)
+    st.plotly_chart(
+        temporal_fig,
+        width="stretch",
+        config={
+            "displayModeBar": False,
+            "responsive": True,
+        },
+        key=(
+            f"raw07_temporal_{selected_zone_id}_"
+            f"{selected_metric}_{comparison_level}"
+        ),
+    )
 
-st.write(
-    "The selected metric is compared across all ten ordered temporal buckets. "
-    "Open selected-zone markers indicate low-baseline percentage changes."
-)
+    reliable_temporal = temporal_profile[
+        temporal_profile[
+            "zone_eligible_for_percent_change"
+        ]
+    ].copy()
 
-st.caption(
-    "Only periods meeting the minimum baseline and data-quality requirements "
-    "are considered when the page identifies the largest displayed gap."
-)
-
-chart_stage_start = perf_counter()
-temporal_fig = _build_temporal_profile_chart(
-    temporal_profile,
-    show_comparison=show_comparison,
-)
-_record_timing(
-    page_timings,
-    "Temporal chart",
-    chart_stage_start,
-)
-
-st.plotly_chart(
-    temporal_fig,
-    width="stretch",
-    config={
-        "displayModeBar": False,
-        "responsive": True,
-    },
-    key=(
-        f"raw07_temporal_{selected_zone_id}_"
-        f"{selected_metric}_{comparison_level}"
-    ),
-)
-
-reliable_temporal = temporal_profile[
-    temporal_profile[
-        "zone_eligible_for_percent_change"
-    ]
-].copy()
-
-if (
-    show_comparison
-    and not reliable_temporal.empty
-):
-    reliable_temporal = reliable_temporal[
-        reliable_temporal[
-            "change_gap"
-        ].notna()
-    ]
-
-    if not reliable_temporal.empty:
-        strongest_bucket = reliable_temporal.loc[
+    if (
+        show_comparison
+        and not reliable_temporal.empty
+    ):
+        reliable_temporal = reliable_temporal[
             reliable_temporal[
                 "change_gap"
+            ].notna()
+        ]
+
+        if not reliable_temporal.empty:
+            strongest_bucket = reliable_temporal.loc[
+                reliable_temporal[
+                    "change_gap"
+                ]
+                .abs()
+                .idxmax()
+            ]
+
+            strongest_bucket_label = (
+                TEMPORAL_BUCKET_LABELS.get(
+                    strongest_bucket[
+                        "temporal_bucket"
+                    ],
+                    strongest_bucket[
+                        "temporal_bucket"
+                    ],
+                )
+            )
+
+            render_chart_insight(
+                f"The largest displayed temporal gap occurred during "
+                f"**{strongest_bucket_label}**, at "
+                f"**{strongest_bucket['change_gap']:+.1f} "
+                "percentage points**."
+            )
+        else:
+            render_chart_insight(
+                "No comparison-period gap met the baseline and data-quality "
+                "requirements needed to identify a reliable temporal leader."
+            )
+
+    elif not reliable_temporal.empty:
+        strongest_bucket = reliable_temporal.loc[
+            reliable_temporal[
+                "zone_percent_change"
             ]
             .abs()
             .idxmax()
@@ -2085,257 +2126,253 @@ if (
         )
 
         render_chart_insight(
-            f"The largest displayed temporal gap occurred during "
+            f"The largest displayed temporal change occurred during "
             f"**{strongest_bucket_label}**, at "
-            f"**{strongest_bucket['change_gap']:+.1f} "
-            "percentage points**."
+            f"**{strongest_bucket['zone_percent_change']:+.1f}%**."
         )
+
     else:
         render_chart_insight(
-            "No comparison-period gap met the baseline and data-quality "
-            "requirements needed to identify a reliable temporal leader."
+            "No temporal bucket met the baseline and data-quality requirements "
+            "needed to identify a reliable largest change in this view."
         )
 
-elif not reliable_temporal.empty:
-    strongest_bucket = reliable_temporal.loc[
-        reliable_temporal[
-            "zone_percent_change"
+    st.divider()
+
+    st.markdown(
+        "## How unusual was this zone?"
+    )
+
+    st.write(
+        "Percentiles compare the selected zone with all eligible Taxi Zones for "
+        "the current temporal-bucket selection. Higher percentiles indicate larger "
+        "pre-to-post increases."
+    )
+
+    eligible_rank_context = rank_context[
+        rank_context["eligible"]
+    ].copy()
+
+    if eligible_rank_context.empty:
+        st.info(
+            "No rank context was available for this selection after applying "
+            "the minimum data-quality requirements."
+        )
+    else:
+        selected_rank = eligible_rank_context[
+            eligible_rank_context[
+                "metric"
+            ].eq(selected_metric)
         ]
-        .abs()
-        .idxmax()
-    ]
 
-    strongest_bucket_label = (
-        TEMPORAL_BUCKET_LABELS.get(
-            strongest_bucket[
-                "temporal_bucket"
-            ],
-            strongest_bucket[
-                "temporal_bucket"
-            ],
+        if not selected_rank.empty:
+            selected_rank_row = selected_rank.iloc[0]
+
+            rank1, rank2, rank3, rank4 = (
+                st.columns(4)
+            )
+
+            rank1.metric(
+                "Citywide rank",
+                (
+                    f"{int(selected_rank_row['citywide_rank'])} "
+                    f"of {int(selected_rank_row['citywide_eligible_zones'])}"
+                ),
+            )
+
+            rank2.metric(
+                "Citywide percentile",
+                (
+                    f"{selected_rank_row['citywide_percentile']:.1f}"
+                ),
+            )
+
+            rank3.metric(
+                f"{metadata['borough']} rank",
+                (
+                    f"{int(selected_rank_row['borough_rank'])} "
+                    f"of {int(selected_rank_row['borough_eligible_zones'])}"
+                ),
+            )
+
+            rank4.metric(
+                f"{metadata['borough']} percentile",
+                (
+                    f"{selected_rank_row['borough_percentile']:.1f}"
+                ),
+            )
+
+        chart_stage_start = perf_counter()
+        rank_fig = _build_rank_chart(
+            rank_context
         )
-    )
-
-    render_chart_insight(
-        f"The largest displayed temporal change occurred during "
-        f"**{strongest_bucket_label}**, at "
-        f"**{strongest_bucket['zone_percent_change']:+.1f}%**."
-    )
-
-else:
-    render_chart_insight(
-        "No temporal bucket met the baseline and data-quality requirements "
-        "needed to identify a reliable largest change in this view."
-    )
-
-st.divider()
-
-st.markdown(
-    "## How unusual was this zone?"
-)
-
-st.write(
-    "Percentiles compare the selected zone with all eligible Taxi Zones for "
-    "the current temporal-bucket selection. Higher percentiles indicate larger "
-    "pre-to-post increases."
-)
-
-eligible_rank_context = rank_context[
-    rank_context["eligible"]
-].copy()
-
-if eligible_rank_context.empty:
-    st.info(
-        "No rank context was available for this selection after applying "
-        "the minimum data-quality requirements."
-    )
-else:
-    selected_rank = eligible_rank_context[
-        eligible_rank_context[
-            "metric"
-        ].eq(selected_metric)
-    ]
-
-    if not selected_rank.empty:
-        selected_rank_row = selected_rank.iloc[0]
-
-        rank1, rank2, rank3, rank4 = (
-            st.columns(4)
+        _record_timing(
+            page_timings,
+            "Rank chart",
+            chart_stage_start,
         )
 
-        rank1.metric(
-            "Citywide rank",
-            (
-                f"{int(selected_rank_row['citywide_rank'])} "
-                f"of {int(selected_rank_row['citywide_eligible_zones'])}"
+        st.plotly_chart(
+            rank_fig,
+            width="stretch",
+            config={
+                "displayModeBar": False,
+                "responsive": True,
+            },
+            key=(
+                f"raw07_rank_{selected_zone_id}_"
+                f"{temporal_bucket}"
             ),
         )
 
-        rank2.metric(
-            "Citywide percentile",
-            (
-                f"{selected_rank_row['citywide_percentile']:.1f}"
+        percentile_leader = eligible_rank_context.loc[
+            eligible_rank_context["citywide_percentile"].idxmax()
+        ]
+        percentile_laggard = eligible_rank_context.loc[
+            eligible_rank_context["citywide_percentile"].idxmin()
+        ]
+        render_chart_insight(
+            f"**{percentile_leader['metric_label']}** is this zone's highest "
+            f"citywide standing at the **{float(percentile_leader['citywide_percentile']):.1f}th "
+            f"percentile**; **{percentile_laggard['metric_label']}** is lowest at "
+            f"the **{float(percentile_laggard['citywide_percentile']):.1f}th percentile**."
+        )
+
+    st.divider()
+
+    st.markdown(
+        "## Which modes disagreed most here?"
+    )
+
+    st.write(
+        "The largest opposite-direction metric pairs reveal where one "
+        "part of the zone's mobility profile increased while another declined."
+    )
+
+    if divergences.empty:
+        st.info(
+            "No opposite-direction metric pairs met the display requirements for "
+            "this zone and temporal-bucket selection."
+        )
+    else:
+        st.caption(
+            "Endpoint labels show each metric's observed percentage change; "
+            "the metric pair is named directly on the y-axis."
+        )
+
+        chart_stage_start = perf_counter()
+        divergence_fig = _build_divergence_chart(
+            divergences
+        )
+        _record_timing(
+            page_timings,
+            "Divergence chart",
+            chart_stage_start,
+        )
+
+        st.plotly_chart(
+            divergence_fig,
+            width="stretch",
+            config={
+                "displayModeBar": False,
+                "responsive": True,
+            },
+            key=(
+                f"raw07_divergence_{selected_zone_id}_"
+                f"{temporal_bucket}"
             ),
         )
 
-        rank3.metric(
-            f"{metadata['borough']} rank",
-            (
-                f"{int(selected_rank_row['borough_rank'])} "
-                f"of {int(selected_rank_row['borough_eligible_zones'])}"
-            ),
+        top_divergence = divergences.iloc[0]
+
+        render_chart_insight(
+            f"The strongest disagreement is "
+            f"**{top_divergence['metric_a_label']} "
+            f"({_format_percent(top_divergence['metric_a_change'])})** "
+            f"versus **{top_divergence['metric_b_label']} "
+            f"({_format_percent(top_divergence['metric_b_change'])})**, "
+            f"a gap of **{top_divergence['absolute_divergence']:.1f} "
+            "percentage points**."
         )
 
-        rank4.metric(
-            f"{metadata['borough']} percentile",
-            (
-                f"{selected_rank_row['borough_percentile']:.1f}"
-            ),
-        )
-
-    chart_stage_start = perf_counter()
-    rank_fig = _build_rank_chart(
-        rank_context
-    )
-    _record_timing(
-        page_timings,
-        "Rank chart",
-        chart_stage_start,
-    )
-
-    st.plotly_chart(
-        rank_fig,
-        width="stretch",
-        config={
-            "displayModeBar": False,
-            "responsive": True,
-        },
-        key=(
-            f"raw07_rank_{selected_zone_id}_"
-            f"{temporal_bucket}"
-        ),
-    )
-
-    percentile_leader = eligible_rank_context.loc[
-        eligible_rank_context["citywide_percentile"].idxmax()
-    ]
-    percentile_laggard = eligible_rank_context.loc[
-        eligible_rank_context["citywide_percentile"].idxmin()
-    ]
-    render_chart_insight(
-        f"**{percentile_leader['metric_label']}** is this zone's highest "
-        f"citywide standing at the **{float(percentile_leader['citywide_percentile']):.1f}th "
-        f"percentile**; **{percentile_laggard['metric_label']}** is lowest at "
-        f"the **{float(percentile_laggard['citywide_percentile']):.1f}th percentile**."
-    )
-
-st.divider()
-
-st.markdown(
-    "## Which modes disagreed most here?"
-)
-
-st.write(
-    "The largest opposite-direction metric pairs reveal where one "
-    "part of the zone's mobility profile increased while another declined."
-)
-
-if divergences.empty:
-    st.info(
-        "No opposite-direction metric pairs met the display requirements for "
-        "this zone and temporal-bucket selection."
-    )
-else:
-    displayed_divergences = (
-        divergences.head(3)
-    )
-
-    st.caption(
-        "Endpoint labels show each metric's observed percentage change; "
-        "the metric pair is named directly on the y-axis."
-    )
-
-    chart_stage_start = perf_counter()
-    divergence_fig = _build_divergence_chart(
-        divergences
-    )
-    _record_timing(
-        page_timings,
-        "Divergence chart",
-        chart_stage_start,
-    )
-
-    st.plotly_chart(
-        divergence_fig,
-        width="stretch",
-        config={
-            "displayModeBar": False,
-            "responsive": True,
-        },
-        key=(
-            f"raw07_divergence_{selected_zone_id}_"
-            f"{temporal_bucket}"
-        ),
-    )
-
-    top_divergence = divergences.iloc[0]
-
-    render_chart_insight(
-        f"The strongest disagreement is "
-        f"**{top_divergence['metric_a_label']} "
-        f"({_format_percent(top_divergence['metric_a_change'])})** "
-        f"versus **{top_divergence['metric_b_label']} "
-        f"({_format_percent(top_divergence['metric_b_change'])})**, "
-        f"a gap of **{top_divergence['absolute_divergence']:.1f} "
-        "percentage points**."
-    )
-
-page_timings[
-    "Total chart construction"
-] = sum(
-    page_timings.get(
-        label,
-        0.0,
-    )
-    for label in [
-        "Trend chart",
-        "Ten-metric chart",
-        "Temporal chart",
-        "Rank chart",
-        "Divergence chart",
-    ]
-)
-
-page_timings[
-    "Total measured work"
-] = (
-    page_timings.get(
-        "Total analytical preparation",
-        0.0,
-    )
-    + page_timings[
+    page_timings[
         "Total chart construction"
-    ]
-)
+    ] = sum(
+        page_timings.get(
+            label,
+            0.0,
+        )
+        for label in [
+            "Trend chart",
+            "Ten-metric chart",
+            "Temporal chart",
+            "Rank chart",
+            "Divergence chart",
+        ]
+    )
 
+    page_timings[
+        "Total measured work"
+    ] = (
+        page_timings.get(
+            "Total analytical preparation",
+            0.0,
+        )
+        + page_timings[
+            "Total chart construction"
+        ]
+    )
+
+
+
+st.markdown("### What this page establishes")
+st.markdown(
+    "A neighborhood's mobility story can be internally mixed. Demand, speed, timing, "
+    "and relative standing do not have to move in the same direction, and the strongest "
+    "local change may look very different from the borough or citywide pattern. A zone "
+    "profile therefore adds context that is lost when each mobility measure or geography "
+    "is viewed separately."
+)
 
 with st.expander(
-    "How to read this zone profile",
+    "How this page works",
     expanded=False,
 ):
     st.markdown(
         """
-- The page is descriptive and does not establish that congestion pricing
-  caused the observed changes.
-- Relative-change trends index each series to its own full pre-CP daily average.
-- Actual-value comparisons use averages across other Taxi Zones in the selected
-  geography; the selected zone is always excluded.
-- Geographic comparisons are contextual benchmarks, not matched peer groups.
-- Percentage-change visuals apply the project's metric-specific minimum
-  baseline and data-quality requirements before highlighting comparisons.
-- Open markers show observed low-baseline changes that should be interpreted
-  cautiously and should not drive ranked claims.
-- Borough and citywide percentiles describe relative position among eligible
-  Taxi Zones, not statistical significance.
+        **1. Put multiple mobility measures into one local profile.** The opening view
+        compares five core measures for the same Taxi Zone so increases and decreases
+        can be read together rather than as separate citywide stories.
+
+        **2. Compare a zone with a contextual benchmark.** Actual-value comparisons use
+        averages across the other Taxi Zones in the selected geography; the selected
+        zone itself is excluded. Borough and citywide comparisons are contextual
+        benchmarks, not matched peer groups.
+
+        **3. Use a common relative-change scale when units differ.** Relative-change
+        trends index each series to its own full pre-CP daily average. That makes the
+        direction and scale of change comparable without implying that trips, riders,
+        and speeds share the same units.
+
+        **4. Protect percentage comparisons from weak baselines.** Percentage-change
+        views apply the project's metric-specific minimum baseline and data-quality
+        requirements. Open markers show observed low-baseline changes that should be
+        interpreted cautiously and should not drive ranked claims.
+
+        **5. Add relative standing without turning it into significance.** Borough and
+        citywide percentiles show where the selected zone sits among eligible Taxi Zones.
+        A high or low percentile is a descriptive rank, not a statistical significance
+        test.
+
+        **6. Treat mode disagreements as local descriptive evidence.** Opposite-direction
+        metric pairs show where parts of the same zone's mobility profile separated.
+        They do not establish substitution or explain why the measures changed.
         """
     )
+
+st.caption(
+    "Evidence scope: observed NYC mobility before and after the January 5, 2025 "
+    "congestion-pricing launch. Zone profiles, comparison benchmarks, percentiles, and "
+    "mode divergences describe local patterns; they do not establish that congestion "
+    "pricing caused the observed changes."
+)

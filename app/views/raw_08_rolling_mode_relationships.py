@@ -5,7 +5,10 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from app.data_access.loaders import CORE_METRICS
+from app.data_access.loaders import (
+    CONGESTION_PRICING_START_DATE,
+    CORE_METRICS,
+)
 from app.data_access.mode_relationships import (
     NOTEBOOK_ROLLING_MIN_MATCHED_DAYS as DEFAULT_MIN_MATCHED_DAYS,
     NOTEBOOK_ROLLING_STEP_DAYS as DEFAULT_STEP_DAYS,
@@ -20,6 +23,7 @@ from app.data_access.spatial_aggregations import (
 from app.utils.project_branding import (
     BRAND_COLORS,
     apply_branding,
+    exploration_section,
     inject_app_css,
     render_chart_insight,
 )
@@ -27,7 +31,7 @@ from app.utils.project_branding import (
 
 inject_app_css()
 
-CP_START_DATE = pd.Timestamp("2025-01-05")
+CP_START_DATE = CONGESTION_PRICING_START_DATE
 
 METRIC_LABELS = {
     "taxi_trip_count": "Taxi Trips",
@@ -223,9 +227,9 @@ def build_rolling_relationship_chart(
     fallback_colors = [
         BRAND_COLORS["dark_teal"],
         BRAND_COLORS["terracotta"],
-        "#5B5F97",
         BRAND_COLORS["seafoam"],
-        "#6B8E23",
+        "#4F8F92",
+        "#C77E63",
     ]
 
     for index, pair_label in enumerate(pair_order):
@@ -393,6 +397,64 @@ def _summarize_pair(pair_data: pd.DataFrame) -> dict[str, object]:
 
 
 
+def _describe_period_change(
+    pre_mean: float,
+    post_mean: float,
+    *,
+    threshold: float = 0.10,
+) -> tuple[str, str]:
+    """Describe relationship strength without confusing sign with magnitude."""
+    if pd.isna(pre_mean) or pd.isna(post_mean):
+        return (
+            "Insufficient comparison",
+            "There are not enough rolling windows on both sides of the policy date.",
+        )
+
+    pre_mean = float(pre_mean)
+    post_mean = float(post_mean)
+
+    if (
+        np.sign(pre_mean) != np.sign(post_mean)
+        and pre_mean != 0
+        and post_mean != 0
+    ):
+        return (
+            "Changed direction",
+            (
+                f"The average rolling relationship changed sign, from "
+                f"{pre_mean:+.3f} to {post_mean:+.3f}."
+            ),
+        )
+
+    strength_change = abs(post_mean) - abs(pre_mean)
+
+    if strength_change >= threshold:
+        return (
+            "Strengthening",
+            (
+                f"The average relationship became stronger in the same direction, "
+                f"from {pre_mean:+.3f} to {post_mean:+.3f}."
+            ),
+        )
+
+    if strength_change <= -threshold:
+        return (
+            "Weakening",
+            (
+                f"The average relationship became weaker in the same direction, "
+                f"from {pre_mean:+.3f} to {post_mean:+.3f}."
+            ),
+        )
+
+    return (
+        "Stable",
+        (
+            f"The average relationship changed only modestly, from "
+            f"{pre_mean:+.3f} to {post_mean:+.3f}."
+        ),
+    )
+
+
 def _get_pair_summary(
     rolling_data: pd.DataFrame,
     metric_x: str,
@@ -459,28 +521,13 @@ def _build_explorer_takeaway(
             "relationship."
         )
 
-    shift = summary["shift"]
-
-    if pd.isna(shift):
-        shift_sentence = (
-            "There were not enough windows on both sides of congestion "
-            "pricing to compare period averages."
-        )
-    elif shift >= 0.10:
-        shift_sentence = (
-            f"The average relationship strengthened by "
-            f"**{shift:+.3f}** after congestion pricing."
-        )
-    elif shift <= -0.10:
-        shift_sentence = (
-            f"The average relationship weakened by "
-            f"**{shift:+.3f}** after congestion pricing."
-        )
-    else:
-        shift_sentence = (
-            f"The average relationship changed only modestly after "
-            f"congestion pricing (**{shift:+.3f}**)."
-        )
+    relationship_status, relationship_detail = _describe_period_change(
+        summary["pre_mean"],
+        summary["post_mean"],
+    )
+    shift_sentence = (
+        f"**{relationship_status}:** {relationship_detail}"
+    )
 
     if summary["sign_changes"] > 0:
         stability_sentence = (
@@ -525,29 +572,9 @@ def _classify_relationship(
             ),
         )
 
-    shift = summary["shift"]
-
-    if pd.isna(shift):
-        return (
-            "Insufficient comparison",
-            "There are not enough windows on both sides of congestion pricing.",
-        )
-
-    if shift >= 0.10:
-        return (
-            "Strengthening",
-            f"Post-CP average increased by {shift:+.3f}.",
-        )
-
-    if shift <= -0.10:
-        return (
-            "Weakening",
-            f"Post-CP average decreased by {shift:+.3f}.",
-        )
-
-    return (
-        "Stable",
-        f"Post-CP average changed by only {shift:+.3f}.",
+    return _describe_period_change(
+        summary["pre_mean"],
+        summary["post_mean"],
     )
 
 def _build_detail_table(
@@ -568,7 +595,7 @@ def _build_detail_table(
         ]
     ].copy()
 
-    return display.rename(
+    display = display.rename(
         columns={
             "pair_label": "Metric pair",
             "window_start": "Window start",
@@ -583,21 +610,28 @@ def _build_detail_table(
         }
     )
 
+    display["Coverage"] = display["Coverage"] * 100.0
+    return display
+
 
 st.caption("ROLLING MODE RELATIONSHIPS")
 st.title("How did relationships between modes evolve?")
 
 st.write(
-    "Track whether selected mobility measures became more aligned, less "
-    "aligned, or more volatile over time."
+    "A single correlation can make two mobility measures look consistently related even "
+    "when that relationship strengthens, weakens, or reverses over time. This page uses "
+    "rolling correlations to show whether pairs of citywide mobility measures stayed "
+    "aligned or changed their relationship as conditions evolved."
 )
 
-st.header("Taxi aligned more with FHVHV and less with subway")
+st.header("How did Taxi's relationships with FHVHV and Subway evolve?")
 
 st.write(
-    "After congestion pricing, Taxi and FHVHV demand moved more closely "
-    "together, while the relationship between Taxi demand and Subway "
-    "Ridership weakened."
+    "The fixed opening view follows two demand relationships through the same rolling "
+    f"{DEFAULT_WINDOW_DAYS}-day window, updated every {DEFAULT_STEP_DAYS} days. "
+    "Positive values mean the measures tended to rise and fall together; negative values "
+    "mean they tended to move in opposite directions; values near zero indicate little "
+    "stable monotonic relationship."
 )
 
 with st.spinner("Preparing the rolling relationship overview..."):
@@ -662,20 +696,6 @@ hero_card4.metric(
     f"{DEFAULT_STEP_DAYS} days",
 )
 
-hero_status_col1, hero_status_col2 = st.columns(2)
-
-hero_status_col1.info(
-    f"**Taxi–FHVHV: Strengthening**  \n"
-    f"Post-CP average changed by "
-    f"{taxi_fhvhv_summary['shift']:+.3f}."
-)
-
-hero_status_col2.info(
-    f"**Taxi–Subway: Weakening**  \n"
-    f"Post-CP average changed by "
-    f"{taxi_subway_summary['shift']:+.3f}."
-)
-
 hero_fig = build_rolling_relationship_chart(
     hero_data,
     height=670,
@@ -688,281 +708,326 @@ st.plotly_chart(
     key="raw08_static_hero",
 )
 
+taxi_fhvhv_status, taxi_fhvhv_detail = _describe_period_change(
+    taxi_fhvhv_summary["pre_mean"],
+    taxi_fhvhv_summary["post_mean"],
+)
+taxi_subway_status, taxi_subway_detail = _describe_period_change(
+    taxi_subway_summary["pre_mean"],
+    taxi_subway_summary["post_mean"],
+)
+
+hero_status_col1, hero_status_col2 = st.columns(2)
+hero_status_col1.info(
+    f"**Taxi–FHVHV: {taxi_fhvhv_status}**  \n"
+    f"{taxi_fhvhv_detail}"
+)
+hero_status_col2.info(
+    f"**Taxi–Subway: {taxi_subway_status}**  \n"
+    f"{taxi_subway_detail}"
+)
+
 render_chart_insight(_build_hero_takeaway(hero_data))
 
 st.caption(
     f"Each overall window requires at least {DEFAULT_MIN_MATCHED_DAYS} "
-    f"matched days within the {DEFAULT_WINDOW_DAYS}-day period."
+    f"matched days within the {DEFAULT_WINDOW_DAYS}-day period. Pre/post "
+    "summary averages are grouped by each rolling window's midpoint, so windows "
+    "near January 5, 2025 can span both sides of the policy launch."
 )
 
-st.divider()
-st.header("Explore rolling relationships")
-
-st.write(
-    "Choose two measures, select a time-of-week context, and compare how "
-    "their citywide relationship changed over time."
-)
-
-if "raw08_saved_view" not in st.session_state:
-    st.session_state["raw08_saved_view"] = "Taxi and FHVHV alignment"
-
-saved_view = st.selectbox(
-    "Start with a saved configuration",
-    options=SAVED_VIEW_OPTIONS,
-    index=0,
-    key="raw08_saved_view",
-    help=(
-        "Saved configurations provide curated starting points. Changing "
-        "any control switches the selection to Custom."
+with exploration_section(
+    key="raw08_exploration_area",
+    title="Explore rolling relationships",
+    description=(
+        "Choose two mobility measures, a time-of-week context, and a rolling "
+        "window to see how their citywide relationship evolved over time."
     ),
-)
-
-if (
-    saved_view != "Custom"
-    and st.session_state.get("_raw08_applied_saved_view") != saved_view
 ):
-    _apply_saved_view(saved_view)
-    st.session_state["_raw08_applied_saved_view"] = saved_view
-    st.rerun()
+    if "raw08_saved_view" not in st.session_state:
+        st.session_state["raw08_saved_view"] = "Taxi and FHVHV alignment"
+    if "raw08_metric_a" not in st.session_state:
+        st.session_state["raw08_metric_a"] = "taxi_trip_count"
+    if "raw08_metric_b" not in st.session_state:
+        st.session_state["raw08_metric_b"] = "fhvhv_trip_count"
+    if "raw08_temporal_bucket" not in st.session_state:
+        st.session_state["raw08_temporal_bucket"] = ALL_TEMPORAL_BUCKETS_LABEL
+    if "raw08_rolling_window_days" not in st.session_state:
+        st.session_state["raw08_rolling_window_days"] = 90
 
-if saved_view == "Custom":
-    st.session_state["_raw08_applied_saved_view"] = "Custom"
-
-if saved_view == "Custom":
-    st.caption(
-        "Custom view · adjust the relationship, time context, or window."
-    )
-else:
-    st.caption(SAVED_VIEWS[saved_view]["description"])
-
-measure_col1, measure_col2 = st.columns(2)
-
-with measure_col1:
-    metric_a = st.selectbox(
-        "Metric A",
-        options=CORE_METRICS,
-        index=(
-            CORE_METRICS.index("taxi_trip_count")
-            if "taxi_trip_count" in CORE_METRICS
-            else 0
-        ),
-        format_func=_metric_label,
-        key="raw08_metric_a",
-        on_change=_mark_saved_view_custom,
-    )
-
-metric_b_options = [
-    metric
-    for metric in CORE_METRICS
-    if metric != metric_a
-]
-
-if not metric_b_options:
-    st.error(
-        "At least two core metrics are required to build a relationship view."
-    )
-    st.stop()
-
-with measure_col2:
-    if st.session_state.get("raw08_metric_b") not in metric_b_options:
-        st.session_state["raw08_metric_b"] = (
-            "fhvhv_trip_count"
-            if "fhvhv_trip_count" in metric_b_options
-            else metric_b_options[0]
-        )
-
-    metric_b = st.selectbox(
-        "Metric B",
-        options=metric_b_options,
-        index=0,
-        format_func=_metric_label,
-        key="raw08_metric_b",
-        on_change=_mark_saved_view_custom,
-    )
-
-time_col1, time_col2 = st.columns(2)
-
-with time_col1:
-    temporal_bucket = st.selectbox(
-        "Time context",
-        options=TEMPORAL_BUCKET_OPTIONS,
-        index=0,
-        format_func=lambda value: TEMPORAL_BUCKET_LABELS[value],
-        key="raw08_temporal_bucket",
-        on_change=_mark_saved_view_custom,
-    )
-
-with time_col2:
-    rolling_window_days = st.selectbox(
-        "Rolling window",
-        options=WINDOW_OPTIONS,
-        index=1,
-        format_func=lambda value: f"{value} days",
-        key="raw08_rolling_window_days",
-        on_change=_mark_saved_view_custom,
-    )
-
-minimum_matched_days = int(round(rolling_window_days * 0.50))
-
-with st.spinner("Updating the rolling relationship..."):
-    if temporal_bucket == ALL_TEMPORAL_BUCKETS_LABEL:
-        explorer_data = build_citywide_rolling_relationship_data(
-            pair_definitions=[(metric_a, metric_b)],
-            temporal_bucket=temporal_bucket,
-            rolling_window_days=rolling_window_days,
-            rolling_step_days=14,
-            minimum_matched_days=minimum_matched_days,
-            minimum_coverage_share=None,
-            correlation_method="spearman",
-        )
-    else:
-        explorer_data = build_bucket_rolling_relationship_data(
-            pair_definitions=[(metric_a, metric_b)],
-            temporal_bucket=temporal_bucket,
-            rolling_window_days=rolling_window_days,
-            rolling_step_days=14,
-            minimum_coverage_share=0.50,
-            correlation_method="spearman",
-        )
-
-if explorer_data.empty:
-    st.info(
-        "No rolling relationship data were available for this selection."
-    )
-else:
-    metric_a_label = _metric_label(metric_a)
-    metric_b_label = _metric_label(metric_b)
-    temporal_bucket_label = TEMPORAL_BUCKET_LABELS[temporal_bucket]
-
-    explorer_summary = _summarize_pair(explorer_data)
-
-    explorer_card1, explorer_card2, explorer_card3, explorer_card4 = (
-        st.columns(4)
-    )
-
-    explorer_card1.metric(
-        "Latest correlation",
-        _format_correlation(explorer_summary["latest"]),
-    )
-
-    explorer_card2.metric(
-        "Pre-CP average",
-        _format_correlation(explorer_summary["pre_mean"]),
-    )
-
-    explorer_card3.metric(
-        "Post-CP average",
-        _format_correlation(explorer_summary["post_mean"]),
-        (
-            f"{explorer_summary['shift']:+.3f}"
-            if pd.notna(explorer_summary["shift"])
-            else None
+    saved_view = st.selectbox(
+        "Start with a saved configuration",
+        options=SAVED_VIEW_OPTIONS,
+        key="raw08_saved_view",
+        help=(
+            "Saved configurations provide curated starting points. Changing "
+            "any control switches the selection to Custom."
         ),
     )
 
-    explorer_card4.metric(
-        "Sign changes",
-        f"{explorer_summary['sign_changes']:,}",
-    )
-
-    relationship_status, relationship_status_detail = (
-        _classify_relationship(explorer_data)
-    )
-
-    st.info(
-        f"**{relationship_status}**  \n"
-        f"{relationship_status_detail}"
-    )
-
-    st.caption(
-        f"{metric_a_label} vs {metric_b_label} · "
-        f"{temporal_bucket_label} · "
-        f"{rolling_window_days}-day rolling window · "
-        "14-day update step · Spearman correlation"
-    )
-
-    if temporal_bucket == ALL_TEMPORAL_BUCKETS_LABEL:
-        st.caption(
-            f"Overall windows require at least "
-            f"{minimum_matched_days} matched days."
-        )
-    else:
-        st.caption(
-            "Time-bucket windows require coverage on at least half of the "
-            "dates eligible for the selected bucket."
-        )
-
-    explorer_takeaway = _build_explorer_takeaway(
-        explorer_data,
-        metric_a_label=metric_a_label,
-        metric_b_label=metric_b_label,
-        temporal_bucket_label=temporal_bucket_label,
-    )
-
-    explorer_fig = build_rolling_relationship_chart(
-        explorer_data,
-        height=640,
-    )
-
-    st.plotly_chart(
-        explorer_fig,
-        width="stretch",
-        config={"displayModeBar": False, "responsive": True},
-        key=(
-            f"raw08_explorer_{metric_a}_{metric_b}_"
-            f"{temporal_bucket}_{rolling_window_days}"
-        ),
-    )
-    render_chart_insight(explorer_takeaway)
-
-    with st.expander(
-        "View rolling-window details",
-        expanded=False,
+    if (
+        saved_view != "Custom"
+        and st.session_state.get("_raw08_applied_saved_view") != saved_view
     ):
-        detail = _build_detail_table(explorer_data)
+        _apply_saved_view(saved_view)
+        st.session_state["_raw08_applied_saved_view"] = saved_view
+        st.rerun()
 
-        st.dataframe(
-            detail,
-            width="stretch",
-            hide_index=True,
-            column_config={
-                "Rolling correlation": st.column_config.NumberColumn(
-                    format="%+.3f",
-                ),
-                "Coverage": st.column_config.NumberColumn(
-                    format="%.1f%%",
-                ),
-                "Matched days": st.column_config.NumberColumn(
-                    format="%d",
-                ),
-                "Required days": st.column_config.NumberColumn(
-                    format="%d",
-                ),
-                "Eligible dates": st.column_config.NumberColumn(
-                    format="%d",
-                ),
-            },
+    if saved_view == "Custom":
+        st.session_state["_raw08_applied_saved_view"] = "Custom"
+
+    if saved_view == "Custom":
+        st.caption(
+            "Custom view · adjust the relationship, time context, or window."
         )
+    else:
+        st.caption(SAVED_VIEWS[saved_view]["description"])
+
+    measure_col1, measure_col2 = st.columns(2)
+
+    with measure_col1:
+        metric_a = st.selectbox(
+            "Metric A",
+            options=CORE_METRICS,
+            format_func=_metric_label,
+            key="raw08_metric_a",
+            on_change=_mark_saved_view_custom,
+        )
+
+    metric_b_options = [
+        metric
+        for metric in CORE_METRICS
+        if metric != metric_a
+    ]
+
+    if not metric_b_options:
+        st.error(
+            "At least two core metrics are required to build a relationship view."
+        )
+        st.stop()
+
+    with measure_col2:
+        if st.session_state.get("raw08_metric_b") not in metric_b_options:
+            st.session_state["raw08_metric_b"] = (
+                "fhvhv_trip_count"
+                if "fhvhv_trip_count" in metric_b_options
+                else metric_b_options[0]
+            )
+
+        metric_b = st.selectbox(
+            "Metric B",
+            options=metric_b_options,
+            format_func=_metric_label,
+            key="raw08_metric_b",
+            on_change=_mark_saved_view_custom,
+        )
+
+    time_col1, time_col2 = st.columns(2)
+
+    with time_col1:
+        temporal_bucket = st.selectbox(
+            "Time context",
+            options=TEMPORAL_BUCKET_OPTIONS,
+            format_func=lambda value: TEMPORAL_BUCKET_LABELS[value],
+            key="raw08_temporal_bucket",
+            on_change=_mark_saved_view_custom,
+        )
+
+    with time_col2:
+        rolling_window_days = st.selectbox(
+            "Rolling window",
+            options=WINDOW_OPTIONS,
+            format_func=lambda value: f"{value} days",
+            key="raw08_rolling_window_days",
+            on_change=_mark_saved_view_custom,
+        )
+
+    minimum_matched_days = int(round(rolling_window_days * 0.50))
+
+    with st.spinner("Updating the rolling relationship..."):
+        if temporal_bucket == ALL_TEMPORAL_BUCKETS_LABEL:
+            explorer_data = build_citywide_rolling_relationship_data(
+                pair_definitions=[(metric_a, metric_b)],
+                temporal_bucket=temporal_bucket,
+                rolling_window_days=rolling_window_days,
+                rolling_step_days=14,
+                minimum_matched_days=minimum_matched_days,
+                minimum_coverage_share=None,
+                correlation_method="spearman",
+            )
+        else:
+            explorer_data = build_bucket_rolling_relationship_data(
+                pair_definitions=[(metric_a, metric_b)],
+                temporal_bucket=temporal_bucket,
+                rolling_window_days=rolling_window_days,
+                rolling_step_days=14,
+                minimum_coverage_share=0.50,
+                correlation_method="spearman",
+            )
+
+    if explorer_data.empty:
+        st.info(
+            "No rolling relationship data were available for this selection."
+        )
+    else:
+        metric_a_label = _metric_label(metric_a)
+        metric_b_label = _metric_label(metric_b)
+        temporal_bucket_label = TEMPORAL_BUCKET_LABELS[temporal_bucket]
+
+        explorer_summary = _summarize_pair(explorer_data)
+
+        explorer_card1, explorer_card2, explorer_card3, explorer_card4 = (
+            st.columns(4)
+        )
+
+        explorer_card1.metric(
+            "Latest correlation",
+            _format_correlation(explorer_summary["latest"]),
+        )
+
+        explorer_card2.metric(
+            "Pre-CP midpoint-window avg",
+            _format_correlation(explorer_summary["pre_mean"]),
+        )
+
+        explorer_card3.metric(
+            "Post-CP midpoint-window avg",
+            _format_correlation(explorer_summary["post_mean"]),
+            (
+                f"{explorer_summary['shift']:+.3f}"
+                if pd.notna(explorer_summary["shift"])
+                else None
+            ),
+        )
+
+        explorer_card4.metric(
+            "Sign changes",
+            f"{explorer_summary['sign_changes']:,}",
+        )
+
+        relationship_status, relationship_status_detail = (
+            _classify_relationship(explorer_data)
+        )
+
+        st.info(
+            f"**{relationship_status}**  \n"
+            f"{relationship_status_detail}"
+        )
+
+        st.caption(
+            f"{metric_a_label} vs {metric_b_label} · "
+            f"{temporal_bucket_label} · "
+            f"{rolling_window_days}-day rolling window · "
+            "14-day update step · Spearman correlation"
+        )
+
+        if temporal_bucket == ALL_TEMPORAL_BUCKETS_LABEL:
+            st.caption(
+                f"Overall windows require at least "
+                f"{minimum_matched_days} matched days."
+            )
+        else:
+            st.caption(
+                "Time-bucket windows require coverage on at least half of the "
+                "dates eligible for the selected bucket."
+            )
+
+        explorer_takeaway = _build_explorer_takeaway(
+            explorer_data,
+            metric_a_label=metric_a_label,
+            metric_b_label=metric_b_label,
+            temporal_bucket_label=temporal_bucket_label,
+        )
+
+        explorer_fig = build_rolling_relationship_chart(
+            explorer_data,
+            height=640,
+        )
+
+        st.plotly_chart(
+            explorer_fig,
+            width="stretch",
+            config={"displayModeBar": False, "responsive": True},
+            key=(
+                f"raw08_explorer_{metric_a}_{metric_b}_"
+                f"{temporal_bucket}_{rolling_window_days}"
+            ),
+        )
+        render_chart_insight(explorer_takeaway)
+
+        with st.expander(
+            "View rolling-window details",
+            expanded=False,
+        ):
+            detail = _build_detail_table(explorer_data)
+
+            st.dataframe(
+                detail,
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "Rolling correlation": st.column_config.NumberColumn(
+                        format="%+.3f",
+                    ),
+                    "Coverage": st.column_config.NumberColumn(
+                        format="%.1f%%",
+                    ),
+                    "Matched days": st.column_config.NumberColumn(
+                        format="%d",
+                    ),
+                    "Required days": st.column_config.NumberColumn(
+                        format="%d",
+                    ),
+                    "Eligible dates": st.column_config.NumberColumn(
+                        format="%d",
+                    ),
+                },
+            )
+
+
+st.markdown("### What this page establishes")
+st.markdown(
+    "Relationships between mobility modes were not fixed over the study period. Pairs "
+    "that appear related in an overall summary can become more aligned, less aligned, "
+    "or even change direction within shorter windows. Treating correlation as something "
+    "that evolves over time reveals structure that a single full-period coefficient "
+    "would conceal."
+)
 
 with st.expander(
-    "How to read this page",
+    "How this page works",
     expanded=False,
 ):
     st.markdown(
         """
-A rolling correlation summarizes how two citywide daily series moved together
-inside a trailing calendar window.
+        **1. Recalculate the relationship through time.** A rolling Spearman correlation
+        summarizes how two citywide daily series moved together inside each trailing
+        calendar window.
 
-- Values near **+1** indicate that the two measures tended to rise and fall
-  together.
-- Values near **−1** indicate that one tended to rise when the other fell.
-- Values near **0** indicate little stable monotonic relationship.
-- Overall views require observations for at least half of the calendar window.
-- Weekday and weekend views require observations for at least half of the
-  dates eligible for the selected time bucket.
-- Unsupported windows appear as gaps rather than being filled.
+        **2. Read the sign and magnitude separately.** Values near **+1** mean the two
+        measures tended to rise and fall together; values near **−1** mean one tended to
+        rise when the other fell; values near **0** indicate little stable monotonic
+        relationship within that window.
 
-These relationships are descriptive. They do not establish causality or
-substitution between modes.
+        **3. Require enough matched observations.** Overall views require observations
+        for at least half of the calendar window. Weekday and weekend views require
+        observations for at least half of the dates eligible for the selected time
+        bucket. Unsupported windows remain gaps rather than being filled.
+
+        **4. Use the window midpoint for pre/post summaries.** Summary cards assign each
+        rolling window according to its midpoint. A window centered near January 5, 2025
+        can therefore contain observations from both sides of the congestion-pricing
+        launch.
+
+        **5. Distinguish an evolving association from substitution.** A changing
+        correlation shows that two mobility measures changed how closely they moved
+        together. It does not establish that one mode caused changes in the other or
+        that travelers substituted one mode for another.
         """
     )
+
+st.caption(
+    "Evidence scope: rolling Spearman correlations among observed NYC mobility measures. "
+    "The relationships are descriptive and can change with the selected measures, time "
+    "bucket, and rolling-window length; they are not causal or substitution estimates."
+)

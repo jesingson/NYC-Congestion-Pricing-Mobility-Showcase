@@ -35,6 +35,7 @@ from app.utils.project_branding import (
     BRAND_COLORS,
     BRAND_DIVERGING_SEQUENCE,
     apply_branding,
+    exploration_section,
     inject_app_css,
     render_chart_insight,
 )
@@ -49,7 +50,7 @@ SMOOTHING_WINDOW_DAYS = 14
 ANNUAL_CYCLE_DAYS = 365
 
 SEASON_COLORS = {
-    "Winter": "#5B5F97",
+    "Winter": "#6F969B",
     "Spring": BRAND_COLORS["seafoam"],
     "Summer": BRAND_COLORS["terracotta"],
     "Fall": BRAND_COLORS["dark_teal"],
@@ -122,7 +123,7 @@ FEATURED_STORIES = {
         "cluster": 2,
     },
     "Gateway only · Taxi trips": {
-        "headline": "Gateway zones show the sharpest post-CP lift",
+        "headline": "Gateway zones show a pronounced post-CP lift",
         "summary": (
             "Gateway zones keep the cyclical loop, but the post-CP segment sits noticeably above "
             "the earlier loop, making the policy shift the dominant read."
@@ -208,10 +209,12 @@ def _format_mobility_environment_label(cluster_label: int) -> str:
 
 
 def _format_raw11_geography_scope(value: str) -> str:
-    """Keep internal scope values stable while using app-facing terminology."""
-    if value == "Mobility regime cluster":
-        return "Mobility environment"
-    return value
+    """Keep internal scope values stable while using reader-facing terminology."""
+    labels = {
+        "Geo-policy group": "Policy geography",
+        "Mobility regime cluster": "Mobility environment",
+    }
+    return labels.get(value, value)
 
 
 def _format_value(value: object) -> str:
@@ -473,6 +476,7 @@ def _build_anomaly_rate_series(
             "date",
             "borough",
             "cbd_spatial_category",
+            "mobility_regime_cluster_label",
             "pre_post_cp",
         ]
     )
@@ -1030,7 +1034,6 @@ def _build_spiral_hero_figure(
                 "Delta vs baseline: %{customdata[2]}<br>"
                 "Position: %{customdata[3]}<extra></extra>"
             ),
-            hoverinfo="skip",
             showlegend=False,
         )
     )
@@ -1160,7 +1163,6 @@ def _build_spiral_figure(
                 "Delta vs baseline: %{customdata[2]}<br>"
                 "Position: %{customdata[3]}<extra></extra>"
             ),
-            hoverinfo="skip",
             showlegend=False,
         )
     )
@@ -1349,10 +1351,12 @@ def _summary_cards(
 
 
 st.caption("CYCLICAL TIME")
-st.title("Which mobility patterns repeat each year — and did congestion pricing shift the rhythm?")
+st.title("Which mobility patterns repeat each year—and how did the rhythm differ after congestion pricing began?")
 st.write(
-    "The spiral folds three years into recurring annual loops so seasonal rhythm and longer-run "
-    "post-CP shifts can be compared in the same view."
+    "A chronological trend makes long-run change easy to see but can hide whether the same "
+    "highs and lows return at similar points each year. The annual spiral folds the study "
+    "period into repeated yearly loops so recurring seasonality and longer-run level shifts "
+    "can be examined in the same view."
 )
 
 hero_story_name = st.segmented_control(
@@ -1408,7 +1412,14 @@ hero_latest = (
 
 hero_story_col, hero_stats_col = st.columns([1.4, 1.1], gap="large")
 with hero_story_col:
-    st.header(hero_shape_headline)
+    st.header("How does the selected annual rhythm repeat?")
+    st.write(
+        f"**Hero focus:** {hero_metric_label} · {hero_scope_label}. "
+        "Each loop represents one year on the same calendar path. Bar length shows the "
+        "indexed mobility level, where **100 is the selected series' pre-CP daily average**. "
+        "Comparing the loops shows both recurring seasonal shape and whether later years "
+        "sit above or below the earlier baseline."
+    )
 
 with hero_stats_col:
     hero_stat_cols = st.columns(2)
@@ -1430,237 +1441,272 @@ st.caption(
     "Each loop is one year. The bars grow from the spiral itself, and the year-start markers keep the cycle anchored."
 )
 st.plotly_chart(hero_spiral_figure, width="stretch", key="raw11_hero_spiral")
-render_chart_insight(hero_shape_insight)
-
-st.header("Explore cyclical patterns")
-st.write(
-    "Use the explorer below to change the metric and geography. The spiral-bar geometry stays fixed so the comparison is always made on the same visual language."
-)
-
-scope_options = _get_scope_options()
-
-controls = st.columns([1.2, 1.2, 1.0, 1.0])
-
-with controls[0]:
-    metric_choice = st.selectbox(
-        "Metric",
-        options=[*BASE_METRICS, ANOMALY_RATE_METRIC],
-        index=[*BASE_METRICS, ANOMALY_RATE_METRIC].index(DEFAULT_METRIC),
-        format_func=_metric_label,
-        key="raw11_metric",
-    )
-
-with controls[1]:
-    geography_scope = st.selectbox(
-        "Geography",
-        options=GEOGRAPHY_OPTIONS,
-        index=0,
-        format_func=_format_raw11_geography_scope,
-        key="raw11_geography_scope",
-    )
-
-borough_choice: str | None = None
-geo_policy_choice: str | None = None
-cluster_choice: int | None = None
-
-with controls[2]:
-    if geography_scope == "Borough":
-        if scope_options["boroughs"]:
-            borough_choice = st.selectbox(
-                "Borough",
-                options=scope_options["boroughs"],
-                index=0,
-                key="raw11_borough",
-            )
-        else:
-            st.info("No borough values are available in the current data.")
-    elif geography_scope == "Geo-policy group":
-        if scope_options["geo_policy"]:
-            geo_policy_choice = st.selectbox(
-                "Geo-policy group",
-                options=scope_options["geo_policy"],
-                index=0,
-                key="raw11_geo_policy",
-            )
-        else:
-            st.info("No geo-policy groups are available in the current data.")
-    elif geography_scope == "Mobility regime cluster":
-        if scope_options["clusters"]:
-            cluster_choice = st.selectbox(
-                "Mobility environment",
-                options=scope_options["clusters"],
-                index=0,
-                format_func=_format_mobility_environment_label,
-                key="raw11_cluster",
-            )
-        else:
-            st.info("No mobility environments are available in the current data.")
-    else:
-        st.markdown(
-            "<div style='padding-top:1.75rem; color:#6b7d7f;'>No sub-selection needed.</div>",
-            unsafe_allow_html=True,
-        )
-
-with controls[3]:
-    smoothing_enabled = st.checkbox(
-        "Smooth daily values",
-        value=True,
-        key="raw11_smoothing",
-    )
-
-if metric_choice == ANOMALY_RATE_METRIC:
-    daily, zones_in_scope = _build_anomaly_rate_series(
-        geography_scope=geography_scope,
-        borough=borough_choice,
-        geo_policy_group=geo_policy_choice,
-        cluster_label=cluster_choice,
-        smoothing_enabled=smoothing_enabled,
-    )
-else:
-    daily, zones_in_scope = _build_metric_series(
-        metric=metric_choice,
-        geography_scope=geography_scope,
-        borough=borough_choice,
-        geo_policy_group=geo_policy_choice,
-        cluster_label=cluster_choice,
-        smoothing_enabled=smoothing_enabled,
-    )
-
-metric_label = _metric_label(metric_choice)
-scope_label = _scope_summary(
-    geography_scope,
-    borough=borough_choice,
-    geo_policy=geo_policy_choice,
-    cluster_label=cluster_choice,
-)
-
-st.divider()
-_summary_cards(
-    metric_label=metric_label,
-    scope_label=scope_label,
-    daily=daily,
-    zones_in_scope=zones_in_scope,
-)
-
-if daily["display_index"].notna().sum() == 0:
-    st.warning(
-        "There is not enough data in the current selection to draw the cyclical view."
-    )
-    st.stop()
-
-explorer_shape = _build_shape_metrics(daily)
-explorer_shape_text = _shape_insight_text(
-    metric_label=metric_label,
-    scope_label=scope_label,
-    shape=explorer_shape,
-)
-
-shape_cols = st.columns(4)
-shape_cols[0].metric("Seasonality swing", _format_percent_text(explorer_shape["seasonality_swing_pct"]))
-shape_cols[1].metric("Post-CP shift", _format_percent_text(explorer_shape["post_cp_shift_pct"], signed=True))
-shape_cols[2].metric("Peak month", explorer_shape["peak_month_name"])
-shape_cols[3].metric("Latest 12m change", _format_percent_text(explorer_shape["latest_12m_change_pct"], signed=True))
-
-spiral_fig = _build_spiral_figure(
-    daily,
-    metric_label=metric_label,
-)
-timeline_fig = _build_timeline_figure(
-    daily,
-    metric_label=metric_label,
-    spiral_style="Sparkline + value dots",
-)
-
-st.subheader("Annual spiral")
-st.plotly_chart(spiral_fig, width="stretch", key="raw11_spiral")
-render_chart_insight(explorer_shape_text)
-st.subheader("Chronological trend")
-st.plotly_chart(timeline_fig, width="stretch", key="raw11_timeline")
 render_chart_insight(
-    f"Across the chronology, **{metric_label}** in **{scope_label}** shifts "
-    f"**{_format_percent_text(explorer_shape['post_cp_shift_pct'], signed=True)} "
-    "after congestion pricing**. The most recent 12-month average is "
-    f"**{_format_percent_text(explorer_shape['latest_12m_change_pct'], signed=True)}** "
-    "versus the prior 12 months."
+    f"{hero_shape_insight} {hero_profile['summary']}"
 )
 
-show_data_table = st.checkbox(
-    "Show data table",
-    value=False,
-    key="raw11_show_data_table",
-)
-if show_data_table:
-    table_columns = ["date"]
+with exploration_section(
+    key="raw11_exploration_area",
+    title="Explore cyclical patterns",
+    description=(
+        "Choose a mobility measure and geography to compare recurring annual "
+        "rhythm with the longer-run change after congestion pricing began."
+    ),
+):
+    scope_options = _get_scope_options()
+
+    controls = st.columns([1.2, 1.2, 1.0, 1.0])
+
+    with controls[0]:
+        metric_choice = st.selectbox(
+            "Metric",
+            options=[*BASE_METRICS, ANOMALY_RATE_METRIC],
+            index=[*BASE_METRICS, ANOMALY_RATE_METRIC].index(DEFAULT_METRIC),
+            format_func=_metric_label,
+            key="raw11_metric",
+        )
+
+    with controls[1]:
+        geography_scope = st.selectbox(
+            "Geography",
+            options=GEOGRAPHY_OPTIONS,
+            index=0,
+            format_func=_format_raw11_geography_scope,
+            key="raw11_geography_scope",
+        )
+
+    borough_choice: str | None = None
+    geo_policy_choice: str | None = None
+    cluster_choice: int | None = None
+
+    with controls[2]:
+        if geography_scope == "Borough":
+            if scope_options["boroughs"]:
+                borough_choice = st.selectbox(
+                    "Borough",
+                    options=scope_options["boroughs"],
+                    index=0,
+                    key="raw11_borough",
+                )
+            else:
+                st.info("No borough values are available in the current data.")
+        elif geography_scope == "Geo-policy group":
+            if scope_options["geo_policy"]:
+                geo_policy_choice = st.selectbox(
+                    "Policy geography",
+                    options=scope_options["geo_policy"],
+                    index=0,
+                    key="raw11_geo_policy",
+                )
+            else:
+                st.info("No policy-geography groups are available in the current data.")
+        elif geography_scope == "Mobility regime cluster":
+            if scope_options["clusters"]:
+                cluster_choice = st.selectbox(
+                    "Mobility environment",
+                    options=scope_options["clusters"],
+                    index=0,
+                    format_func=_format_mobility_environment_label,
+                    key="raw11_cluster",
+                )
+            else:
+                st.info("No mobility environments are available in the current data.")
+        else:
+            st.markdown(
+                "<div style='padding-top:1.75rem; color:#6b7d7f;'>No sub-selection needed.</div>",
+                unsafe_allow_html=True,
+            )
+
+    with controls[3]:
+        smoothing_enabled = st.checkbox(
+            "Smooth daily values",
+            value=True,
+            key="raw11_smoothing",
+        )
+
     if metric_choice == ANOMALY_RATE_METRIC:
-        table_columns.extend(
-            [
-                "finalist_anomaly_zone_count",
-                "scope_zone_count",
-                ANOMALY_RATE_METRIC,
-                f"{ANOMALY_RATE_METRIC}_smoothed",
-                "display_index",
-            ]
+        daily, zones_in_scope = _build_anomaly_rate_series(
+            geography_scope=geography_scope,
+            borough=borough_choice,
+            geo_policy_group=geo_policy_choice,
+            cluster_label=cluster_choice,
+            smoothing_enabled=smoothing_enabled,
         )
     else:
-        table_columns.extend([
-            metric_choice,
-            f"{metric_choice}_smoothed",
-            "display_index",
-        ])
-    display_table = daily[table_columns].copy()
-    display_table["date"] = (
-        pd.to_datetime(display_table["date"])
-        .dt.strftime("%Y-%m-%d")
+        daily, zones_in_scope = _build_metric_series(
+            metric=metric_choice,
+            geography_scope=geography_scope,
+            borough=borough_choice,
+            geo_policy_group=geo_policy_choice,
+            cluster_label=cluster_choice,
+            smoothing_enabled=smoothing_enabled,
+        )
+
+    metric_label = _metric_label(metric_choice)
+    scope_label = _scope_summary(
+        geography_scope,
+        borough=borough_choice,
+        geo_policy=geo_policy_choice,
+        cluster_label=cluster_choice,
     )
 
-    float_columns = display_table.select_dtypes(
-        include=["floating"]
-    ).columns.tolist()
+    st.divider()
+    _summary_cards(
+        metric_label=metric_label,
+        scope_label=scope_label,
+        daily=daily,
+        zones_in_scope=zones_in_scope,
+    )
 
-    integer_columns = display_table.select_dtypes(
-        include=["integer"]
-    ).columns.tolist()
-
-    display_table[float_columns] = display_table[
-        float_columns
-    ].round(1)
-
-    table_column_config = {
-        column: st.column_config.NumberColumn(
-            column,
-            format="%,.1f",
+    if daily["display_index"].notna().sum() == 0:
+        st.warning(
+            "There is not enough data in the current selection to draw the cyclical view."
         )
-        for column in float_columns
-    }
+        st.stop()
 
-    table_column_config.update(
-        {
+    explorer_shape = _build_shape_metrics(daily)
+    explorer_shape_text = _shape_insight_text(
+        metric_label=metric_label,
+        scope_label=scope_label,
+        shape=explorer_shape,
+    )
+
+    shape_cols = st.columns(4)
+    shape_cols[0].metric("Seasonality swing", _format_percent_text(explorer_shape["seasonality_swing_pct"]))
+    shape_cols[1].metric("Post-CP shift", _format_percent_text(explorer_shape["post_cp_shift_pct"], signed=True))
+    shape_cols[2].metric("Peak month", explorer_shape["peak_month_name"])
+    shape_cols[3].metric("Latest 12m change", _format_percent_text(explorer_shape["latest_12m_change_pct"], signed=True))
+
+    spiral_fig = _build_spiral_figure(
+        daily,
+        metric_label=metric_label,
+    )
+    timeline_fig = _build_timeline_figure(
+        daily,
+        metric_label=metric_label,
+        spiral_style="Sparkline + value dots",
+    )
+
+    st.subheader("Annual spiral")
+    st.plotly_chart(spiral_fig, width="stretch", key="raw11_spiral")
+    render_chart_insight(explorer_shape_text)
+    st.subheader("Chronological trend")
+    st.plotly_chart(timeline_fig, width="stretch", key="raw11_timeline")
+    render_chart_insight(
+        f"Across the chronology, **{metric_label}** in **{scope_label}** shifts "
+        f"**{_format_percent_text(explorer_shape['post_cp_shift_pct'], signed=True)} "
+        "after congestion pricing**. The most recent 12-month average is "
+        f"**{_format_percent_text(explorer_shape['latest_12m_change_pct'], signed=True)}** "
+        "versus the prior 12 months."
+    )
+
+    show_data_table = st.checkbox(
+        "Show data table",
+        value=False,
+        key="raw11_show_data_table",
+    )
+    if show_data_table:
+        table_columns = ["date"]
+        if metric_choice == ANOMALY_RATE_METRIC:
+            table_columns.extend(
+                [
+                    "finalist_anomaly_zone_count",
+                    "scope_zone_count",
+                    ANOMALY_RATE_METRIC,
+                    f"{ANOMALY_RATE_METRIC}_smoothed",
+                    "display_index",
+                ]
+            )
+        else:
+            table_columns.extend([
+                metric_choice,
+                f"{metric_choice}_smoothed",
+                "display_index",
+            ])
+        display_table = daily[table_columns].copy()
+        display_table["date"] = (
+            pd.to_datetime(display_table["date"])
+            .dt.strftime("%Y-%m-%d")
+        )
+
+        float_columns = display_table.select_dtypes(
+            include=["floating"]
+        ).columns.tolist()
+
+        integer_columns = display_table.select_dtypes(
+            include=["integer"]
+        ).columns.tolist()
+
+        display_table[float_columns] = display_table[
+            float_columns
+        ].round(1)
+
+        table_column_config = {
             column: st.column_config.NumberColumn(
                 column,
-                format="%,d",
+                format="%,.1f",
             )
-            for column in integer_columns
+            for column in float_columns
         }
-    )
 
-    st.dataframe(
-        display_table,
-        width="stretch",
-        hide_index=True,
-        height=320,
-        column_config=table_column_config,
-    )
+        table_column_config.update(
+            {
+                column: st.column_config.NumberColumn(
+                    column,
+                    format="%,d",
+                )
+                for column in integer_columns
+            }
+        )
 
-with st.expander("How to read these numbers", expanded=False):
+        st.dataframe(
+            display_table,
+            width="stretch",
+            hide_index=True,
+            height=320,
+            column_config=table_column_config,
+        )
+
+
+st.markdown("### What this page establishes")
+st.markdown(
+    "Seasonality and longer-run change are different parts of the same mobility pattern. "
+    "A series can preserve a recognizable annual rhythm while the entire cycle shifts "
+    "upward or downward, and different measures or geographies can have very different "
+    "seasonal shapes. Reading the spiral beside the chronological trend separates what "
+    "repeats from what changed across years."
+)
+
+with st.expander("How this page works", expanded=False):
     st.markdown(
         """
-        - **Seasonality swing** means the gap between the highest and lowest monthly averages, expressed as a share of the overall mean. Bigger numbers mean the series has a stronger recurring seasonal pattern.
-        - **Indexing** means every series is normalized to its own pre-congestion-pricing daily average, so `100` is the baseline before CP started and values above or below 100 show relative movement from that baseline.
-        - **Post-CP shift** compares the average after congestion pricing to the average before it, so it shows the longer-run level change rather than the seasonal loop itself.
+        **1. Fold calendar time into annual loops.** Each revolution of the spiral is one
+        year, so similar calendar positions line up visually across years. This makes
+        recurring peaks and troughs easier to compare than on a long chronological axis.
+
+        **2. Put different mobility measures on a comparable relative scale.** Each
+        series is indexed to its own pre-congestion-pricing daily average, so **100** is
+        the pre-CP reference. Values above or below 100 show relative movement from that
+        series' own baseline.
+
+        **3. Measure the strength of the recurring cycle.** **Seasonality swing** is the
+        gap between the highest and lowest monthly averages as a share of the overall
+        mean. Larger values indicate a stronger recurring seasonal pattern.
+
+        **4. Separate seasonal shape from a longer-run level shift.** **Post-CP shift**
+        compares the average after congestion pricing began with the pre-CP average.
+        The chronological trend provides the same series in ordinary calendar order so
+        the longer-run movement is not confused with the annual loop.
+
+        **5. Treat the spiral as a descriptive time view.** Repetition at similar points
+        in the calendar can reveal seasonality, but the visualization does not by itself
+        explain what produced either the recurring pattern or a later level shift.
         """
     )
 
-st.header("Questions this view can answer")
-st.write(
-    "Do stress anomalies recur in the same calendar positions? Did the post-CP period alter an established seasonal rhythm? Are some modes more cyclical than others?"
+st.caption(
+    "Evidence scope: observed NYC mobility and stress-anomaly rates displayed as annual "
+    "cycles and chronological trends. Pre/post level differences and recurring seasonal "
+    "patterns are descriptive; they do not establish that congestion pricing caused the "
+    "observed changes."
 )

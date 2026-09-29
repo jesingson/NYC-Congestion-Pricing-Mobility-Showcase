@@ -12,10 +12,20 @@ from app.data_access.anomalies import (
     EVENT_ID_COLUMN,
     SELECTED_FINALIST_FLAG,
 )
+from app.data_access.loaders import (
+    CONGESTION_PRICING_START_DATE,
+    load_analysis_panel,
+)
+from app.data_access.mobility_environments import (
+    format_mobility_regime_cluster_label,
+    load_mobility_regime_cluster_assignments,
+)
 from app.utils.project_branding import (
     BRAND_COLORS,
     apply_branding,
+    exploration_section,
     inject_app_css,
+    render_chart_insight,
 )
 
 
@@ -25,9 +35,25 @@ inject_app_css()
 # ---------------------------------------------------------------------
 # Page configuration
 # ---------------------------------------------------------------------
-CP_START_DATE = pd.Timestamp("2025-01-05")
-PRESET_CONFIG_VERSION = 2
+CP_START_DATE = CONGESTION_PRICING_START_DATE
+PRESET_CONFIG_VERSION = 3
 ALL_TEMPORAL_BUCKETS = "All temporal buckets"
+ALL_GEOGRAPHIES = "All NYC"
+
+GEOGRAPHY_SCHEMES = [
+    ALL_GEOGRAPHIES,
+    "Borough",
+    "Policy geography",
+    "Mobility environment",
+    "Taxi Zone",
+]
+
+POLICY_GEOGRAPHY_MAP = {
+    "cbd": "CBD",
+    "gateway_to_cbd": "Gateway + adjacent",
+    "adjacent_to_cbd": "Gateway + adjacent",
+    "non_cbd": "Outside",
+}
 CONGESTION_FLAG = "has_congestion_oriented"
 DEMAND_FLAG = "has_positive_demand_shock"
 FAMILY_COLUMN = "stress_family_exclusive"
@@ -76,6 +102,7 @@ TIME_SCOPE_OPTIONS = [
 
 SCOUTING_COLUMNS = [
     EVENT_ID_COLUMN,
+    "taxi_zone_id",
     "date",
     "temporal_bucket",
     SELECTED_FINALIST_FLAG,
@@ -90,6 +117,8 @@ SAVED_VIEWS = {
         "cadence": "Monthly",
         "time_scope": "Full period",
         "temporal_bucket": ALL_TEMPORAL_BUCKETS,
+        "geography_scheme": ALL_GEOGRAPHIES,
+        "geography_value": None,
         "start_date": date(2023, 1, 1),
         "end_date": date(2026, 3, 31),
     },
@@ -99,6 +128,8 @@ SAVED_VIEWS = {
         "cadence": "Monthly",
         "time_scope": "Custom dates",
         "temporal_bucket": ALL_TEMPORAL_BUCKETS,
+        "geography_scheme": ALL_GEOGRAPHIES,
+        "geography_value": None,
         "start_date": date(2023, 10, 1),
         "end_date": date(2025, 3, 31),
     },
@@ -108,6 +139,8 @@ SAVED_VIEWS = {
         "cadence": "Monthly",
         "time_scope": "Custom dates",
         "temporal_bucket": ALL_TEMPORAL_BUCKETS,
+        "geography_scheme": ALL_GEOGRAPHIES,
+        "geography_value": None,
         "start_date": date(2024, 9, 1),
         "end_date": date(2025, 6, 30),
     },
@@ -130,6 +163,308 @@ SAVED_VIEW_DESCRIPTIONS = {
 
 
 # ---------------------------------------------------------------------
+# Geography context
+# ---------------------------------------------------------------------
+@st.cache_data(show_spinner=False)
+def _load_geography_context() -> pd.DataFrame:
+    """Return canonical geography context at Taxi Zone × policy period."""
+    # Static geography comes from the analysis panel. The panel does NOT
+    # contain Mobility Environment assignments.
+    zone_context = load_analysis_panel(
+        columns=[
+            "taxi_zone_id",
+            "zone",
+            "borough",
+            "cbd_spatial_category",
+        ]
+    ).copy()
+
+    zone_context["taxi_zone_id"] = pd.to_numeric(
+        zone_context["taxi_zone_id"],
+        errors="coerce",
+    ).astype("Int64")
+
+    zone_context = (
+        zone_context
+        .dropna(subset=["taxi_zone_id"])
+        [
+            [
+                "taxi_zone_id",
+                "zone",
+                "borough",
+                "cbd_spatial_category",
+            ]
+        ]
+        .drop_duplicates()
+    )
+
+    if zone_context.duplicated("taxi_zone_id").any():
+        raise ValueError(
+            "Static geography is not unique by Taxi Zone."
+        )
+
+    zone_context["policy_geography"] = (
+        zone_context["cbd_spatial_category"]
+        .astype("string")
+        .str.lower()
+        .map(POLICY_GEOGRAPHY_MAP)
+        .fillna("Unknown")
+    )
+
+    # Mobility Environment is a separate canonical artifact and is
+    # period-specific. Preserve that contract rather than inventing a
+    # date-level field in the analysis panel.
+    assignments = (
+        load_mobility_regime_cluster_assignments()
+        [
+            [
+                "taxi_zone_id",
+                "pre_post_cp",
+                "cluster_label",
+            ]
+        ]
+        .drop_duplicates()
+        .copy()
+    )
+
+    assignments["taxi_zone_id"] = pd.to_numeric(
+        assignments["taxi_zone_id"],
+        errors="coerce",
+    ).astype("Int64")
+    assignments["cluster_label"] = pd.to_numeric(
+        assignments["cluster_label"],
+        errors="coerce",
+    ).astype("Int64")
+    assignments["pre_post_cp"] = (
+        assignments["pre_post_cp"]
+        .astype(str)
+        .str.lower()
+    )
+
+    if assignments.duplicated(
+        [
+            "taxi_zone_id",
+            "pre_post_cp",
+        ]
+    ).any():
+        raise ValueError(
+            "Mobility Environment assignments are not unique at "
+            "Taxi Zone × policy period."
+        )
+
+    context = assignments.merge(
+        zone_context[
+            [
+                "taxi_zone_id",
+                "zone",
+                "borough",
+                "policy_geography",
+            ]
+        ],
+        on="taxi_zone_id",
+        how="left",
+        validate="many_to_one",
+    )
+
+    return context.rename(
+        columns={
+            "cluster_label": "mobility_regime_cluster_label",
+        }
+    ).reset_index(drop=True)
+
+
+def _taxi_zone_lookup(
+    frame: pd.DataFrame,
+) -> dict[int, str]:
+    """Return stable reader-facing Taxi Zone labels."""
+    zones = (
+        frame[
+            [
+                "taxi_zone_id",
+                "zone",
+                "borough",
+            ]
+        ]
+        .dropna(
+            subset=["taxi_zone_id", "zone"]
+        )
+        .drop_duplicates("taxi_zone_id")
+        .copy()
+    )
+
+    lookup: dict[int, str] = {}
+
+    for row in zones.itertuples(index=False):
+        zone_id = int(row.taxi_zone_id)
+        zone = str(row.zone)
+        borough = (
+            ""
+            if pd.isna(row.borough)
+            else str(row.borough)
+        )
+
+        lookup[zone_id] = (
+            f"{zone} · {borough}"
+            if borough
+            and borough not in {"Unknown", "EWR"}
+            else zone
+        )
+
+    return lookup
+
+
+def _geography_options(
+    frame: pd.DataFrame,
+    geography_scheme: str,
+) -> list[object]:
+    """Return values for exactly one geographic segmentation."""
+    if geography_scheme == ALL_GEOGRAPHIES:
+        return [ALL_GEOGRAPHIES]
+
+    if geography_scheme == "Taxi Zone":
+        lookup = _taxi_zone_lookup(frame)
+        return sorted(
+            lookup,
+            key=lambda zone_id: lookup[zone_id].lower(),
+        )
+
+    column = {
+        "Borough": "borough",
+        "Policy geography": "policy_geography",
+        "Mobility environment": "mobility_regime_cluster_label",
+    }[geography_scheme]
+
+    values = (
+        frame[column]
+        .dropna()
+        .drop_duplicates()
+        .tolist()
+    )
+
+    if geography_scheme == "Borough":
+        values = [
+            str(value)
+            for value in values
+            if str(value) not in {"Unknown", "EWR"}
+        ]
+
+        preferred = [
+            "Manhattan",
+            "Brooklyn",
+            "Queens",
+            "Bronx",
+            "Staten Island",
+        ]
+        ordered = [
+            value
+            for value in preferred
+            if value in values
+        ]
+
+        return [
+            *ordered,
+            *sorted(
+                value
+                for value in values
+                if value not in ordered
+            ),
+        ]
+
+    if geography_scheme == "Policy geography":
+        values = [
+            str(value)
+            for value in values
+            if str(value) != "Unknown"
+        ]
+        preferred = [
+            "CBD",
+            "Gateway + adjacent",
+            "Outside",
+        ]
+        return [
+            value
+            for value in preferred
+            if value in values
+        ]
+
+    return sorted(
+        [
+            int(value)
+            for value in values
+        ],
+        key=lambda value: (
+            format_mobility_regime_cluster_label(
+                value
+            ).lower()
+        ),
+    )
+
+
+def _geography_value_label(
+    frame: pd.DataFrame,
+    geography_scheme: str,
+    geography_value: object | None,
+) -> str:
+    """Format the active geography scope for reader-facing copy."""
+    if (
+        geography_scheme == ALL_GEOGRAPHIES
+        or geography_value is None
+    ):
+        return "All NYC"
+
+    if geography_scheme == "Mobility environment":
+        return format_mobility_regime_cluster_label(
+            int(geography_value)
+        )
+
+    if geography_scheme == "Taxi Zone":
+        return _taxi_zone_lookup(frame).get(
+            int(geography_value),
+            str(geography_value),
+        )
+
+    return str(geography_value)
+
+
+def _filter_geography(
+    frame: pd.DataFrame,
+    *,
+    geography_scheme: str,
+    geography_value: object | None,
+) -> pd.DataFrame:
+    """Apply one geography lens; spatial definitions are never stacked."""
+    if (
+        geography_scheme == ALL_GEOGRAPHIES
+        or geography_value is None
+    ):
+        return frame.copy()
+
+    column = {
+        "Borough": "borough",
+        "Policy geography": "policy_geography",
+        "Mobility environment": "mobility_regime_cluster_label",
+        "Taxi Zone": "taxi_zone_id",
+    }[geography_scheme]
+
+    if geography_scheme in {
+        "Mobility environment",
+        "Taxi Zone",
+    }:
+        mask = pd.to_numeric(
+            frame[column],
+            errors="coerce",
+        ).eq(int(geography_value))
+    else:
+        mask = (
+            frame[column]
+            .astype(str)
+            .eq(str(geography_value))
+        )
+
+    return frame.loc[mask].copy()
+
+
+# ---------------------------------------------------------------------
 # Data preparation
 # ---------------------------------------------------------------------
 @st.cache_data(show_spinner="Loading the stress-anomaly timeline...")
@@ -145,7 +480,7 @@ def _load_temporal_universe() -> pd.DataFrame:
     )
     if missing:
         raise ValueError(
-            "The 3.3.6 event universe is missing temporal-page columns: "
+            "The stress-anomaly event data are missing required columns: "
             + ", ".join(missing)
         )
 
@@ -156,7 +491,7 @@ def _load_temporal_universe() -> pd.DataFrame:
     )
     if frame["date"].isna().any():
         raise ValueError(
-            "The 3.3.6 event universe contains unparseable dates."
+            "The stress-anomaly event data contain unparseable dates."
         )
 
     frame[SELECTED_FINALIST_FLAG] = (
@@ -209,6 +544,36 @@ def _load_temporal_universe() -> pd.DataFrame:
         selected & ~congestion & ~demand,
         FAMILY_COLUMN,
     ] = "Unclassified"
+
+    frame["taxi_zone_id"] = pd.to_numeric(
+        frame["taxi_zone_id"],
+        errors="coerce",
+    ).astype("Int64")
+
+    if frame["taxi_zone_id"].isna().any():
+        raise ValueError(
+            "The stress-anomaly event data contain missing Taxi Zone IDs."
+        )
+
+    # WHY: Geography is attached to every eligible observation, not only
+    # anomalies, so incidence retains the correct denominator after filtering.
+    # Mobility Environment membership is period-specific, matching the
+    # canonical clustering artifact used elsewhere in the Showcase.
+    frame["pre_post_cp"] = np.where(
+        frame["date"].lt(pd.Timestamp(CP_START_DATE)),
+        "pre_cp",
+        "post_cp",
+    )
+
+    frame = frame.merge(
+        _load_geography_context(),
+        on=[
+            "taxi_zone_id",
+            "pre_post_cp",
+        ],
+        how="left",
+        validate="many_to_one",
+    )
 
     return frame
 
@@ -507,6 +872,8 @@ def _apply_saved_view() -> None:
     st.session_state["raw12_cadence"] = str(view["cadence"])
     st.session_state["raw12_time_scope"] = str(view["time_scope"])
     st.session_state["raw12_temporal_bucket"] = str(view["temporal_bucket"])
+    st.session_state["raw12_geography_scheme"] = str(view["geography_scheme"])
+    st.session_state["raw12_geography_value"] = view["geography_value"]
     st.session_state["raw12_start_date"] = view["start_date"]
     st.session_state["raw12_end_date"] = view["end_date"]
 
@@ -572,6 +939,20 @@ post_row = period_summary.loc[
 peak_row = monthly_summary.loc[
     monthly_summary["incidence_per_1k"].idxmax()
 ]
+peak_family_counts = {
+    family: int(peak_row[family])
+    for family in FAMILY_ORDER
+}
+peak_leading_family = max(
+    peak_family_counts,
+    key=peak_family_counts.get,
+)
+peak_family_total = sum(peak_family_counts.values())
+peak_leading_share = (
+    peak_family_counts[peak_leading_family] / peak_family_total
+    if peak_family_total
+    else np.nan
+)
 
 overall_incidence = (
     selected_event_count
@@ -591,6 +972,10 @@ congestion_post_change = _relative_change(
     float(pre_row["Congestion-only_per_1k"]),
 )
 
+overall_direction = "higher" if overall_post_change >= 0 else "lower"
+demand_direction = "rose" if demand_post_change >= 0 else "fell"
+congestion_direction = "rose" if congestion_post_change >= 0 else "fell"
+
 
 # ---------------------------------------------------------------------
 # Frozen answer
@@ -599,12 +984,33 @@ st.caption("STRESS ANOMALY TEMPORAL EXPLORER")
 st.title("When did stress anomalies intensify—and what kinds occurred?")
 st.markdown(
     (
-        "The final production surface contains "
-        f"**{selected_event_count:,} stress anomalies** across "
-        f"**{eligible_event_count:,} eligible Taxi Zone × date × daypart "
-        "observations**. Each event is classified as congestion-only, "
-        "demand-only, or both."
+        f"Across the study period, **{selected_event_count:,} stress anomalies** were "
+        f"identified among **{eligible_event_count:,} eligible Taxi Zone × date × "
+        "daypart observations**. Rather than treating every unusual event as the same, "
+        "this page separates **congestion-only**, **demand-only**, and **both** so we can "
+        "see whether the frequency and mix of mobility stress changed through time."
     )
+)
+
+st.markdown("### Monthly stress-anomaly incidence")
+st.markdown(
+    "The opening chart shows **incidence per 1,000 eligible observations**, which keeps "
+    "months with different amounts of usable data comparable. Column height is total "
+    "stress incidence; the stacked segments show which mutually exclusive stress family "
+    "made up that incidence."
+)
+hero_figure = _build_timeline_figure(
+    monthly_summary,
+    period_column="month",
+    cadence="Monthly",
+    families=FAMILY_ORDER,
+    measure="Incidence per 1,000",
+    show_peak_annotation=True,
+)
+st.plotly_chart(
+    hero_figure,
+    width="stretch",
+    config={"displayModeBar": False},
 )
 
 card1, card2, card3, card4 = st.columns(4)
@@ -631,490 +1037,605 @@ card4.metric(
     help="Relative change in congestion-only incidence from Pre-CP to Post-CP.",
 )
 
-st.markdown("### Monthly stress-anomaly incidence")
-hero_figure = _build_timeline_figure(
-    monthly_summary,
-    period_column="month",
-    cadence="Monthly",
-    families=FAMILY_ORDER,
-    measure="Incidence per 1,000",
-    show_peak_annotation=True,
+render_chart_insight(
+    "The overall rate changed less than the mix of stress. "
+    f"Stress-anomaly incidence was **{abs(overall_post_change):.1f}% "
+    f"{overall_direction}** after congestion pricing began. "
+    f"Demand-only incidence **{demand_direction} "
+    f"{abs(demand_post_change):.1f}%**, while congestion-only incidence "
+    f"**{congestion_direction} {abs(congestion_post_change):.1f}%**. "
+    f"The highest concentration occurred in **{peak_row['month']:%B %Y}**; "
+    f"**{peak_leading_family}** was the largest family that month "
+    f"({peak_leading_share:.1%} of stress anomalies)."
 )
-st.plotly_chart(
-    hero_figure,
-    width="stretch",
-    config={"displayModeBar": False},
-)
-
-st.markdown(
-    f"""
-    <div class="soft-callout">
-        <strong>The overall rate changed less than the kind of stress.</strong><br>
-        Stress-anomaly incidence was {abs(overall_post_change):.1f}% higher after congestion pricing began, but that modest change masks a reversal in composition. Demand-only incidence rose {abs(demand_post_change):.1f}%, while congestion-only incidence fell {abs(congestion_post_change):.1f}%. The highest concentration occurred in {peak_row['month']:%B %Y}, when demand-only stress accounted for the largest share of events.
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-st.caption(
-    "The chart describes timing and composition around the January 2025 launch; "
-    "it does not by itself establish that congestion pricing caused the changes."
-)
-
 
 # ---------------------------------------------------------------------
 # Custom temporal explorer
 # ---------------------------------------------------------------------
-st.divider()
-st.markdown("### Explore this view")
-st.write(
-    "Change the stress families, measure, time resolution, date scope, or "
-    "daypart. Saved views apply immediately."
-)
-
-data_start_date = event_universe["date"].min().date()
-data_end_date = event_universe["date"].max().date()
-
-default_view = SAVED_VIEWS["Full trajectory"]
-st.session_state.setdefault("raw12_saved_view", "Full trajectory")
-st.session_state.setdefault("raw12_families", list(default_view["families"]))
-st.session_state.setdefault("raw12_measure", str(default_view["measure"]))
-st.session_state.setdefault("raw12_cadence", str(default_view["cadence"]))
-st.session_state.setdefault("raw12_time_scope", str(default_view["time_scope"]))
-st.session_state.setdefault(
-    "raw12_temporal_bucket",
-    str(default_view["temporal_bucket"]),
-)
-st.session_state.setdefault("raw12_start_date", data_start_date)
-st.session_state.setdefault("raw12_end_date", data_end_date)
-
-# Reapply named presets once when their definitions change so a hot-reloaded
-# session does not retain an older preset's narrower date window.
-if (
-    st.session_state.get("raw12_preset_config_version")
-    != PRESET_CONFIG_VERSION
-):
-    if st.session_state.get("raw12_saved_view") in SAVED_VIEWS:
-        _apply_saved_view()
-    st.session_state[
-        "raw12_preset_config_version"
-    ] = PRESET_CONFIG_VERSION
-
-st.selectbox(
-    "Saved view",
-    options=[*SAVED_VIEWS.keys(), "Custom"],
-    key="raw12_saved_view",
-    on_change=_apply_saved_view,
-)
-
-active_saved_view = str(
-    st.session_state.get("raw12_saved_view", "Custom")
-)
-if active_saved_view in SAVED_VIEW_DESCRIPTIONS:
-    st.caption(SAVED_VIEW_DESCRIPTIONS[active_saved_view])
-
-control1, control2, control3 = st.columns([2, 1, 1])
-
-with control1:
-    selected_families = st.multiselect(
-        "Stress families",
-        options=FAMILY_ORDER,
-        key="raw12_families",
-        on_change=_mark_custom_view,
-        help=(
-            "The three families are mutually exclusive. Select one or more "
-            "segments to include in the chart."
-        ),
-    )
-
-with control2:
-    selected_measure = st.selectbox(
-        "Measure",
-        options=MEASURE_OPTIONS,
-        key="raw12_measure",
-        on_change=_mark_custom_view,
-    )
-
-with control3:
-    selected_cadence = st.selectbox(
-        "Time resolution",
-        options=CADENCE_OPTIONS,
-        key="raw12_cadence",
-        on_change=_mark_custom_view,
-    )
-
-control4, control5 = st.columns(2)
-
-with control4:
-    selected_time_scope = st.selectbox(
-        "Time scope",
-        options=TIME_SCOPE_OPTIONS,
-        key="raw12_time_scope",
-        on_change=_mark_custom_view,
-    )
-
-with control5:
-    selected_temporal_bucket = st.selectbox(
-        "Temporal bucket",
-        options=[ALL_TEMPORAL_BUCKETS, *TEMPORAL_BUCKET_ORDER],
-        format_func=_format_temporal_bucket,
-        key="raw12_temporal_bucket",
-        on_change=_mark_custom_view,
-    )
-
-if selected_time_scope == "Custom dates":
-    date1, date2 = st.columns(2)
-    with date1:
-        selected_start_date = st.date_input(
-            "Start date",
-            min_value=data_start_date,
-            max_value=data_end_date,
-            key="raw12_start_date",
-            on_change=_mark_custom_view,
-        )
-    with date2:
-        selected_end_date = st.date_input(
-            "End date",
-            min_value=data_start_date,
-            max_value=data_end_date,
-            key="raw12_end_date",
-            on_change=_mark_custom_view,
-        )
-elif selected_time_scope == "Pre-CP":
-    selected_start_date = data_start_date
-    selected_end_date = (CP_START_DATE - pd.Timedelta(days=1)).date()
-elif selected_time_scope == "Post-CP":
-    selected_start_date = CP_START_DATE.date()
-    selected_end_date = data_end_date
-else:
-    selected_start_date = data_start_date
-    selected_end_date = data_end_date
-
-if not selected_families:
-    st.warning("Select at least one stress family to render the explorer.")
-    st.stop()
-
-if (
-    selected_measure == "Composition share"
-    and len(selected_families) == 1
-):
-    st.info(
-        "Composition share requires at least two stress families. Select another "
-        "family or switch the measure to Incidence per 1,000."
-    )
-    st.stop()
-
-if selected_start_date > selected_end_date:
-    st.warning("The start date must be on or before the end date.")
-    st.stop()
-
-filtered_universe = event_universe[
-    event_universe["date"].between(
-        pd.Timestamp(selected_start_date),
-        pd.Timestamp(selected_end_date),
-    )
-].copy()
-
-if selected_temporal_bucket != ALL_TEMPORAL_BUCKETS:
-    filtered_universe = filtered_universe[
-        filtered_universe["temporal_bucket"].eq(selected_temporal_bucket)
-    ].copy()
-
-if filtered_universe.empty:
-    st.info("No eligible observations match this custom view.")
-    st.stop()
-
-period_column = "month" if selected_cadence == "Monthly" else "week"
-custom_summary = _build_group_summary(
-    filtered_universe,
-    group_column=period_column,
-)
-
-custom_selected_count = int(
-    custom_summary[selected_families].sum(axis=1).sum()
-)
-custom_eligible_count = int(
-    filtered_universe[EVENT_ID_COLUMN].nunique()
-)
-custom_incidence = (
-    custom_selected_count
-    / custom_eligible_count
-    * 1_000
-)
-
-if custom_selected_count == 0:
-    st.info(
-        "No stress anomalies from the selected families match this custom view."
-    )
-    st.stop()
-
-custom_family_totals = custom_summary[selected_families].sum(axis=0)
-leading_family = str(custom_family_totals.idxmax())
-leading_family_count = int(custom_family_totals.loc[leading_family])
-leading_family_share = (
-    leading_family_count
-    / custom_selected_count
-)
-
-custom_total_by_period = (
-    custom_summary[
-        [f"{family}_per_1k" for family in selected_families]
-    ].sum(axis=1)
-)
-peak_index = custom_total_by_period.idxmax()
-peak_period = pd.Timestamp(custom_summary.loc[peak_index, period_column])
-peak_incidence = float(custom_total_by_period.loc[peak_index])
-
-period_changes = custom_total_by_period.diff()
-largest_increase_period: pd.Timestamp | None = None
-largest_increase_value = np.nan
-if period_changes.notna().any():
-    largest_increase_index = period_changes.idxmax()
-    largest_increase_value = float(
-        period_changes.loc[largest_increase_index]
-    )
-    largest_increase_period = pd.Timestamp(
-        custom_summary.loc[
-            largest_increase_index,
-            period_column,
-        ]
-    )
-
-period_day_counts = (
-    filtered_universe.groupby(
-        "policy_period",
-        observed=True,
-    )["date"]
-    .nunique()
-)
-scoped_period_summary = _build_group_summary(
-    filtered_universe,
-    group_column="policy_period",
-)
-
-pre_post_sentence = ""
-if (
-    {"Pre-CP", "Post-CP"}.issubset(
-        set(scoped_period_summary["policy_period"])
-    )
-    and int(period_day_counts.get("Pre-CP", 0)) >= 28
-    and int(period_day_counts.get("Post-CP", 0)) >= 28
-):
-    scoped_pre = scoped_period_summary.loc[
-        scoped_period_summary["policy_period"].eq("Pre-CP")
-    ].iloc[0]
-    scoped_post = scoped_period_summary.loc[
-        scoped_period_summary["policy_period"].eq("Post-CP")
-    ].iloc[0]
-    scoped_pre_incidence = float(
-        scoped_pre[
-            [f"{family}_per_1k" for family in selected_families]
-        ].sum()
-    )
-    scoped_post_incidence = float(
-        scoped_post[
-            [f"{family}_per_1k" for family in selected_families]
-        ].sum()
-    )
-    scoped_post_change = _relative_change(
-        scoped_post_incidence,
-        scoped_pre_incidence,
-    )
-
-    if np.isfinite(scoped_post_change):
-        direction = "higher" if scoped_post_change >= 0 else "lower"
-        pre_post_sentence = (
-            f" Within this scope, Post-CP incidence was "
-            f"{abs(scoped_post_change):.1f}% {direction} than Pre-CP incidence."
-        )
-
-scope_start_label = pd.Timestamp(selected_start_date).strftime("%b %d, %Y")
-scope_end_label = pd.Timestamp(selected_end_date).strftime("%b %d, %Y")
-bucket_label = _format_temporal_bucket(selected_temporal_bucket)
-
-largest_increase_sentence = ""
-if (
-    largest_increase_period is not None
-    and np.isfinite(largest_increase_value)
-    and largest_increase_value > 0
-):
-    change_label = (
-        "month-over-month"
-        if selected_cadence == "Monthly"
-        else "week-over-week"
-    )
-    largest_increase_sentence = (
-        f" The largest {change_label} rise led into "
-        f"{_period_label(largest_increase_period, selected_cadence)}, "
-        f"increasing by {largest_increase_value:.1f} per 1,000."
-    )
-
-summary1, summary2, summary3, summary4 = st.columns(4)
-summary1.metric("Stress anomalies", f"{custom_selected_count:,}")
-summary2.metric("Incidence", f"{custom_incidence:.1f} per 1,000")
-with summary3:
-    if selected_cadence == "Weekly":
-        st.markdown(
-            """
-            <style>
-            div[data-testid="stColumn"]:has(#raw12-weekly-peak-card)
-            div[data-testid="stMetricValue"] {
-                font-size: 1.25rem !important;
-                line-height: 1.15 !important;
-                white-space: normal !important;
-            }
-            </style>
-            <span id="raw12-weekly-peak-card"></span>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    st.metric(
-        "Peak period",
-        _period_label(peak_period, selected_cadence),
-        help=f"{peak_incidence:.1f} selected-family events per 1,000.",
-    )
-summary4.metric(
-    "Leading family",
-    leading_family,
-    help=(
-        f"{leading_family_count:,} events, or "
-        f"{leading_family_share:.1%} of selected-family stress anomalies."
+with exploration_section(
+    key="raw12_exploration_area",
+    title="Explore stress-anomaly timing",
+    description=(
+        "Change the stress families, geography, measure, time resolution, "
+        "date scope, or time-of-week bucket to see when and where different "
+        "forms of mobility stress became more or less common."
     ),
-)
+):
+    data_start_date = event_universe["date"].min().date()
+    data_end_date = event_universe["date"].max().date()
 
-bucket_context = (
-    "all temporal buckets"
-    if selected_temporal_bucket == ALL_TEMPORAL_BUCKETS
-    else bucket_label
-)
-st.markdown(
-    f"""
-    <div class="soft-callout">
-        <strong>What stands out in this view.</strong><br>
-        From {scope_start_label} through {scope_end_label}, {custom_selected_count:,} selected-family stress anomalies occurred across {bucket_context}, an incidence of {custom_incidence:.1f} per 1,000 eligible observations. {leading_family} was the leading family, accounting for {leading_family_share:.1%} of the selected events. Incidence peaked in {_period_label(peak_period, selected_cadence)} at {peak_incidence:.1f} per 1,000.{largest_increase_sentence}{pre_post_sentence}
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+    default_view = SAVED_VIEWS["Full trajectory"]
+    st.session_state.setdefault("raw12_saved_view", "Full trajectory")
+    st.session_state.setdefault("raw12_families", list(default_view["families"]))
+    st.session_state.setdefault("raw12_measure", str(default_view["measure"]))
+    st.session_state.setdefault("raw12_cadence", str(default_view["cadence"]))
+    st.session_state.setdefault("raw12_time_scope", str(default_view["time_scope"]))
+    st.session_state.setdefault(
+        "raw12_temporal_bucket",
+        str(default_view["temporal_bucket"]),
+    )
+    st.session_state.setdefault(
+        "raw12_geography_scheme",
+        str(default_view["geography_scheme"]),
+    )
+    st.session_state.setdefault(
+        "raw12_geography_value",
+        default_view["geography_value"],
+    )
+    st.session_state.setdefault("raw12_start_date", data_start_date)
+    st.session_state.setdefault("raw12_end_date", data_end_date)
 
-chart_measure_label = (
-    "incidence"
-    if selected_measure == "Incidence per 1,000"
-    else "composition"
-)
-st.markdown(
-    f"### {selected_cadence} stress-anomaly {chart_measure_label}"
-)
-st.caption(
-    f"{scope_start_label}–{scope_end_label} · {bucket_label} · "
-    + ", ".join(selected_families)
-)
+    # Reapply named presets once when their definitions change so a hot-reloaded
+    # session does not retain an older preset's narrower date window.
+    if (
+        st.session_state.get("raw12_preset_config_version")
+        != PRESET_CONFIG_VERSION
+    ):
+        if st.session_state.get("raw12_saved_view") in SAVED_VIEWS:
+            _apply_saved_view()
+        st.session_state[
+            "raw12_preset_config_version"
+        ] = PRESET_CONFIG_VERSION
 
-custom_figure = _build_timeline_figure(
-    custom_summary,
-    period_column=period_column,
-    cadence=selected_cadence,
-    families=selected_families,
-    measure=selected_measure,
-    show_peak_annotation=False,
-)
-st.plotly_chart(
-    custom_figure,
-    width="stretch",
-    config={"displayModeBar": False},
-)
+    st.selectbox(
+        "Saved view",
+        options=[*SAVED_VIEWS.keys(), "Custom"],
+        key="raw12_saved_view",
+        on_change=_apply_saved_view,
+    )
 
-with st.expander("View underlying data", expanded=False):
-    display_data = custom_summary[
-        [
-            period_column,
-            "eligible_observations",
-            *selected_families,
-            *[
-                f"{family}_per_1k"
-                for family in selected_families
-            ],
-        ]
+    active_saved_view = str(
+        st.session_state.get("raw12_saved_view", "Custom")
+    )
+    if active_saved_view in SAVED_VIEW_DESCRIPTIONS:
+        st.caption(SAVED_VIEW_DESCRIPTIONS[active_saved_view])
+
+    control1, control2, control3 = st.columns([2, 1, 1])
+
+    with control1:
+        selected_families = st.multiselect(
+            "Stress families",
+            options=FAMILY_ORDER,
+            key="raw12_families",
+            on_change=_mark_custom_view,
+            help=(
+                "The families are mutually exclusive: Congestion-only has a "
+                "congestion-oriented signal without a positive demand shock; "
+                "Demand-only has a positive demand shock without a congestion "
+                "signal; Both has both signals."
+            ),
+        )
+
+    with control2:
+        selected_measure = st.selectbox(
+            "Measure",
+            options=MEASURE_OPTIONS,
+            key="raw12_measure",
+            on_change=_mark_custom_view,
+        )
+
+    with control3:
+        selected_cadence = st.selectbox(
+            "Time resolution",
+            options=CADENCE_OPTIONS,
+            key="raw12_cadence",
+            on_change=_mark_custom_view,
+        )
+
+    control4, control5 = st.columns(2)
+
+    with control4:
+        selected_time_scope = st.selectbox(
+            "Time scope",
+            options=TIME_SCOPE_OPTIONS,
+            key="raw12_time_scope",
+            on_change=_mark_custom_view,
+        )
+
+    with control5:
+        selected_temporal_bucket = st.selectbox(
+            "Temporal bucket",
+            options=[ALL_TEMPORAL_BUCKETS, *TEMPORAL_BUCKET_ORDER],
+            format_func=_format_temporal_bucket,
+            key="raw12_temporal_bucket",
+            on_change=_mark_custom_view,
+        )
+
+    geo1, geo2 = st.columns(2)
+
+    with geo1:
+        selected_geography_scheme = st.selectbox(
+            "Geographic segmentation",
+            options=GEOGRAPHY_SCHEMES,
+            key="raw12_geography_scheme",
+            on_change=_mark_custom_view,
+            help=(
+                "Choose one spatial lens at a time. Borough, policy geography, "
+                "mobility environment, and Taxi Zone are alternatives and are "
+                "never stacked."
+            ),
+        )
+
+    geography_value_options = _geography_options(
+        event_universe,
+        selected_geography_scheme,
+    )
+
+    with geo2:
+        if selected_geography_scheme == ALL_GEOGRAPHIES:
+            selected_geography_value = None
+            st.session_state["raw12_geography_value"] = None
+            st.caption(
+                "All NYC Taxi Zones are included. Choose one geographic "
+                "segmentation to drill down."
+            )
+        else:
+            if (
+                st.session_state.get("raw12_geography_value")
+                not in geography_value_options
+            ):
+                st.session_state["raw12_geography_value"] = (
+                    geography_value_options[0]
+                    if geography_value_options
+                    else None
+                )
+
+            if selected_geography_scheme == "Mobility environment":
+                geography_format = (
+                    lambda value: format_mobility_regime_cluster_label(
+                        int(value)
+                    )
+                )
+            elif selected_geography_scheme == "Taxi Zone":
+                zone_lookup = _taxi_zone_lookup(
+                    event_universe
+                )
+                geography_format = (
+                    lambda value: zone_lookup.get(
+                        int(value),
+                        str(value),
+                    )
+                )
+            else:
+                geography_format = str
+
+            selected_geography_value = st.selectbox(
+                "Segment",
+                options=geography_value_options,
+                format_func=geography_format,
+                key="raw12_geography_value",
+                on_change=_mark_custom_view,
+                help=(
+                    "Mobility-environment membership is policy-period aware, so a Taxi "
+                    "Zone uses its canonical Pre-CP or Post-CP assignment."
+                    if selected_geography_scheme == "Mobility environment"
+                    else None
+                ),
+            )
+
+    if selected_time_scope == "Custom dates":
+        date1, date2 = st.columns(2)
+        with date1:
+            selected_start_date = st.date_input(
+                "Start date",
+                min_value=data_start_date,
+                max_value=data_end_date,
+                key="raw12_start_date",
+                on_change=_mark_custom_view,
+            )
+        with date2:
+            selected_end_date = st.date_input(
+                "End date",
+                min_value=data_start_date,
+                max_value=data_end_date,
+                key="raw12_end_date",
+                on_change=_mark_custom_view,
+            )
+    elif selected_time_scope == "Pre-CP":
+        selected_start_date = data_start_date
+        selected_end_date = (CP_START_DATE - pd.Timedelta(days=1)).date()
+    elif selected_time_scope == "Post-CP":
+        selected_start_date = CP_START_DATE.date()
+        selected_end_date = data_end_date
+    else:
+        selected_start_date = data_start_date
+        selected_end_date = data_end_date
+
+    if not selected_families:
+        st.warning("Select at least one stress family to render the explorer.")
+        st.stop()
+
+    if (
+        selected_measure == "Composition share"
+        and len(selected_families) == 1
+    ):
+        st.info(
+            "Composition share requires at least two stress families. Select another "
+            "family or switch the measure to Incidence per 1,000."
+        )
+        st.stop()
+
+    if selected_start_date > selected_end_date:
+        st.warning("The start date must be on or before the end date.")
+        st.stop()
+
+    filtered_universe = event_universe[
+        event_universe["date"].between(
+            pd.Timestamp(selected_start_date),
+            pd.Timestamp(selected_end_date),
+        )
     ].copy()
 
-    display_data[period_column] = pd.to_datetime(
-        display_data[period_column]
-    ).dt.strftime(
-        "%b %Y"
-        if selected_cadence == "Monthly"
-        else "%b %d, %Y"
+    if selected_temporal_bucket != ALL_TEMPORAL_BUCKETS:
+        filtered_universe = filtered_universe[
+            filtered_universe["temporal_bucket"].eq(selected_temporal_bucket)
+        ].copy()
+
+    filtered_universe = _filter_geography(
+        filtered_universe,
+        geography_scheme=selected_geography_scheme,
+        geography_value=selected_geography_value,
     )
 
-    selected_period_totals = display_data[
-        selected_families
-    ].sum(axis=1)
-    for family in selected_families:
-        rate_column = f"{family}_per_1k"
-        display_data[rate_column] = display_data[rate_column].round(2)
+    geography_label = _geography_value_label(
+        event_universe,
+        selected_geography_scheme,
+        selected_geography_value,
+    )
 
-        if selected_measure == "Composition share":
-            display_data[
-                f"{family}_composition_share"
-            ] = np.where(
-                selected_period_totals.gt(0),
-                display_data[family]
-                / selected_period_totals,
-                np.nan,
+    if filtered_universe.empty:
+        st.info("No eligible observations match this custom view.")
+        st.stop()
+
+    period_column = "month" if selected_cadence == "Monthly" else "week"
+    custom_summary = _build_group_summary(
+        filtered_universe,
+        group_column=period_column,
+    )
+
+    custom_selected_count = int(
+        custom_summary[selected_families].sum(axis=1).sum()
+    )
+    custom_eligible_count = int(
+        filtered_universe[EVENT_ID_COLUMN].nunique()
+    )
+    custom_incidence = (
+        custom_selected_count
+        / custom_eligible_count
+        * 1_000
+    )
+
+    if custom_selected_count == 0:
+        st.info(
+            "No stress anomalies from the selected families match this custom view."
+        )
+        st.stop()
+
+    custom_family_totals = custom_summary[selected_families].sum(axis=0)
+    leading_family = str(custom_family_totals.idxmax())
+    leading_family_count = int(custom_family_totals.loc[leading_family])
+    leading_family_share = (
+        leading_family_count
+        / custom_selected_count
+    )
+
+    custom_total_by_period = (
+        custom_summary[
+            [f"{family}_per_1k" for family in selected_families]
+        ].sum(axis=1)
+    )
+    peak_index = custom_total_by_period.idxmax()
+    peak_period = pd.Timestamp(custom_summary.loc[peak_index, period_column])
+    peak_incidence = float(custom_total_by_period.loc[peak_index])
+
+    period_changes = custom_total_by_period.diff()
+    largest_increase_period: pd.Timestamp | None = None
+    largest_increase_value = np.nan
+    if period_changes.notna().any():
+        largest_increase_index = period_changes.idxmax()
+        largest_increase_value = float(
+            period_changes.loc[largest_increase_index]
+        )
+        largest_increase_period = pd.Timestamp(
+            custom_summary.loc[
+                largest_increase_index,
+                period_column,
+            ]
+        )
+
+    period_day_counts = (
+        filtered_universe.groupby(
+            "policy_period",
+            observed=True,
+        )["date"]
+        .nunique()
+    )
+    scoped_period_summary = _build_group_summary(
+        filtered_universe,
+        group_column="policy_period",
+    )
+
+    pre_post_sentence = ""
+    if (
+        {"Pre-CP", "Post-CP"}.issubset(
+            set(scoped_period_summary["policy_period"])
+        )
+        and int(period_day_counts.get("Pre-CP", 0)) >= 28
+        and int(period_day_counts.get("Post-CP", 0)) >= 28
+    ):
+        scoped_pre = scoped_period_summary.loc[
+            scoped_period_summary["policy_period"].eq("Pre-CP")
+        ].iloc[0]
+        scoped_post = scoped_period_summary.loc[
+            scoped_period_summary["policy_period"].eq("Post-CP")
+        ].iloc[0]
+        scoped_pre_incidence = float(
+            scoped_pre[
+                [f"{family}_per_1k" for family in selected_families]
+            ].sum()
+        )
+        scoped_post_incidence = float(
+            scoped_post[
+                [f"{family}_per_1k" for family in selected_families]
+            ].sum()
+        )
+        scoped_post_change = _relative_change(
+            scoped_post_incidence,
+            scoped_pre_incidence,
+        )
+
+        if np.isfinite(scoped_post_change):
+            direction = "higher" if scoped_post_change >= 0 else "lower"
+            pre_post_sentence = (
+                f" Within this scope, Post-CP incidence was "
+                f"{abs(scoped_post_change):.1f}% {direction} than Pre-CP incidence."
             )
 
-    rename_columns = {
-        period_column: (
-            "Month"
+    scope_start_label = pd.Timestamp(selected_start_date).strftime("%b %d, %Y")
+    scope_end_label = pd.Timestamp(selected_end_date).strftime("%b %d, %Y")
+    bucket_label = _format_temporal_bucket(selected_temporal_bucket)
+
+    largest_increase_sentence = ""
+    if (
+        largest_increase_period is not None
+        and np.isfinite(largest_increase_value)
+        and largest_increase_value > 0
+    ):
+        change_label = (
+            "month-over-month"
             if selected_cadence == "Monthly"
-            else "Week starting"
-        ),
-        "eligible_observations": "Eligible observations",
-    }
-    for family in selected_families:
-        rename_columns[family] = f"{family} events"
-        rename_columns[
-            f"{family}_per_1k"
-        ] = f"{family} per 1,000"
-        rename_columns[
-            f"{family}_composition_share"
-        ] = f"{family} composition share"
+            else "week-over-week"
+        )
+        largest_increase_sentence = (
+            f" The largest {change_label} rise led into "
+            f"{_period_label(largest_increase_period, selected_cadence)}, "
+            f"increasing by {largest_increase_value:.1f} per 1,000."
+        )
 
-    display_data = display_data.rename(columns=rename_columns)
-
-    st.dataframe(
-        display_data,
-        width="stretch",
-        hide_index=True,
-        column_config={
-            column: st.column_config.NumberColumn(
-                column,
-                format="percent",
+    summary1, summary2, summary3, summary4 = st.columns(4)
+    summary1.metric("Stress anomalies", f"{custom_selected_count:,}")
+    summary2.metric("Incidence", f"{custom_incidence:.1f} per 1,000")
+    with summary3:
+        if selected_cadence == "Weekly":
+            st.markdown(
+                """
+                <style>
+                div[data-testid="stColumn"]:has(#raw12-weekly-peak-card)
+                div[data-testid="stMetricValue"] {
+                    font-size: 1.25rem !important;
+                    line-height: 1.15 !important;
+                    white-space: normal !important;
+                }
+                </style>
+                <span id="raw12-weekly-peak-card"></span>
+                """,
+                unsafe_allow_html=True,
             )
-            for column in display_data.columns
-            if column.endswith("composition share")
-        },
+
+        st.metric(
+            "Peak period",
+            _period_label(peak_period, selected_cadence),
+            help=f"{peak_incidence:.1f} selected-family events per 1,000.",
+        )
+    summary4.metric(
+        "Leading family",
+        leading_family,
+        help=(
+            f"{leading_family_count:,} events, or "
+            f"{leading_family_share:.1%} of selected-family stress anomalies."
+        ),
     )
+
+    bucket_context = (
+        "all temporal buckets"
+        if selected_temporal_bucket == ALL_TEMPORAL_BUCKETS
+        else bucket_label
+    )
+    render_chart_insight(
+        f"For **{geography_label}**, from **{scope_start_label} through "
+        f"{scope_end_label}**, **{custom_selected_count:,} stress anomalies** "
+        f"from the selected families occurred across {bucket_context}, an incidence of "
+        f"**{custom_incidence:.1f} per 1,000** eligible observations. "
+        f"**{leading_family}** was the leading family "
+        f"({leading_family_share:.1%} of selected events). Incidence peaked in "
+        f"**{_period_label(peak_period, selected_cadence)}** at "
+        f"**{peak_incidence:.1f} per 1,000**."
+        f"{largest_increase_sentence}{pre_post_sentence}"
+    )
+
+    chart_measure_label = (
+        "incidence"
+        if selected_measure == "Incidence per 1,000"
+        else "composition"
+    )
+    st.markdown(
+        f"### {selected_cadence} stress-anomaly {chart_measure_label}"
+    )
+    st.caption(
+        f"{geography_label} · {scope_start_label}–{scope_end_label} · "
+        f"{bucket_label} · " + ", ".join(selected_families)
+    )
+
+    custom_figure = _build_timeline_figure(
+        custom_summary,
+        period_column=period_column,
+        cadence=selected_cadence,
+        families=selected_families,
+        measure=selected_measure,
+        show_peak_annotation=False,
+    )
+    st.plotly_chart(
+        custom_figure,
+        width="stretch",
+        config={"displayModeBar": False},
+    )
+
+    with st.expander("View underlying data", expanded=False):
+        display_data = custom_summary[
+            [
+                period_column,
+                "eligible_observations",
+                *selected_families,
+                *[
+                    f"{family}_per_1k"
+                    for family in selected_families
+                ],
+            ]
+        ].copy()
+
+        display_data[period_column] = pd.to_datetime(
+            display_data[period_column]
+        ).dt.strftime(
+            "%b %Y"
+            if selected_cadence == "Monthly"
+            else "%b %d, %Y"
+        )
+
+        selected_period_totals = display_data[
+            selected_families
+        ].sum(axis=1)
+        for family in selected_families:
+            rate_column = f"{family}_per_1k"
+            display_data[rate_column] = display_data[rate_column].round(2)
+
+            if selected_measure == "Composition share":
+                display_data[
+                    f"{family}_composition_share"
+                ] = np.where(
+                    selected_period_totals.gt(0),
+                    display_data[family]
+                    / selected_period_totals,
+                    np.nan,
+                )
+
+        rename_columns = {
+            period_column: (
+                "Month"
+                if selected_cadence == "Monthly"
+                else "Week starting"
+            ),
+            "eligible_observations": "Eligible observations",
+        }
+        for family in selected_families:
+            rename_columns[family] = f"{family} events"
+            rename_columns[
+                f"{family}_per_1k"
+            ] = f"{family} per 1,000"
+            rename_columns[
+                f"{family}_composition_share"
+            ] = f"{family} composition share"
+
+        display_data = display_data.rename(columns=rename_columns)
+
+        st.dataframe(
+            display_data,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                column: st.column_config.NumberColumn(
+                    column,
+                    format="percent",
+                )
+                for column in display_data.columns
+                if column.endswith("composition share")
+            },
+        )
+
 
 
 # ---------------------------------------------------------------------
-# Reading guide
+# Closing synthesis
 # ---------------------------------------------------------------------
 st.divider()
-st.markdown("### How to read this view")
+
+st.markdown("### What this page establishes")
 st.markdown(
-    """
-    - **Column height:** total incidence for the displayed stress families, or 100% of their composition when Composition share is selected.
-    - **Column segments:** mutually exclusive congestion-only, demand-only, and both families.
-    - **Incidence:** distinct stress anomalies per 1,000 eligible Taxi Zone × date × daypart observations in the same temporal scope.
-    - **Dashed line:** January 5, 2025, when congestion pricing began.
-    - **Hover:** the selected family’s incidence or composition share and event count.
-    """
+    "Mobility stress did not simply become uniformly more or less common. Its timing and "
+    "composition changed independently: the overall anomaly rate can move modestly while "
+    "the balance between demand-only, congestion-only, and combined stress changes much "
+    "more. Separating incidence from composition therefore reveals shifts that a single "
+    "anomaly count would miss."
 )
 
-with st.expander("Methodology note", expanded=False):
+with st.expander("How this page works", expanded=False):
     st.markdown(
         """
-        The numerator is the distinct selected-finalist `comparison_event_id` count. The denominator is the distinct event count from the complete 3.3.6 event universe in the same scope. No `comparison_group_support_review_flag` or `support_status` filter is applied. The production surface retains stress anomalies identified by all three anomaly-detection frameworks.
+        **1. Start from eligible Taxi Zone × date × daypart observations.** Stress
+        anomalies are drawn from the project's selected anomaly-event universe. Each
+        displayed event belongs to one of three mutually exclusive families:
+        **congestion-only**, **demand-only**, or **both**.
+
+        **2. Normalize event counts into incidence.** Incidence is the number of distinct
+        stress-anomaly events divided by all eligible observations in the same temporal
+        scope, expressed per **1,000**. This makes periods with different amounts of
+        usable data more comparable.
+
+        **3. Separate frequency from composition.** In **Incidence per 1,000**, column
+        height shows how common the selected stress families were. In **Composition
+        share**, the full column is 100% and the segments show how the selected anomaly
+        mix was divided among families.
+
+        **4. Read the stacked segments as mutually exclusive categories.** An event in
+        **both** has both a congestion-oriented signal and a positive demand shock; it is
+        not counted again in either single-signal family.
+
+        **5. Change the temporal or geographic lens without changing the event definition.**
+        Monthly and weekly views, date scopes, and time-of-week buckets regroup the same
+        anomaly framework through time. Geography uses one segmentation at a time—Borough,
+        policy geography, mobility environment, or an individual Taxi Zone—so spatial
+        definitions are never stacked together.
+
+        **6. Keep anomaly timing separate from causal attribution.** A change in anomaly
+        incidence or composition around the January 2025 launch identifies a temporal
+        pattern. It does not by itself establish why that pattern changed.
         """
     )
+
+st.caption(
+    "Evidence scope: selected stress anomalies among eligible Taxi Zone × date × daypart "
+    "observations. Explorer geography applies one spatial segmentation at a time. "
+    "Incidence and composition describe when and where different forms of mobility "
+    "stress were observed; pre/post differences do not establish that congestion pricing "
+    "caused those changes."
+)
+

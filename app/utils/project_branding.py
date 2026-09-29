@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+from html import escape
+
 import plotly.graph_objects as go
 
 
@@ -77,6 +81,32 @@ BRAND_PLOTLY_TEMPLATE = {
 }
 
 
+# ---------------------------------------------------------------------
+# Shared exploration-area contract
+# ---------------------------------------------------------------------
+#
+# WHY:
+# Pale peach is reserved as the background for reader-led exploration.
+# It is uncommon as a large Showcase surface, so it quietly signals a
+# change from curated storytelling to interactive investigation.
+#
+# The wash is intentionally faint. Controls, charts, expanders, and Takeaway
+# cards remain opaque so the exploration color acts as a section-level cue
+# rather than tinting every component inside it.
+EXPLORATION_KEY_SUFFIX = "_exploration_area"
+
+EXPLORATION_WASH = "rgba(255, 221, 210, 0.20)"
+EXPLORATION_BORDER = "rgba(226, 149, 120, 0.38)"
+EXPLORATION_CONTROL_BORDER = "rgba(0, 109, 119, 0.26)"
+EXPLORATION_CONTROL_FOCUS = "rgba(0, 109, 119, 0.16)"
+EXPLORATION_CHART_BORDER = "rgba(226, 149, 120, 0.30)"
+EXPLORATION_EXPANDER_BORDER = "rgba(226, 149, 120, 0.24)"
+
+TAKEAWAY_BACKGROUND = "#E7F2FF"
+TAKEAWAY_BORDER = "#BCD8F0"
+TAKEAWAY_TEXT = "#075A9C"
+
+
 def apply_branding(fig: go.Figure) -> go.Figure:
     """Apply shared Plotly branding to a figure."""
     fig.update_layout(**BRAND_PLOTLY_TEMPLATE["layout"])
@@ -140,10 +170,218 @@ def inject_app_css() -> None:
             margin: 1rem 0;
             color: #003F46;
         }}
+
+        /* -------------------------------------------------------------
+           Interactive-exploration regions
+           -------------------------------------------------------------
+           WHY:
+           The faint pale-peach field marks a change in interaction mode.
+           Child components stay opaque so they remain visually crisp and
+           the wash reads as a section boundary rather than a data encoding.
+        */
+
+        div[class*="st-key-"][class*="{EXPLORATION_KEY_SUFFIX}"] {{
+            background: {EXPLORATION_WASH};
+            border-radius: 0.72rem;
+        }}
+
+        div[class*="st-key-"][class*="{EXPLORATION_KEY_SUFFIX}"]
+        [data-testid="stVerticalBlockBorderWrapper"] {{
+            background: {EXPLORATION_WASH};
+            border-color: {EXPLORATION_BORDER} !important;
+            border-top: 2px solid rgba(226, 149, 120, 0.50) !important;
+            border-radius: 0.72rem;
+        }}
+
+        /*
+        Keep Plotly charts neutral inside the warm exploration field.
+
+        White chart paper and the existing ice plotting surface preserve the
+        chart hierarchy. The hairline peach edge simply nests the chart within
+        the exploration region.
+        */
+        div[class*="st-key-"][class*="{EXPLORATION_KEY_SUFFIX}"]
+        [data-testid="stPlotlyChart"] {{
+            background: #FFFFFF;
+            border: 1px solid {EXPLORATION_CHART_BORDER};
+            border-radius: 0.50rem;
+            box-sizing: border-box;
+            overflow: hidden;
+        }}
+
+        /*
+        Make select controls read as real controls rather than washed-out
+        extensions of the exploration surface.
+
+        Streamlit 1.59+ no longer uses BaseWeb for st.selectbox. The current
+        React Aria implementation renders the visible control as a role="group"
+        inside [data-testid="stSelectbox"], with a transparent combobox input.
+        Styling that group therefore changes the actual surface the reader sees.
+        */
+        div[class*="st-key-"][class*="{EXPLORATION_KEY_SUFFIX}"]
+        [data-testid="stSelectbox"] [role="group"] {{
+            background-color: #FFFFFF !important;
+            border: 1px solid rgba(0, 109, 119, 0.34) !important;
+            border-radius: 0.50rem !important;
+            box-shadow: none !important;
+        }}
+
+        div[class*="st-key-"][class*="{EXPLORATION_KEY_SUFFIX}"]
+        [data-testid="stSelectbox"] input[role="combobox"] {{
+            background-color: transparent !important;
+        }}
+
+        div[class*="st-key-"][class*="{EXPLORATION_KEY_SUFFIX}"]
+        [data-testid="stSelectbox"] [role="group"]:focus-within {{
+            border-color: {BRAND_COLORS["dark_teal"]} !important;
+            box-shadow: 0 0 0 2px {EXPLORATION_CONTROL_FOCUS} !important;
+        }}
+
+        /*
+        Backward-compatible fallback for Streamlit versions that still use
+        BaseWeb Select. This does not affect the current React Aria control.
+        */
+        div[class*="st-key-"][class*="{EXPLORATION_KEY_SUFFIX}"]
+        div[data-baseweb="select"] > div {{
+            background-color: #FFFFFF !important;
+            border: 1px solid rgba(0, 109, 119, 0.34) !important;
+            border-radius: 0.50rem !important;
+            box-shadow: none !important;
+        }}
+
+        div[class*="st-key-"][class*="{EXPLORATION_KEY_SUFFIX}"]
+        [data-testid="stNumberInput"] input,
+        div[class*="st-key-"][class*="{EXPLORATION_KEY_SUFFIX}"]
+        [data-testid="stTextInput"] input,
+        div[class*="st-key-"][class*="{EXPLORATION_KEY_SUFFIX}"]
+        [data-testid="stDateInput"] input {{
+            background-color: #FFFFFF !important;
+            border: 1px solid {EXPLORATION_CONTROL_BORDER} !important;
+            border-radius: 0.50rem !important;
+        }}
+
+        /*
+        Expanders are analytical controls too. Keeping their header and body
+        white prevents Streamlit's neutral gray surface from muddying the
+        warm exploration background.
+        */
+        div[class*="st-key-"][class*="{EXPLORATION_KEY_SUFFIX}"]
+        [data-testid="stExpander"] {{
+            background-color: #FFFFFF !important;
+            border-color: {EXPLORATION_EXPANDER_BORDER} !important;
+        }}
+
+        div[class*="st-key-"][class*="{EXPLORATION_KEY_SUFFIX}"]
+        [data-testid="stExpander"] details,
+        div[class*="st-key-"][class*="{EXPLORATION_KEY_SUFFIX}"]
+        [data-testid="stExpander"] summary {{
+            background-color: #FFFFFF !important;
+        }}
+
+        /*
+        Preserve the familiar blue Takeaway treatment inside the peach field.
+
+        Streamlit's default info card can be translucent, which allows the
+        warm parent background to shift it toward lavender-gray. An opaque
+        blue surface keeps Takeaways visually distinct and consistent.
+        */
+        div[class*="st-key-"][class*="{EXPLORATION_KEY_SUFFIX}"]
+        [data-testid="stAlert"] {{
+            background-color: {TAKEAWAY_BACKGROUND} !important;
+            border: 1px solid {TAKEAWAY_BORDER} !important;
+        }}
+
+        div[class*="st-key-"][class*="{EXPLORATION_KEY_SUFFIX}"]
+        [data-testid="stAlert"] p,
+        div[class*="st-key-"][class*="{EXPLORATION_KEY_SUFFIX}"]
+        [data-testid="stAlert"] strong {{
+            color: {TAKEAWAY_TEXT} !important;
+        }}
+
+        .showcase-exploration-header {{
+            border-bottom: 1px solid rgba(226, 149, 120, 0.26);
+            margin: 0 0 1.15rem 0;
+            padding: 0.10rem 0 0.95rem 0;
+        }}
+
+        .showcase-exploration-kicker {{
+            color: {BRAND_COLORS["dark_teal"]};
+            font-size: 0.75rem;
+            font-weight: 750;
+            letter-spacing: 0.09em;
+            margin-bottom: 0.20rem;
+            text-transform: uppercase;
+        }}
+
+        .showcase-exploration-title {{
+            color: #003F46;
+            font-size: 1.28rem;
+            font-weight: 750;
+            line-height: 1.25;
+            margin-bottom: 0.28rem;
+        }}
+
+        .showcase-exploration-copy {{
+            color: #243238;
+            font-size: 0.98rem;
+            line-height: 1.5;
+            margin: 0;
+        }}
         </style>
         """,
         unsafe_allow_html=True,
     )
+
+
+@contextmanager
+def exploration_section(
+    *,
+    key: str,
+    title: str,
+    description: str,
+    kicker: str = "Interactive exploration",
+) -> Iterator[None]:
+    """
+    Render one visually distinct reader-controlled exploration region.
+
+    The enclosing Streamlit key intentionally follows a shared naming contract
+    so inject_app_css() can apply the same subtle treatment on every Showcase
+    page without page-specific CSS.
+    """
+    import streamlit as st
+
+    if not key.endswith(EXPLORATION_KEY_SUFFIX):
+        raise ValueError(
+            "Exploration-section keys must end with "
+            f"'{EXPLORATION_KEY_SUFFIX}' so shared branding can identify them."
+        )
+
+    safe_kicker = escape(str(kicker))
+    safe_title = escape(str(title))
+    safe_description = escape(str(description))
+
+    with st.container(
+        border=True,
+        key=key,
+    ):
+        st.markdown(
+            f"""
+            <div class="showcase-exploration-header">
+                <div class="showcase-exploration-kicker">
+                    {safe_kicker}
+                </div>
+                <div class="showcase-exploration-title">
+                    {safe_title}
+                </div>
+                <p class="showcase-exploration-copy">
+                    {safe_description}
+                </p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        yield
 
 
 def render_chart_insight(text: str) -> None:

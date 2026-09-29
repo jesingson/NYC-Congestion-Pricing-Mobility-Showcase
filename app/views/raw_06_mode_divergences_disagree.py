@@ -21,6 +21,7 @@ from app.data_access.spatial_visuals import (
 from app.utils.project_branding import (
     BRAND_COLORS,
     apply_branding,
+    exploration_section,
     inject_app_css,
     render_chart_insight,
 )
@@ -310,6 +311,15 @@ def _metric_label(
         metric,
         metric.replace("_", " ").title(),
     )
+
+
+def _format_geography_term(value: str) -> str:
+    """Translate internal geography keys into reader-facing terminology."""
+    mapping = {
+        "Geo-policy group": "Policy geography",
+        "Mobility regime cluster": "Mobility environment",
+    }
+    return mapping.get(value, value)
 
 
 def _normalize_borough(
@@ -1087,8 +1097,9 @@ def _prepare_metric_pair_evidence(
 def _build_recurrence_evidence(
     metric_a: str,
     metric_b: str,
+    minimum_divergence: float,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Build zone-level recurrence summaries and bucket-level evidence."""
+    """Build recurrence summaries using the same gap threshold as the explorer."""
     bucket_frames: list[pd.DataFrame] = []
 
     for temporal_bucket in RECURRENCE_BUCKETS:
@@ -1141,8 +1152,12 @@ def _build_recurrence_evidence(
         observed=True,
     ):
         first = zone_df.iloc[0]
+        # A bucket counts as recurring only when it is opposite-direction
+        # AND clears the reader's shared minimum-divergence threshold. This
+        # keeps the recurrence tab consistent with the largest-divergence tab.
         inverse = zone_df[
             zone_df["opposite_direction"]
+            & zone_df["absolute_divergence"].ge(minimum_divergence)
         ].copy()
 
         eligible_bucket_count = int(
@@ -1277,7 +1292,6 @@ def _filter_recurrence_summary(
     *,
     geography_filter: str,
     geography_value: str | None,
-    minimum_divergence: float,
     minimum_recurring_buckets: int,
 ) -> pd.DataFrame:
     filtered = summary.copy()
@@ -1315,9 +1329,6 @@ def _filter_recurrence_summary(
     filtered = filtered[
         filtered["inverse_bucket_count"].ge(
             minimum_recurring_buckets
-        )
-        & filtered["maximum_inverse_divergence"].ge(
-            minimum_divergence
         )
     ].copy()
 
@@ -1436,8 +1447,8 @@ def build_recurrence_dot_plot(
             hovertemplate=(
                 "<b>%{customdata[0]}</b><br>"
                 "Borough: %{customdata[1]}<br>"
-                "Geo-policy group: %{customdata[2]}<br>"
-                "Mobility regime cluster: %{customdata[3]}<br>"
+                "Policy geography: %{customdata[2]}<br>"
+                "Mobility environment: %{customdata[3]}<br>"
                 "Inverse buckets: %{customdata[4]} of %{customdata[5]}<br>"
                 "Median inverse divergence: %{customdata[6]}<br>"
                 "Maximum inverse divergence: %{customdata[7]}<br>"
@@ -1624,6 +1635,16 @@ def build_selected_zone_evidence_chart(
         "bucket_order"
     )
 
+    plot_data["display_direction_relationship"] = (
+        plot_data["direction_relationship"].map(
+            lambda value: _direction_label(
+                str(value),
+                metric_a_label=metric_a_label,
+                metric_b_label=metric_b_label,
+            )
+        )
+    )
+
     fig = go.Figure()
 
     fig.add_trace(
@@ -1634,7 +1655,7 @@ def build_selected_zone_evidence_chart(
             marker_color=METRIC_A_COLOR,
             customdata=plot_data[
                 [
-                    "direction_relationship",
+                    "display_direction_relationship",
                     "absolute_divergence",
                 ]
             ],
@@ -1656,7 +1677,7 @@ def build_selected_zone_evidence_chart(
             marker_color=METRIC_B_COLOR,
             customdata=plot_data[
                 [
-                    "direction_relationship",
+                    "display_direction_relationship",
                     "absolute_divergence",
                 ]
             ],
@@ -1715,6 +1736,9 @@ def build_selected_zone_evidence_chart(
 
 def _build_recurrence_detail_table(
     data: pd.DataFrame,
+    *,
+    metric_a_label: str,
+    metric_b_label: str,
 ) -> pd.DataFrame:
     display = data[
         [
@@ -1737,13 +1761,26 @@ def _build_recurrence_detail_table(
     display["inverse_bucket_share"] = (
         display["inverse_bucket_share"] * 100
     )
+    display["mobility_regime_cluster_label"] = (
+        display["mobility_regime_cluster_label"]
+        .map(format_mobility_regime_cluster_label)
+    )
+    display["dominant_direction"] = (
+        display["dominant_direction"].map(
+            lambda value: _direction_label(
+                str(value),
+                metric_a_label=metric_a_label,
+                metric_b_label=metric_b_label,
+            )
+        )
+    )
 
     return display.rename(
         columns={
             "zone": "Taxi Zone",
             "borough": "Borough",
-            "geo_policy_group": "Geo-policy group",
-            "mobility_regime_cluster_label": "Mobility regime cluster",
+            "geo_policy_group": "Policy geography",
+            "mobility_regime_cluster_label": "Mobility environment",
             "inverse_bucket_count": "Inverse buckets",
             "eligible_bucket_count": "Eligible buckets",
             "inverse_bucket_share": "Inverse bucket share",
@@ -1937,7 +1974,7 @@ def build_dumbbell_chart(
             hovertemplate=(
                 "<b>%{customdata[0]}</b><br>"
                 "Borough: %{customdata[1]}<br>"
-                "Geo-policy group: %{customdata[2]}<br>"
+                "Policy geography: %{customdata[2]}<br>"
                 f"{metric_a_label}: "
                 "%{customdata[3]} → %{customdata[4]}<br>"
                 "Daily-average change: %{customdata[5]}<br>"
@@ -1981,7 +2018,7 @@ def build_dumbbell_chart(
             hovertemplate=(
                 "<b>%{customdata[0]}</b><br>"
                 "Borough: %{customdata[1]}<br>"
-                "Geo-policy group: %{customdata[2]}<br>"
+                "Policy geography: %{customdata[2]}<br>"
                 f"{metric_b_label}: "
                 "%{customdata[3]} → %{customdata[4]}<br>"
                 "Daily-average change: %{customdata[5]}<br>"
@@ -2059,12 +2096,20 @@ def build_dumbbell_chart(
 def _build_hero_takeaway(
     data: pd.DataFrame,
 ) -> str:
-    total = len(data)
+    """Summarize the default pre-CP versus post-CP Taxi–FHVHV comparison."""
 
-    if total == 0:
+    if data.empty:
         return (
             "No eligible opposite-direction Taxi Zones were available."
         )
+
+    total = len(data)
+
+    taxi_up_fhvhv_down = int(
+        data["direction_relationship"]
+        .eq("Metric A up · Metric B down")
+        .sum()
+    )
 
     manhattan_count = int(
         data["borough"]
@@ -2072,21 +2117,26 @@ def _build_hero_takeaway(
         .sum()
     )
 
-    taxi_up_count = int(
-        data[
-            "direction_relationship"
-        ]
-        .eq(
-            "Metric A up · Metric B down"
-        )
-        .sum()
+    taxi_median_change = float(
+        data["a_percent_change"]
+        .abs()
+        .median()
+    )
+
+    fhvhv_median_change = float(
+        data["b_percent_change"]
+        .abs()
+        .median()
     )
 
     return (
-        f"Opposite Taxi–FHVHV movement was overwhelmingly concentrated "
-        f"in Manhattan: **{manhattan_count} of {total} eligible zones**. "
-        f"In **{taxi_up_count} zones**, Taxi Trips increased while "
-        "FHVHV Trips declined."
+        "Comparing average daily activity before and after congestion pricing, "
+        f"**{taxi_up_fhvhv_down} of {total} opposite-direction zones** pair "
+        "rising Taxi demand with declining FHVHV demand. The size of the "
+        f"change is much larger for Taxi: the median absolute change is "
+        f"**{taxi_median_change:.1f}%** for Taxi Trips versus "
+        f"**{fhvhv_median_change:.1f}%** for FHVHV Trips. "
+        f"**{manhattan_count} of these {total} zones are in Manhattan.**"
     )
 
 
@@ -2096,40 +2146,104 @@ def _build_explorer_takeaway(
     metric_a_label: str,
     metric_b_label: str,
 ) -> str:
+    """Summarize the selected pre-CP versus post-CP divergence comparison."""
+
     if data.empty:
         return (
             "No eligible opposite-direction zones remain under the "
             "selected filters."
         )
 
-    top = data.iloc[0]
+    total = len(data)
 
     a_up_b_down = int(
-        data[
-            "direction_relationship"
-        ]
-        .eq(
-            "Metric A up · Metric B down"
-        )
+        data["direction_relationship"]
+        .eq("Metric A up · Metric B down")
         .sum()
     )
 
     a_down_b_up = int(
-        data[
-            "direction_relationship"
-        ]
-        .eq(
-            "Metric A down · Metric B up"
-        )
+        data["direction_relationship"]
+        .eq("Metric A down · Metric B up")
         .sum()
     )
 
+    magnitude_a = float(
+        data["a_percent_change"]
+        .abs()
+        .median()
+    )
+
+    magnitude_b = float(
+        data["b_percent_change"]
+        .abs()
+        .median()
+    )
+
+    if a_up_b_down > a_down_b_up:
+        direction_sentence = (
+            f"**{a_up_b_down} of {total} zones** pair rising "
+            f"{metric_a_label} with declining {metric_b_label}."
+        )
+    elif a_down_b_up > a_up_b_down:
+        direction_sentence = (
+            f"**{a_down_b_up} of {total} zones** pair declining "
+            f"{metric_a_label} with rising {metric_b_label}."
+        )
+    else:
+        direction_sentence = (
+            f"The **{total} qualifying zones** are evenly split between "
+            "the two opposite-direction patterns."
+        )
+
+    magnitude_sentence = (
+        "Across these zones, the median absolute pre-to-post change is "
+        f"**{magnitude_a:.1f}%** for {metric_a_label} and "
+        f"**{magnitude_b:.1f}%** for {metric_b_label}."
+    )
+
+    borough_counts = (
+        data["borough"]
+        .dropna()
+        .value_counts()
+    )
+
+    geography_sentence = ""
+
+    if not borough_counts.empty:
+        leading_borough = str(
+            borough_counts.index[0]
+        )
+        leading_count = int(
+            borough_counts.iloc[0]
+        )
+
+        if leading_count / total >= 0.60:
+            geography_sentence = (
+                f" **{leading_count} of {total}** are in "
+                f"**{leading_borough}**."
+            )
+
+    top = (
+        data.sort_values(
+            "absolute_divergence",
+            ascending=False,
+        )
+        .iloc[0]
+    )
+
+    example_sentence = (
+        f" The widest separation is **{top['zone']}**: "
+        f"{metric_a_label} **{top['a_percent_change']:+.1f}%** versus "
+        f"{metric_b_label} **{top['b_percent_change']:+.1f}%**."
+    )
+
     return (
-        f"Among **{len(data)} eligible opposite-direction zones**, "
-        f"**{a_up_b_down}** show {metric_a_label} increasing while "
-        f"{metric_b_label} declines, and **{a_down_b_up}** show the "
-        f"reverse. The largest current gap is **{top['zone']}** at "
-        f"**{top['absolute_divergence']:.1f} percentage points**."
+        "Comparing average daily activity before and after congestion pricing, "
+        f"{direction_sentence} "
+        f"{magnitude_sentence}"
+        f"{geography_sentence}"
+        f"{example_sentence}"
     )
 
 
@@ -2178,7 +2292,7 @@ def _build_detail_table(
             "zone": "Taxi Zone",
             "borough": "Borough",
             "geo_policy_group": (
-                "Geo-policy group"
+                "Policy geography"
             ),
             "a_pre_daily_average": (
                 f"{metric_a_label} · Pre"
@@ -2225,9 +2339,10 @@ st.title(
 )
 
 st.write(
-    "Find Taxi Zones where two mobility measures moved in opposite "
-    "directions after congestion pricing, then compare the size and "
-    "direction of those changes."
+    "Citywide trends can make two mobility measures look as though they moved together "
+    "even when some neighborhoods went in opposite directions. This page isolates those "
+    "local disagreements, measures how large they were, and tests whether the same "
+    "opposite-direction pattern recurred across different parts of the week."
 )
 
 
@@ -2235,13 +2350,13 @@ st.write(
 # Frozen hero
 # ---------------------------------------------------------------------
 st.header(
-    "Taxi and FHVHV demand diverged most in Manhattan"
+    "Where did Taxi and FHVHV demand diverge most?"
 )
 
 st.write(
-    "The distance between each pair of endpoints is the percentage-point "
-    "gap between Taxi and FHVHV change. Longer connectors indicate greater "
-    "disagreement."
+    "The fixed opening view ranks Taxi Zones where **Taxi Trips and FHVHV Trips moved "
+    "in opposite directions**. Each connector spans the two percentage changes; a longer "
+    "connector means a larger percentage-point gap between the modes."
 )
 
 with st.spinner(
@@ -2356,801 +2471,806 @@ st.caption(
 # ---------------------------------------------------------------------
 # Interactive explorer
 # ---------------------------------------------------------------------
-st.divider()
-
-st.header(
-    "Explore mode divergences"
-)
-
-st.write(
-    "Choose two core measures and a geographic frame, then use the tabs "
-    "to inspect either the largest divergence in one time bucket or the "
-    "zones where opposite movement recurs across the full time-of-week profile."
-)
-
-if "raw06_saved_view" not in st.session_state:
-    st.session_state[
-        "raw06_saved_view"
-    ] = "Taxi vs FHVHV demand"
-
-saved_view = st.selectbox(
-    "Start with a saved configuration",
-    options=SAVED_VIEW_OPTIONS,
-    index=0,
-    key="raw06_saved_view",
-    help=(
-        "Saved configurations provide curated starting points for the "
-        "largest-divergence view. Changing a shared control switches "
-        "the selection to Custom."
+with exploration_section(
+    key="raw06_exploration_area",
+    title="Explore mode divergences",
+    description=(
+        "Choose two mobility measures and a geographic frame, then compare "
+        "the largest opposite-direction changes with patterns that recur "
+        "across the time-of-week profile."
     ),
-)
-
-if (
-    saved_view != "Custom"
-    and st.session_state.get(
-        "_raw06_applied_saved_view"
-    )
-    != saved_view
 ):
-    _apply_saved_view(
-        saved_view
-    )
-
-    st.session_state[
-        "_raw06_applied_saved_view"
-    ] = saved_view
-
-    st.rerun()
-
-if saved_view == "Custom":
-    st.caption(
-        "Custom view · adjust any measure, geography, time, or threshold."
-    )
-else:
-    st.caption(
-        SAVED_VIEWS[
-            saved_view
-        ]["description"]
-    )
-
-st.markdown(
-    "##### Shared measures"
-)
-
-measure_col1, measure_col2 = st.columns(2)
-
-with measure_col1:
-    metric_a = st.selectbox(
-        "Metric A",
-        options=CORE_METRICS,
-        index=(
-            CORE_METRICS.index(
-                TAXI_METRIC
-            )
-            if TAXI_METRIC in CORE_METRICS
-            else 0
-        ),
-        format_func=_metric_label,
-        key="raw06_metric_a",
-        on_change=_mark_saved_view_custom,
-    )
-
-metric_b_options = [
-    metric
-    for metric in CORE_METRICS
-    if metric != metric_a
-]
-
-with measure_col2:
-    if (
-        st.session_state.get(
-            "raw06_metric_b"
-        )
-        not in metric_b_options
-    ):
+    if "raw06_saved_view" not in st.session_state:
         st.session_state[
-            "raw06_metric_b"
-        ] = (
-            FHVHV_METRIC
-            if FHVHV_METRIC in metric_b_options
-            else metric_b_options[0]
-        )
+            "raw06_saved_view"
+        ] = "Taxi vs FHVHV demand"
 
-    metric_b = st.selectbox(
-        "Metric B",
-        options=metric_b_options,
-        index=(
-            metric_b_options.index(
-                FHVHV_METRIC
-            )
-            if FHVHV_METRIC in metric_b_options
-            else 0
-        ),
-        format_func=_metric_label,
-        key="raw06_metric_b",
-        on_change=_mark_saved_view_custom,
-    )
-
-metric_a_label = _metric_label(
-    metric_a
-)
-metric_b_label = _metric_label(
-    metric_b
-)
-
-with st.spinner(
-    "Preparing geography and divergence ranges..."
-):
-    overall_source = _load_metric_pair_source(
-        metric_a,
-        metric_b,
-        ALL_TEMPORAL_BUCKETS_LABEL,
-    )
-
-    overall_evidence = _prepare_metric_pair_evidence(
-        overall_source,
-        metric_a=metric_a,
-        metric_b=metric_b,
-    )
-
-st.markdown(
-    "##### Shared geography and threshold"
-)
-
-geography_col1, geography_col2, threshold_col = st.columns(
-    [
-        1,
-        1,
-        1.4,
-    ]
-)
-
-with geography_col1:
-    geography_filter = st.selectbox(
-        "Geography filter",
-        options=GEOGRAPHY_FILTER_OPTIONS,
-        index=0,
-        key="raw06_geography_filter",
-        on_change=_mark_saved_view_custom,
-    )
-
-geography_value: object | None = None
-
-if geography_filter == "Borough":
-    borough_options = _ordered_values(
-        overall_evidence["borough"],
-        BOROUGH_ORDER,
-    )
-
-    if borough_options:
-        if (
-            st.session_state.get(
-                "raw06_borough_value"
-            )
-            not in borough_options
-        ):
-            st.session_state[
-                "raw06_borough_value"
-            ] = borough_options[0]
-
-        with geography_col2:
-            geography_value = st.selectbox(
-                "Borough",
-                options=borough_options,
-                index=0,
-                key="raw06_borough_value",
-                on_change=_mark_saved_view_custom,
-            )
-    else:
-        with geography_col2:
-            st.caption(
-                "No Borough values available"
-            )
-
-elif geography_filter == "Geo-policy group":
-    policy_options = _ordered_values(
-        overall_evidence[
-            "geo_policy_group"
-        ],
-        GEO_POLICY_ORDER,
-    )
-
-    if policy_options:
-        if (
-            st.session_state.get(
-                "raw06_policy_value"
-            )
-            not in policy_options
-        ):
-            st.session_state[
-                "raw06_policy_value"
-            ] = policy_options[0]
-
-        with geography_col2:
-            geography_value = st.selectbox(
-                "Geo-policy group",
-                options=policy_options,
-                index=0,
-                key="raw06_policy_value",
-                on_change=_mark_saved_view_custom,
-            )
-    else:
-        with geography_col2:
-            st.caption(
-                "No geo-policy values available"
-            )
-
-elif geography_filter == "Mobility regime cluster":
-    cluster_options = MOBILITY_REGIME_CLUSTER_ORDER
-
-    if cluster_options:
-        if (
-            st.session_state.get(
-                "raw06_cluster_value"
-            )
-            not in cluster_options
-        ):
-            st.session_state[
-                "raw06_cluster_value"
-            ] = cluster_options[0]
-
-        with geography_col2:
-            geography_value = st.selectbox(
-                "Mobility regime cluster",
-                options=cluster_options,
-                index=0,
-                format_func=format_mobility_regime_cluster_label,
-                key="raw06_cluster_value",
-                on_change=_mark_saved_view_custom,
-            )
-    else:
-        with geography_col2:
-            st.caption(
-                "No mobility regime clusters available"
-            )
-else:
-    with geography_col2:
-        st.caption(
-            "All eligible Taxi Zones"
-        )
-
-maximum_divergence = (
-    float(
-        np.ceil(
-            overall_evidence[
-                "absolute_divergence"
-            ].max()
-            / 5
-        )
-        * 5
-    )
-    if not overall_evidence.empty
-    else 100.0
-)
-
-with threshold_col:
-    minimum_divergence = st.slider(
-        "Minimum divergence",
-        min_value=0.0,
-        max_value=max(
-            maximum_divergence,
-            5.0,
-        ),
-        value=0.0,
-        step=5.0,
-        format="%.0f pp",
+    saved_view = st.selectbox(
+        "Start with a saved configuration",
+        options=SAVED_VIEW_OPTIONS,
+        key="raw06_saved_view",
         help=(
-            "Require at least this many percentage points between the "
-            "two pre-to-post changes."
+            "Saved configurations provide curated starting points for the "
+            "largest-divergence view. Changing a shared control switches "
+            "the selection to Custom."
         ),
-        key="raw06_minimum_divergence",
-        on_change=_mark_saved_view_custom,
     )
 
-geography_context = (
-    "All Taxi Zones"
-    if geography_filter == "All Taxi Zones"
-    else (
-        f"{geography_filter}: {format_mobility_regime_cluster_label(geography_value)}"
-        if geography_filter == "Mobility regime cluster"
-        else f"{geography_filter}: {geography_value}"
-    )
-)
+    if (
+        saved_view != "Custom"
+        and st.session_state.get(
+            "_raw06_applied_saved_view"
+        )
+        != saved_view
+    ):
+        _apply_saved_view(
+            saved_view
+        )
 
+        st.session_state[
+            "_raw06_applied_saved_view"
+        ] = saved_view
 
-def _build_selected_zone_takeaway(
-    zone_evidence: pd.DataFrame,
-    *,
-    zone_name: str,
-    metric_a_label: str,
-    metric_b_label: str,
-) -> str:
-    """Summarize the strongest time-bucket disagreement for one zone."""
-    if zone_evidence.empty:
-        return "No eligible time-bucket evidence is available for this zone."
+        st.rerun()
 
-    opposite = zone_evidence[zone_evidence["opposite_direction"]].copy()
-    source = opposite if not opposite.empty else zone_evidence
-    strongest = source.loc[source["absolute_divergence"].idxmax()]
-    relationship = _direction_label(
-        str(strongest["direction_relationship"]),
-        metric_a_label=metric_a_label,
-        metric_b_label=metric_b_label,
-    )
-    opposite_count = int(opposite["temporal_bucket"].nunique())
+    if saved_view == "Custom":
+        st.caption(
+            "Custom view · adjust any measure, geography, time, or threshold."
+        )
+    else:
+        st.caption(
+            SAVED_VIEWS[
+                saved_view
+            ]["description"]
+        )
 
-    return (
-        f"**{zone_name}** shows opposite movement in **{opposite_count} of "
-        f"{zone_evidence['temporal_bucket'].nunique()} eligible buckets**. The "
-        f"largest displayed gap occurs during **{strongest['temporal_bucket_label']}**: "
-        f"**{relationship}**, separated by "
-        f"**{float(strongest['absolute_divergence']):.1f} percentage points**."
-    )
-largest_tab, recurrence_tab = st.tabs(
-    [
-        "Largest divergences",
-        "Recurring patterns",
-    ]
-)
-
-with largest_tab:
     st.markdown(
-        "Rank the zones with the largest opposite-direction movement for "
-        "one selected temporal bucket."
+        "##### Shared measures"
     )
 
-    ranking_col1, ranking_col2, ranking_col3 = st.columns(3)
+    measure_col1, measure_col2 = st.columns(2)
 
-    with ranking_col1:
-        temporal_bucket = st.selectbox(
-            "Time bucket",
-            options=TEMPORAL_BUCKET_OPTIONS,
-            index=0,
-            format_func=lambda value: (
-                TEMPORAL_BUCKET_LABELS[
-                    value
-                ]
-            ),
-            key="raw06_temporal_bucket",
+    with measure_col1:
+        metric_a = st.selectbox(
+            "Metric A",
+            options=CORE_METRICS,
+            format_func=_metric_label,
+            key="raw06_metric_a",
             on_change=_mark_saved_view_custom,
         )
 
-    with ranking_col2:
-        top_n = st.selectbox(
-            "Zones to show",
-            options=TOP_N_OPTIONS,
-            index=1,
-            key="raw06_top_n",
+    metric_b_options = [
+        metric
+        for metric in CORE_METRICS
+        if metric != metric_a
+    ]
+
+    with measure_col2:
+        if (
+            st.session_state.get(
+                "raw06_metric_b"
+            )
+            not in metric_b_options
+        ):
+            st.session_state[
+                "raw06_metric_b"
+            ] = (
+                FHVHV_METRIC
+                if FHVHV_METRIC in metric_b_options
+                else metric_b_options[0]
+            )
+
+        metric_b = st.selectbox(
+            "Metric B",
+            options=metric_b_options,
+            format_func=_metric_label,
+            key="raw06_metric_b",
             on_change=_mark_saved_view_custom,
         )
 
-    with ranking_col3:
-        direction_filter = st.selectbox(
-            "Direction pattern",
-            options=DIRECTION_OPTIONS,
-            index=0,
-            format_func=lambda value: (
-                _direction_label(
-                    value,
-                    metric_a_label=metric_a_label,
-                    metric_b_label=metric_b_label,
-                )
-            ),
-            key="raw06_direction_filter",
-            on_change=_mark_saved_view_custom,
-        )
+    metric_a_label = _metric_label(
+        metric_a
+    )
+    metric_b_label = _metric_label(
+        metric_b
+    )
 
     with st.spinner(
-        "Updating the divergence ranking..."
+        "Preparing geography and divergence ranges..."
     ):
-        explorer_source = _load_metric_pair_source(
+        overall_source = _load_metric_pair_source(
             metric_a,
             metric_b,
-            temporal_bucket,
+            ALL_TEMPORAL_BUCKETS_LABEL,
         )
 
-        explorer_data = _prepare_metric_pair_divergence(
-            explorer_source,
+        overall_evidence = _prepare_metric_pair_evidence(
+            overall_source,
             metric_a=metric_a,
             metric_b=metric_b,
         )
 
-    filtered_data = _filter_divergence_data(
-        explorer_data,
-        geography_filter=geography_filter,
-        geography_value=geography_value,
-        direction_filter=direction_filter,
-        minimum_divergence=minimum_divergence,
+    st.markdown(
+        "##### Shared geography and threshold"
     )
 
-    if filtered_data.empty:
-        st.info(
-            "No eligible opposite-direction zones remain under the selected "
-            "filters."
-        )
-    else:
-        displayed_data = (
-            filtered_data.head(
-                top_n
-            )
-            .copy()
-        )
+    geography_col1, geography_col2, threshold_col = st.columns(
+        [
+            1,
+            1,
+            1.4,
+        ]
+    )
 
-        explorer_card1, explorer_card2, explorer_card3, explorer_card4 = (
-            st.columns(4)
-        )
-
-        explorer_card1.metric(
-            "Eligible disagreements",
-            f"{len(filtered_data):,}",
+    with geography_col1:
+        geography_filter = st.selectbox(
+            "Geography filter",
+            options=GEOGRAPHY_FILTER_OPTIONS,
+            format_func=_format_geography_term,
+            key="raw06_geography_filter",
+            on_change=_mark_saved_view_custom,
         )
 
-        explorer_card2.metric(
-            f"{metric_a_label} up · {metric_b_label} down",
-            f"{int(filtered_data['direction_relationship'].eq('Metric A up · Metric B down').sum()):,}",
+    geography_value: object | None = None
+
+    if geography_filter == "Borough":
+        borough_options = _ordered_values(
+            overall_evidence["borough"],
+            BOROUGH_ORDER,
         )
 
-        explorer_card3.metric(
-            f"{metric_a_label} down · {metric_b_label} up",
-            f"{int(filtered_data['direction_relationship'].eq('Metric A down · Metric B up').sum()):,}",
-        )
-
-        explorer_card4.metric(
-            "Largest divergence",
-            f"{filtered_data.iloc[0]['absolute_divergence']:.1f} pp",
-        )
-
-        st.caption(
-            f"Metric A: {metric_a_label} · "
-            f"Metric B: {metric_b_label} · "
-            f"{TEMPORAL_BUCKET_LABELS[temporal_bucket]} · "
-            f"{geography_context} · "
-            f"Minimum gap: {minimum_divergence:.0f} pp"
-        )
-
-        if "subway_ridership" in {
-            metric_a,
-            metric_b,
-        }:
-            st.caption(
-                "Subway Ridership does not cover Staten Island, so Staten "
-                "Island cannot appear when Subway Ridership is selected."
-            )
-
-        explorer_takeaway = _build_explorer_takeaway(
-            filtered_data,
-            metric_a_label=metric_a_label,
-            metric_b_label=metric_b_label,
-        )
-
-        explorer_fig = build_dumbbell_chart(
-            displayed_data,
-            metric_a_label=metric_a_label,
-            metric_b_label=metric_b_label,
-            show_endpoint_labels=(
-                top_n <= 15
-            ),
-            height=max(
-                560,
-                44 * len(
-                    displayed_data
+        if borough_options:
+            if (
+                st.session_state.get(
+                    "raw06_borough_value"
                 )
-                + 170,
+                not in borough_options
+            ):
+                st.session_state[
+                    "raw06_borough_value"
+                ] = borough_options[0]
+
+            with geography_col2:
+                geography_value = st.selectbox(
+                    "Borough",
+                    options=borough_options,
+                    key="raw06_borough_value",
+                    on_change=_mark_saved_view_custom,
+                )
+        else:
+            with geography_col2:
+                st.caption(
+                    "No Borough values available"
+                )
+
+    elif geography_filter == "Geo-policy group":
+        policy_options = _ordered_values(
+            overall_evidence[
+                "geo_policy_group"
+            ],
+            GEO_POLICY_ORDER,
+        )
+
+        if policy_options:
+            if (
+                st.session_state.get(
+                    "raw06_policy_value"
+                )
+                not in policy_options
+            ):
+                st.session_state[
+                    "raw06_policy_value"
+                ] = policy_options[0]
+
+            with geography_col2:
+                geography_value = st.selectbox(
+                    "Policy geography",
+                    options=policy_options,
+                    key="raw06_policy_value",
+                    on_change=_mark_saved_view_custom,
+                )
+        else:
+            with geography_col2:
+                st.caption(
+                    "No policy-geography values available"
+                )
+
+    elif geography_filter == "Mobility regime cluster":
+        cluster_options = MOBILITY_REGIME_CLUSTER_ORDER
+
+        if cluster_options:
+            if (
+                st.session_state.get(
+                    "raw06_cluster_value"
+                )
+                not in cluster_options
+            ):
+                st.session_state[
+                    "raw06_cluster_value"
+                ] = cluster_options[0]
+
+            with geography_col2:
+                geography_value = st.selectbox(
+                    "Mobility environment",
+                    options=cluster_options,
+                    format_func=format_mobility_regime_cluster_label,
+                    key="raw06_cluster_value",
+                    on_change=_mark_saved_view_custom,
+                )
+        else:
+            with geography_col2:
+                st.caption(
+                    "No mobility environments available"
+                )
+    else:
+        with geography_col2:
+            st.caption(
+                "All eligible Taxi Zones"
+            )
+
+    maximum_divergence = (
+        float(
+            np.ceil(
+                overall_evidence[
+                    "absolute_divergence"
+                ].max()
+                / 5
+            )
+            * 5
+        )
+        if not overall_evidence.empty
+        else 100.0
+    )
+
+    with threshold_col:
+        minimum_divergence = st.slider(
+            "Minimum divergence",
+            min_value=0.0,
+            max_value=max(
+                maximum_divergence,
+                5.0,
             ),
-        )
-
-        st.plotly_chart(
-            explorer_fig,
-            width="stretch",
-            config={
-                "displayModeBar": False,
-                "responsive": True,
-            },
-            key=(
-                f"raw06_largest_"
-                f"{metric_a}_{metric_b}_"
-                f"{temporal_bucket}_"
-                f"{geography_filter}_"
-                f"{geography_value}_"
-                f"{direction_filter}_"
-                f"{minimum_divergence}_"
-                f"{top_n}"
+            step=5.0,
+            format="%.0f pp",
+            help=(
+                "Require at least this many percentage points between the "
+                "two pre-to-post changes."
             ),
-        )
-        render_chart_insight(explorer_takeaway)
-
-        st.caption(
-            "Longer connectors indicate a larger percentage-point gap. "
-            "Only zones with meaningful pre-period activity for both selected "
-            "measures are eligible."
+            key="raw06_minimum_divergence",
+            on_change=_mark_saved_view_custom,
         )
 
-        with st.expander(
-            "Inspect the ranked values",
-            expanded=False,
+    geography_context = (
+        "All Taxi Zones"
+        if geography_filter == "All Taxi Zones"
+        else (
+            f"Mobility environment: {format_mobility_regime_cluster_label(geography_value)}"
+            if geography_filter == "Mobility regime cluster"
+            else f"{_format_geography_term(geography_filter)}: {geography_value}"
+        )
+    )
+
+
+    def _build_selected_zone_takeaway(
+        zone_evidence: pd.DataFrame,
+        *,
+        zone_name: str,
+        metric_a_label: str,
+        metric_b_label: str,
+        minimum_divergence: float,
+    ) -> str:
+        """Summarize the strongest time-bucket disagreement for one zone."""
+        if zone_evidence.empty:
+            return "No eligible time-bucket evidence is available for this zone."
+
+        opposite = zone_evidence[
+            zone_evidence["opposite_direction"]
+            & zone_evidence["absolute_divergence"].ge(minimum_divergence)
+        ].copy()
+        source = opposite if not opposite.empty else zone_evidence
+        strongest = source.loc[source["absolute_divergence"].idxmax()]
+        relationship = _direction_label(
+            str(strongest["direction_relationship"]),
+            metric_a_label=metric_a_label,
+            metric_b_label=metric_b_label,
+        )
+        opposite_count = int(opposite["temporal_bucket"].nunique())
+
+        return (
+            f"**{zone_name}** shows opposite movement in **{opposite_count} of "
+            f"{zone_evidence['temporal_bucket'].nunique()} eligible buckets**. The "
+            f"largest displayed gap occurs during **{strongest['temporal_bucket_label']}**: "
+            f"**{relationship}**, separated by "
+            f"**{float(strongest['absolute_divergence']):.1f} percentage points**."
+        )
+    largest_tab, recurrence_tab = st.tabs(
+        [
+            "Largest divergences",
+            "Recurring patterns",
+        ]
+    )
+
+    with largest_tab:
+        st.markdown(
+            "Rank the zones with the largest opposite-direction movement for "
+            "one selected temporal bucket."
+        )
+
+        ranking_col1, ranking_col2, ranking_col3 = st.columns(3)
+
+        with ranking_col1:
+            temporal_bucket = st.selectbox(
+                "Time bucket",
+                options=TEMPORAL_BUCKET_OPTIONS,
+                format_func=lambda value: (
+                    TEMPORAL_BUCKET_LABELS[
+                        value
+                    ]
+                ),
+                key="raw06_temporal_bucket",
+                on_change=_mark_saved_view_custom,
+            )
+
+        with ranking_col2:
+            top_n = st.selectbox(
+                "Zones to show",
+                options=TOP_N_OPTIONS,
+                key="raw06_top_n",
+                on_change=_mark_saved_view_custom,
+            )
+
+        with ranking_col3:
+            direction_filter = st.selectbox(
+                "Direction pattern",
+                options=DIRECTION_OPTIONS,
+                format_func=lambda value: (
+                    _direction_label(
+                        value,
+                        metric_a_label=metric_a_label,
+                        metric_b_label=metric_b_label,
+                    )
+                ),
+                key="raw06_direction_filter",
+                on_change=_mark_saved_view_custom,
+            )
+
+        with st.spinner(
+            "Updating the divergence ranking..."
         ):
-            detail = _build_detail_table(
+            explorer_source = _load_metric_pair_source(
+                metric_a,
+                metric_b,
+                temporal_bucket,
+            )
+
+            explorer_data = _prepare_metric_pair_divergence(
+                explorer_source,
+                metric_a=metric_a,
+                metric_b=metric_b,
+            )
+
+        filtered_data = _filter_divergence_data(
+            explorer_data,
+            geography_filter=geography_filter,
+            geography_value=geography_value,
+            direction_filter=direction_filter,
+            minimum_divergence=minimum_divergence,
+        )
+
+        if filtered_data.empty:
+            st.info(
+                "No eligible opposite-direction zones remain under the selected "
+                "filters."
+            )
+        else:
+            displayed_data = (
+                filtered_data.head(
+                    top_n
+                )
+                .copy()
+            )
+
+            explorer_card1, explorer_card2, explorer_card3, explorer_card4 = (
+                st.columns(4)
+            )
+
+            explorer_card1.metric(
+                "Eligible disagreements",
+                f"{len(filtered_data):,}",
+            )
+
+            explorer_card2.metric(
+                f"{metric_a_label} up · {metric_b_label} down",
+                f"{int(filtered_data['direction_relationship'].eq('Metric A up · Metric B down').sum()):,}",
+            )
+
+            explorer_card3.metric(
+                f"{metric_a_label} down · {metric_b_label} up",
+                f"{int(filtered_data['direction_relationship'].eq('Metric A down · Metric B up').sum()):,}",
+            )
+
+            explorer_card4.metric(
+                "Largest divergence",
+                f"{filtered_data.iloc[0]['absolute_divergence']:.1f} pp",
+            )
+
+            st.caption(
+                f"Metric A: {metric_a_label} · "
+                f"Metric B: {metric_b_label} · "
+                f"{TEMPORAL_BUCKET_LABELS[temporal_bucket]} · "
+                f"{geography_context} · "
+                f"Minimum gap: {minimum_divergence:.0f} pp"
+            )
+
+            if "subway_ridership" in {
+                metric_a,
+                metric_b,
+            }:
+                st.caption(
+                    "Subway Ridership does not cover Staten Island, so Staten "
+                    "Island cannot appear when Subway Ridership is selected."
+                )
+
+            explorer_takeaway = _build_explorer_takeaway(
+                filtered_data,
+                metric_a_label=metric_a_label,
+                metric_b_label=metric_b_label,
+            )
+
+            explorer_fig = build_dumbbell_chart(
                 displayed_data,
                 metric_a_label=metric_a_label,
                 metric_b_label=metric_b_label,
-            )
-
-            detail_column_config = {}
-
-            for column in detail.columns:
-                if column.endswith(" · Pre") or column.endswith(" · Post"):
-                    detail_column_config[column] = (
-                        st.column_config.NumberColumn(
-                            column,
-                            format="%,.1f",
-                        )
-                    )
-                elif column.endswith(" · Daily-average change"):
-                    detail_column_config[column] = (
-                        st.column_config.NumberColumn(
-                            column,
-                            format="%+,.1f",
-                        )
-                    )
-                elif column.endswith(" · Percent change"):
-                    detail_column_config[column] = (
-                        st.column_config.NumberColumn(
-                            column,
-                            format="%+.1f%%",
-                        )
-                    )
-                elif column == "Divergence":
-                    detail_column_config[column] = (
-                        st.column_config.NumberColumn(
-                            column,
-                            format="%.1f pp",
-                        )
-                    )
-
-            st.dataframe(
-                detail,
-                width="stretch",
-                hide_index=True,
-                column_config=detail_column_config,
-            )
-
-with recurrence_tab:
-    st.markdown(
-        "Identify zones where opposite movement repeats across multiple "
-        "weekday and weekend temporal buckets. This is recurring divergence "
-        "evidence, not proof that one mode substituted for another."
-    )
-
-    recurrence_control1, recurrence_control2 = st.columns(2)
-
-    with recurrence_control1:
-        recurrence_top_n = st.selectbox(
-            "Zones to show",
-            options=TOP_N_OPTIONS,
-            index=1,
-            key="raw06_recurrence_top_n",
-        )
-
-    with recurrence_control2:
-        minimum_recurring_buckets = st.slider(
-            "Minimum recurring buckets",
-            min_value=1,
-            max_value=len(RECURRENCE_BUCKETS),
-            value=2,
-            step=1,
-            help=(
-                "Require opposite-direction movement in at least this many "
-                "eligible time-of-week buckets."
-            ),
-            key="raw06_minimum_recurring_buckets",
-        )
-
-    with st.spinner(
-        "Calculating recurrence across temporal buckets..."
-    ):
-        recurrence_summary, bucket_evidence = _build_recurrence_evidence(
-            metric_a,
-            metric_b,
-        )
-
-    filtered_recurrence = _filter_recurrence_summary(
-        recurrence_summary,
-        geography_filter=geography_filter,
-        geography_value=geography_value,
-        minimum_divergence=minimum_divergence,
-        minimum_recurring_buckets=minimum_recurring_buckets,
-    )
-
-    if filtered_recurrence.empty:
-        st.info(
-            "No zones met the selected recurrence and divergence requirements."
-        )
-    else:
-        displayed_recurrence = filtered_recurrence.head(
-            recurrence_top_n
-        ).copy()
-
-        recurrence_cards = _build_recurrence_summary_cards(
-            filtered_recurrence
-        )
-
-        _render_recurrence_cards(
-            recurrence_cards
-        )
-
-        st.caption(
-            f"Metric A: {metric_a_label} · "
-            f"Metric B: {metric_b_label} · "
-            f"{geography_context} · "
-            f"Minimum gap in at least one recurring bucket: "
-            f"{minimum_divergence:.0f} pp"
-        )
-
-        recurrence_takeaway = _build_recurrence_takeaway(
-            filtered_recurrence,
-            metric_a_label=metric_a_label,
-            metric_b_label=metric_b_label,
-        )
-
-        recurrence_fig = build_recurrence_dot_plot(
-            displayed_recurrence,
-            metric_a_label=metric_a_label,
-            metric_b_label=metric_b_label,
-            height=max(
-                560,
-                42 * len(
-                    displayed_recurrence
-                )
-                + 155,
-            ),
-        )
-
-        st.plotly_chart(
-            recurrence_fig,
-            width="stretch",
-            config={
-                "displayModeBar": False,
-                "responsive": True,
-            },
-            key=(
-                f"raw06_recurrence_"
-                f"{metric_a}_{metric_b}_"
-                f"{geography_filter}_"
-                f"{geography_value}_"
-                f"{minimum_divergence}_"
-                f"{minimum_recurring_buckets}_"
-                f"{recurrence_top_n}"
-            ),
-        )
-        render_chart_insight(recurrence_takeaway)
-
-        st.caption(
-            "Horizontal position is the share of eligible temporal buckets "
-            "showing opposite movement. Dot size represents median inverse "
-            "divergence, and color represents the number of inverse buckets."
-        )
-
-        selected_zone_id = st.selectbox(
-            "Inspect a recurring zone",
-            options=displayed_recurrence[
-                "taxi_zone_id"
-            ].tolist(),
-            format_func=lambda zone_id: str(
-                displayed_recurrence.loc[
-                    displayed_recurrence["taxi_zone_id"].eq(zone_id),
-                    "zone",
-                ].iloc[0]
-            ),
-            key="raw06_selected_recurrence_zone",
-        )
-
-        selected_zone_name = str(
-            displayed_recurrence.loc[
-                displayed_recurrence["taxi_zone_id"].eq(
-                    selected_zone_id
+                show_endpoint_labels=(
+                    top_n <= 15
                 ),
-                "zone",
-            ].iloc[0]
-        )
-
-        selected_zone_evidence = bucket_evidence[
-            bucket_evidence["taxi_zone_id"].eq(
-                selected_zone_id
+                height=max(
+                    560,
+                    44 * len(
+                        displayed_data
+                    )
+                    + 170,
+                ),
             )
-        ].copy()
 
+            st.plotly_chart(
+                explorer_fig,
+                width="stretch",
+                config={
+                    "displayModeBar": False,
+                    "responsive": True,
+                },
+                key=(
+                    f"raw06_largest_"
+                    f"{metric_a}_{metric_b}_"
+                    f"{temporal_bucket}_"
+                    f"{geography_filter}_"
+                    f"{geography_value}_"
+                    f"{direction_filter}_"
+                    f"{minimum_divergence}_"
+                    f"{top_n}"
+                ),
+            )
+            render_chart_insight(explorer_takeaway)
+
+            st.caption(
+                "Longer connectors indicate a larger percentage-point gap. "
+                "Only zones with meaningful pre-period activity for both selected "
+                "measures are eligible."
+            )
+
+            with st.expander(
+                "Inspect the ranked values",
+                expanded=False,
+            ):
+                detail = _build_detail_table(
+                    displayed_data,
+                    metric_a_label=metric_a_label,
+                    metric_b_label=metric_b_label,
+                )
+
+                detail_column_config = {}
+
+                for column in detail.columns:
+                    if column.endswith(" · Pre") or column.endswith(" · Post"):
+                        detail_column_config[column] = (
+                            st.column_config.NumberColumn(
+                                column,
+                                format="%,.1f",
+                            )
+                        )
+                    elif column.endswith(" · Daily-average change"):
+                        detail_column_config[column] = (
+                            st.column_config.NumberColumn(
+                                column,
+                                format="%+,.1f",
+                            )
+                        )
+                    elif column.endswith(" · Percent change"):
+                        detail_column_config[column] = (
+                            st.column_config.NumberColumn(
+                                column,
+                                format="%+.1f%%",
+                            )
+                        )
+                    elif column == "Divergence":
+                        detail_column_config[column] = (
+                            st.column_config.NumberColumn(
+                                column,
+                                format="%.1f pp",
+                            )
+                        )
+
+                st.dataframe(
+                    detail,
+                    width="stretch",
+                    hide_index=True,
+                    column_config=detail_column_config,
+                )
+
+    with recurrence_tab:
         st.markdown(
-            f"##### {selected_zone_name}: evidence by time bucket"
+            "Identify zones where opposite movement repeats across multiple "
+            "weekday and weekend temporal buckets. This is recurring divergence "
+            "evidence, not proof that one mode substituted for another."
         )
 
-        selected_zone_fig = build_selected_zone_evidence_chart(
-            selected_zone_evidence,
-            metric_a_label=metric_a_label,
-            metric_b_label=metric_b_label,
-        )
+        recurrence_control1, recurrence_control2 = st.columns(2)
 
-        st.plotly_chart(
-            selected_zone_fig,
-            width="stretch",
-            config={
-                "displayModeBar": False,
-                "responsive": True,
-            },
-            key=(
-                f"raw06_selected_zone_"
-                f"{selected_zone_id}_"
-                f"{metric_a}_{metric_b}"
-            ),
-        )
-
-        render_chart_insight(
-            _build_selected_zone_takeaway(
-                selected_zone_evidence,
-                zone_name=selected_zone_name,
-                metric_a_label=metric_a_label,
-                metric_b_label=metric_b_label,
+        with recurrence_control1:
+            recurrence_top_n = st.selectbox(
+                "Zones to show",
+                options=TOP_N_OPTIONS,
+                index=1,
+                key="raw06_recurrence_top_n",
             )
-        )
 
-        st.caption(
-            "Opposite signs indicate an inverse pattern in that temporal "
-            "bucket. Same-sign bars show that the two measures moved together."
-        )
+        with recurrence_control2:
+            minimum_recurring_buckets = st.slider(
+                "Minimum recurring buckets",
+                min_value=1,
+                max_value=len(RECURRENCE_BUCKETS),
+                value=2,
+                step=1,
+                help=(
+                    "Require opposite-direction movement in at least this many "
+                    "eligible time-of-week buckets."
+                ),
+                key="raw06_minimum_recurring_buckets",
+            )
 
-        with st.expander(
-            "Inspect recurrence evidence",
-            expanded=False,
+        with st.spinner(
+            "Calculating recurrence across temporal buckets..."
         ):
-            recurrence_detail = _build_recurrence_detail_table(
+            recurrence_summary, bucket_evidence = _build_recurrence_evidence(
+                metric_a,
+                metric_b,
+                minimum_divergence,
+            )
+
+        filtered_recurrence = _filter_recurrence_summary(
+            recurrence_summary,
+            geography_filter=geography_filter,
+            geography_value=geography_value,
+            minimum_recurring_buckets=minimum_recurring_buckets,
+        )
+
+        if filtered_recurrence.empty:
+            st.info(
+                "No zones met the selected recurrence and divergence requirements."
+            )
+        else:
+            displayed_recurrence = filtered_recurrence.head(
+                recurrence_top_n
+            ).copy()
+
+            recurrence_cards = _build_recurrence_summary_cards(
                 filtered_recurrence
             )
 
-            st.dataframe(
-                recurrence_detail,
-                width="stretch",
-                hide_index=True,
-                column_config={
-                    "Inverse bucket share": (
-                        st.column_config.NumberColumn(
-                            format="%.1f%%",
-                        )
-                    ),
-                    "Median divergence": (
-                        st.column_config.NumberColumn(
-                            format="%.1f pp",
-                        )
-                    ),
-                    "Maximum divergence": (
-                        st.column_config.NumberColumn(
-                            format="%.1f pp",
-                        )
-                    ),
-                },
+            _render_recurrence_cards(
+                recurrence_cards
             )
 
+            st.caption(
+                f"Metric A: {metric_a_label} · "
+                f"Metric B: {metric_b_label} · "
+                f"{geography_context} · "
+                f"Minimum gap for each counted recurring bucket: "
+                f"{minimum_divergence:.0f} pp"
+            )
+
+            recurrence_takeaway = _build_recurrence_takeaway(
+                filtered_recurrence,
+                metric_a_label=metric_a_label,
+                metric_b_label=metric_b_label,
+            )
+
+            recurrence_fig = build_recurrence_dot_plot(
+                displayed_recurrence,
+                metric_a_label=metric_a_label,
+                metric_b_label=metric_b_label,
+                height=max(
+                    560,
+                    42 * len(
+                        displayed_recurrence
+                    )
+                    + 155,
+                ),
+            )
+
+            st.plotly_chart(
+                recurrence_fig,
+                width="stretch",
+                config={
+                    "displayModeBar": False,
+                    "responsive": True,
+                },
+                key=(
+                    f"raw06_recurrence_"
+                    f"{metric_a}_{metric_b}_"
+                    f"{geography_filter}_"
+                    f"{geography_value}_"
+                    f"{minimum_divergence}_"
+                    f"{minimum_recurring_buckets}_"
+                    f"{recurrence_top_n}"
+                ),
+            )
+            render_chart_insight(recurrence_takeaway)
+
+            st.caption(
+                "Horizontal position is the share of eligible temporal buckets "
+                "showing opposite movement. Dot size represents median inverse "
+                "divergence, and color represents the number of inverse buckets."
+            )
+
+            selected_zone_id = st.selectbox(
+                "Inspect a recurring zone",
+                options=displayed_recurrence[
+                    "taxi_zone_id"
+                ].tolist(),
+                format_func=lambda zone_id: str(
+                    displayed_recurrence.loc[
+                        displayed_recurrence["taxi_zone_id"].eq(zone_id),
+                        "zone",
+                    ].iloc[0]
+                ),
+                key="raw06_selected_recurrence_zone",
+            )
+
+            selected_zone_name = str(
+                displayed_recurrence.loc[
+                    displayed_recurrence["taxi_zone_id"].eq(
+                        selected_zone_id
+                    ),
+                    "zone",
+                ].iloc[0]
+            )
+
+            selected_zone_evidence = bucket_evidence[
+                bucket_evidence["taxi_zone_id"].eq(
+                    selected_zone_id
+                )
+            ].copy()
+
+            st.markdown(
+                f"##### {selected_zone_name}: evidence by time bucket"
+            )
+
+            selected_zone_fig = build_selected_zone_evidence_chart(
+                selected_zone_evidence,
+                metric_a_label=metric_a_label,
+                metric_b_label=metric_b_label,
+            )
+
+            st.plotly_chart(
+                selected_zone_fig,
+                width="stretch",
+                config={
+                    "displayModeBar": False,
+                    "responsive": True,
+                },
+                key=(
+                    f"raw06_selected_zone_"
+                    f"{selected_zone_id}_"
+                    f"{metric_a}_{metric_b}"
+                ),
+            )
+
+            render_chart_insight(
+                _build_selected_zone_takeaway(
+                    selected_zone_evidence,
+                    zone_name=selected_zone_name,
+                    metric_a_label=metric_a_label,
+                    metric_b_label=metric_b_label,
+                    minimum_divergence=minimum_divergence,
+                )
+            )
+
+            st.caption(
+                "Opposite signs indicate an inverse pattern in that temporal "
+                "bucket. A bucket counts toward recurrence only when its gap also "
+                "meets the shared minimum-divergence threshold; same-sign bars show "
+                "that the two measures moved together."
+            )
+
+            with st.expander(
+                "Inspect recurrence evidence",
+                expanded=False,
+            ):
+                recurrence_detail = _build_recurrence_detail_table(
+                    filtered_recurrence,
+                    metric_a_label=metric_a_label,
+                    metric_b_label=metric_b_label,
+                )
+
+                st.dataframe(
+                    recurrence_detail,
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "Inverse bucket share": (
+                            st.column_config.NumberColumn(
+                                format="%.1f%%",
+                            )
+                        ),
+                        "Median divergence": (
+                            st.column_config.NumberColumn(
+                                format="%.1f pp",
+                            )
+                        ),
+                        "Maximum divergence": (
+                            st.column_config.NumberColumn(
+                                format="%.1f pp",
+                            )
+                        ),
+                    },
+                )
+
+
+st.markdown("### What this page establishes")
+st.markdown(
+    "Opposite-direction movement is not just the inverse of a citywide relationship. "
+    "It identifies specific places where two measures separated, and the recurrence "
+    "view distinguishes a one-off disagreement from a pattern that appears across "
+    "multiple weekday or weekend time buckets."
+)
+
 with st.expander(
-    "How these views work",
+    "How this page works",
     expanded=False,
 ):
     st.markdown(
         """
-**Largest divergences**
+        **1. Require a genuine opposite-direction pattern.** A Taxi Zone enters a
+        divergence ranking only when both selected measures have complete pre-CP and
+        post-CP values, both pass the project's metric-specific baseline requirement,
+        and one measure increased while the other decreased.
 
-A zone enters the ranking only when both selected measures have complete
-pre-CP and post-CP values, both pass the project's metric-specific baseline
-required for stable percentage change, and one measure increased while the
-other decreased. The ranking is the absolute percentage-point gap between
-the two changes.
+        **2. Measure the size of the disagreement.** Divergence is the absolute
+        percentage-point gap between the two percentage changes. The sign of each
+        endpoint preserves which measure increased and which decreased; the connector
+        length shows how far apart they were.
 
-**Recurring patterns**
+        **3. Check whether the pattern repeats.** The recurrence analysis applies the
+        same eligibility and opposite-direction rules separately to the ten ordered
+        weekday and weekend temporal buckets.
 
-The same eligibility and opposite-direction rules are applied separately to
-each of the ten ordered weekday and weekend temporal buckets. Recurrence
-counts how many eligible buckets show opposite movement and summarizes the
-divergence magnitude across those buckets.
+        **4. Require a meaningful gap for recurrence.** A time bucket counts only when
+        its opposite-direction gap also meets the shared minimum-divergence threshold.
+        Recurrence then summarizes how often that qualifying pattern repeats and how
+        large those disagreements were.
 
-Both views identify descriptive divergence only. They do not establish
-substitution or causality.
+        **5. Keep divergence descriptive.** Opposite-direction changes can surface
+        possible substitution-like patterns worth investigating, but they do not
+        establish that one mode displaced another or that congestion pricing caused
+        the divergence.
         """
-
     )
+
+st.caption(
+    "Evidence scope: observed NYC mobility before and after the January 5, 2025 "
+    "congestion-pricing launch. Divergence identifies opposite-direction pre/post "
+    "changes among eligible measures and Taxi Zones; it is descriptive evidence, "
+    "not a causal or substitution estimate."
+)

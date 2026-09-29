@@ -23,11 +23,131 @@ from app.data_access.mobility_environments import (
 )
 from app.utils.project_branding import (
     BRAND_COLORS,
+    exploration_section,
     inject_app_css,
+    render_chart_insight,
 )
 
 
 inject_app_css()
+
+
+def _render_filtered_storyline(
+    scoped_events: pd.DataFrame,
+    scoped_eligible: pd.DataFrame,
+    *,
+    stress_family: str,
+) -> None:
+    """
+    Render the storyline inside Raw 14's existing Interactive Explorer.
+
+    WHY: the UpSet chart and storyline should describe the same filtered event
+    universe. Page-level stress-family, date, and temporal-bucket controls are
+    therefore resolved before this function is called. Only storyline-specific
+    display controls live here.
+    """
+    st.markdown("### When did these modes share the same stress?")
+
+    st.caption(
+        "The UpSet view above shows which modality combinations characterize "
+        "the current selection. This storyline keeps those same filters and "
+        "adds time; the controls below only change which intersection sizes "
+        "and how many weekly events are drawn."
+    )
+
+    control_left, control_right = st.columns([1.25, 1.0])
+
+    with control_left:
+        intersection_sizes = _intersection_size_control(
+            key_prefix="raw14_filtered_storyline",
+            default=(2, 3, 4),
+        )
+
+    with control_right:
+        event_limit = st.slider(
+            "Weekly events to display",
+            min_value=8,
+            max_value=40,
+            value=20,
+            step=1,
+            key="raw14_filtered_storyline_event_limit",
+            help=(
+                "Controls visual density. A small number of the strongest "
+                "higher-order events are preserved before remaining positions "
+                "are filled by incidence."
+            ),
+        )
+
+    if not intersection_sizes:
+        st.info(
+            "Choose at least one intersection size to display the storyline."
+        )
+        return
+
+    required_storyline_columns = {
+        "signature_label",
+        "modality_signature",
+    }
+    missing_storyline_columns = (
+        required_storyline_columns
+        - set(scoped_events.columns)
+    )
+
+    if missing_storyline_columns:
+        raise RuntimeError(
+            "Filtered storyline events are missing the signature enrichment "
+            f"required by the weekly storyline: "
+            f"{sorted(missing_storyline_columns)}"
+        )
+
+    weekly = _weekly_storyline_surface(
+        scoped_events,
+        scoped_eligible,
+    )
+
+    if weekly.empty:
+        st.info(
+            "No shared weekly stress combinations match the current "
+            "explorer filters and selected intersection sizes."
+        )
+        return
+
+    figure = _build_stress_storyline_figure(
+        weekly,
+        family_label=stress_family,
+        max_events=event_limit,
+        modality_counts=intersection_sizes,
+    )
+
+    st.plotly_chart(
+        figure,
+        width="stretch",
+        config={
+            "displayModeBar": False,
+            "responsive": True,
+        },
+        key="raw14_filtered_storyline_chart",
+    )
+
+    takeaway = _storyline_takeaway(
+        weekly,
+        max_events=event_limit,
+        family_label=stress_family,
+        modality_counts=intersection_sizes,
+    )
+
+    if takeaway:
+        render_chart_insight(takeaway)
+
+    sizes = ", ".join(
+        f"{value}-way"
+        for value in intersection_sizes
+    )
+    st.caption(
+        f"Current explorer selection · {sizes} intersections · "
+        f"up to {event_limit} weekly events · "
+        "line thickness = incidence per 1,000 eligible observations."
+    )
 
 
 # =============================================================================
@@ -40,7 +160,7 @@ inject_app_css()
 
 
 PAGE_CAPTION = "MOBILITY STRESS PATTERNS"
-PAGE_TITLE = "How do mobility stress anomalies differ?"
+PAGE_TITLE = "How did mobility stress differ across modes, time, and place?"
 PHASE_1_SCOUTING_MODE = False
 
 HERO_INTERSECTION_COUNT = 6
@@ -71,6 +191,7 @@ DEMAND_MODALITY_ORDER = {
 STRESS_FAMILY_OPTIONS = (
     "Congestion",
     "Demand",
+    "Both",
     "All",
 )
 
@@ -169,8 +290,8 @@ PANEL_COLORS = {
     "Transit-Rich Outer Boroughs": BRAND_COLORS["dark_teal"],
     "Lower-Transit Neighborhoods": BRAND_COLORS["terracotta"],
     "Long-Trip Fast-Mobility Zones": BRAND_COLORS["seafoam"],
-    "Urban Activity Core": "#5B5F97",
-    "Staten Island Fast-Mobility": "#A66A3F",
+    "Urban Activity Core": "#4F8F92",
+    "Staten Island Fast-Mobility": "#C77E63",
 }
 
 INACTIVE_DOT_COLOR = "rgba(120, 145, 150, 0.20)"
@@ -434,7 +555,7 @@ def _stress_family_signature(
             include = is_demand_metric
         elif stress_family == "Congestion":
             include = is_congestion_metric
-        elif stress_family == "All":
+        elif stress_family in {"All", "Both"}:
             include = (
                 is_taxi
                 or is_fhvhv
@@ -531,7 +652,7 @@ def _metric_tokens_for_family(
             include = is_demand_metric
         elif stress_family == "Congestion":
             include = is_congestion_metric
-        elif stress_family == "All":
+        elif stress_family in {"All", "Both"}:
             include = (
                 is_taxi
                 or is_fhvhv
@@ -785,7 +906,7 @@ def _load_all_stress_events() -> pd.DataFrame:
 
     if missing:
         raise ValueError(
-            "Page 13 is missing required event fields: "
+            "The stress-anomaly data are missing required fields: "
             + ", ".join(
                 missing
             )
@@ -1837,53 +1958,47 @@ def _stress_family_filter(
     events: pd.DataFrame,
     stress_family: str,
 ) -> pd.DataFrame:
+    congestion = (
+        events["has_congestion_oriented"]
+        .fillna(False)
+        .astype(bool)
+    )
+    demand = (
+        events["has_positive_demand_shock"]
+        .fillna(False)
+        .astype(bool)
+    )
+
     if stress_family == "Demand":
-        mask = (
-            events[
-                "has_positive_demand_shock"
-            ]
-            .fillna(False)
-            .astype(bool)
-        )
+        mask = demand
+        signature_family = "Demand"
     elif stress_family == "Congestion":
-        mask = (
-            events[
-                "has_congestion_oriented"
-            ]
-            .fillna(False)
-            .astype(bool)
-        )
+        mask = congestion
+        signature_family = "Congestion"
+    elif stress_family == "Both":
+        mask = congestion & demand
+        signature_family = "All"
     elif stress_family == "All":
-        mask = pd.Series(
-            True,
-            index=events.index,
-        )
+        mask = pd.Series(True, index=events.index)
+        signature_family = "All"
     else:
         raise ValueError(
             f"Unsupported stress family: {stress_family}"
         )
 
-    scoped = events[
-        mask
-    ].copy()
+    scoped = events[mask].copy()
 
     scoped["modality_signature"] = (
-        scoped[
-            "stress_metric_driver_list"
-        ].map(
-            lambda value: (
-                _stress_family_signature(
-                    value,
-                    stress_family,
-                )
+        scoped["stress_metric_driver_list"].map(
+            lambda value: _stress_family_signature(
+                value,
+                signature_family,
             )
         )
     )
 
     return scoped[
-        scoped[
-            "modality_signature"
-        ].map(bool)
+        scoped["modality_signature"].map(bool)
     ].copy()
 
 
@@ -2456,7 +2571,7 @@ def _build_custom_upset_panel(
                 + "<br><b>"
                 + (
                     "Defining metrics"
-                    if stress_family == "All"
+                    if stress_family in {"All", "Both"}
                     else (
                         "Defining "
                         + stress_family.lower()
@@ -4461,6 +4576,840 @@ def _build_phase_1_scouting_report() -> str:
     return "\n".join(sections)
 
 
+
+# =============================================================================
+# Weekly stress-storyline prototype
+# =============================================================================
+STORYLINE_MODALITY_ORDER = (
+    "Taxi",
+    "FHVHV",
+    "Subway",
+    "Bus",
+)
+
+STORYLINE_MODALITY_Y = {
+    "Taxi": 3.0,
+    "FHVHV": 2.0,
+    "Subway": 1.0,
+    "Bus": 0.0,
+}
+
+STORYLINE_MODALITY_COLORS = {
+    "Taxi": BRAND_COLORS["terracotta"],
+    "FHVHV": BRAND_COLORS["dark_teal"],
+    "Subway": BRAND_COLORS["seafoam"],
+    "Bus": BRAND_COLORS["pale_peach"],
+}
+
+
+def _weekly_storyline_surface(
+    family_events: pd.DataFrame,
+    eligible: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Aggregate exact modality combinations to week.
+
+    WHY: daily events are too dense for a storyline, while monthly aggregation
+    can erase short-lived combinations. Weekly is the first defensible grain to
+    test, not a permanent assumption.
+    """
+    if family_events.empty:
+        return pd.DataFrame()
+
+    weekly = family_events.copy()
+    weekly["week_start"] = (
+        weekly["date"]
+        - pd.to_timedelta(
+            weekly["date"].dt.weekday,
+            unit="D",
+        )
+    )
+
+    # WHY: the canonical event loader does not require directional strength.
+    # Keep this prototype on fields guaranteed by Raw 14's event contract.
+    weekly_summary = (
+        weekly.groupby(
+            [
+                "week_start",
+                "modality_signature",
+                "signature_label",
+            ],
+            observed=True,
+            dropna=False,
+        )
+        .agg(
+            event_count=(
+                "comparison_event_id",
+                "nunique",
+            ),
+        )
+        .reset_index()
+    )
+
+    weekly_totals = (
+        weekly.groupby(
+            "week_start",
+            observed=True,
+        )["comparison_event_id"]
+        .nunique()
+        .rename("weekly_stress_events")
+        .reset_index()
+    )
+
+    eligible_weekly = eligible.copy()
+    eligible_weekly["week_start"] = (
+        eligible_weekly["date"]
+        - pd.to_timedelta(
+            eligible_weekly["date"].dt.weekday,
+            unit="D",
+        )
+    )
+
+    eligible_counts = (
+        eligible_weekly.groupby(
+            "week_start",
+            observed=True,
+        )
+        .size()
+        .rename("eligible_observations")
+        .reset_index()
+    )
+
+    weekly_summary = (
+        weekly_summary
+        .merge(
+            weekly_totals,
+            on="week_start",
+            how="left",
+            validate="many_to_one",
+        )
+        .merge(
+            eligible_counts,
+            on="week_start",
+            how="left",
+            validate="many_to_one",
+        )
+    )
+
+    weekly_summary["incidence_per_1k"] = (
+        1000.0
+        * weekly_summary["event_count"]
+        / weekly_summary["eligible_observations"]
+    )
+
+    weekly_summary["weekly_stress_share"] = (
+        weekly_summary["event_count"]
+        / weekly_summary["weekly_stress_events"]
+    )
+
+    return weekly_summary.sort_values(
+        [
+            "week_start",
+            "event_count",
+        ],
+        ascending=[
+            True,
+            False,
+        ],
+    ).reset_index(drop=True)
+
+
+def _thickness_scout(
+    weekly_surface: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Compare candidate thickness measures on the same weekly combinations.
+
+    WHY: thickness only earns a place if its dynamic range is visible without
+    allowing a few extreme weeks to dominate the whole graphic.
+    """
+    candidates = {
+        "Raw event count": "event_count",
+        "Incidence per 1,000 eligible": "incidence_per_1k",
+        "Share of that week's stress": "weekly_stress_share",
+    }
+
+    rows = []
+
+    for label, column in candidates.items():
+        values = pd.to_numeric(
+            weekly_surface[column],
+            errors="coerce",
+        ).dropna()
+
+        if values.empty:
+            continue
+
+        p10 = float(values.quantile(0.10))
+        p50 = float(values.quantile(0.50))
+        p90 = float(values.quantile(0.90))
+        p95 = float(values.quantile(0.95))
+        maximum = float(values.max())
+
+        rows.append(
+            {
+                "candidate": label,
+                "p10": p10,
+                "median": p50,
+                "p90": p90,
+                "p95": p95,
+                "max": maximum,
+                "p90_to_median": (
+                    p90 / p50
+                    if p50 > 0
+                    else np.nan
+                ),
+                "max_to_median": (
+                    maximum / p50
+                    if p50 > 0
+                    else np.nan
+                ),
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+def _width_from_incidence(
+    values: pd.Series,
+) -> pd.Series:
+    """
+    Map incidence to a restrained visible width.
+
+    WHY: percentile clipping preserves relative prevalence without letting one
+    extreme combination turn into an oversized ribbon.
+    """
+    numeric = pd.to_numeric(
+        values,
+        errors="coerce",
+    ).fillna(0.0)
+
+    if numeric.empty:
+        return numeric
+
+    low = float(numeric.quantile(0.10))
+    high = float(numeric.quantile(0.95))
+
+    if not np.isfinite(high) or high <= low:
+        return pd.Series(
+            4.0,
+            index=numeric.index,
+        )
+
+    clipped = numeric.clip(
+        lower=low,
+        upper=high,
+    )
+
+    return (
+        2.5
+        + 7.5
+        * (clipped - low)
+        / (high - low)
+    )
+
+
+def _storyline_display_events(
+    weekly_surface: pd.DataFrame,
+    *,
+    max_events: int,
+    modality_counts: tuple[int, ...] = (2, 3, 4),
+) -> pd.DataFrame:
+    """Select events while preserving rare higher-order convergence."""
+    if weekly_surface.empty:
+        return weekly_surface.copy()
+
+    allowed = {int(value) for value in modality_counts}
+    candidates = weekly_surface.copy()
+    candidates["modality_count"] = candidates["modality_signature"].map(len)
+    candidates = candidates.loc[
+        candidates["modality_count"].isin(allowed)
+    ].copy()
+
+    if candidates.empty:
+        return candidates
+
+    reserved_parts = []
+
+    # WHY: pure Top-N incidence hid nearly all 3-way events and every 4-way
+    # event in the audit. Reserve limited representation without changing
+    # thickness, which still communicates actual prevalence.
+    if 4 in allowed:
+        four_way = candidates.loc[
+            candidates["modality_count"].eq(4)
+        ].nlargest(1, "incidence_per_1k")
+        if not four_way.empty:
+            reserved_parts.append(four_way)
+
+    if 3 in allowed:
+        three_way = candidates.loc[
+            candidates["modality_count"].eq(3)
+        ].nlargest(min(3, max_events), "incidence_per_1k")
+        if not three_way.empty:
+            reserved_parts.append(three_way)
+
+    reserved = (
+        pd.concat(reserved_parts, ignore_index=False)
+        .drop_duplicates(subset=["week_start", "modality_signature"])
+        if reserved_parts
+        else candidates.iloc[0:0].copy()
+    )
+
+    reserved_keys = set(zip(
+        pd.to_datetime(reserved["week_start"]),
+        reserved["modality_signature"].map(tuple),
+    ))
+
+    remainder = candidates.loc[
+        [
+            (pd.Timestamp(week), tuple(signature)) not in reserved_keys
+            for week, signature in zip(
+                candidates["week_start"],
+                candidates["modality_signature"],
+            )
+        ]
+    ].copy()
+
+    fill = remainder.nlargest(
+        max(0, int(max_events) - len(reserved)),
+        "incidence_per_1k",
+    )
+
+    selected = (
+        pd.concat([reserved, fill], ignore_index=True)
+        .drop_duplicates(subset=["week_start", "modality_signature"])
+        .sort_values(
+            ["week_start", "incidence_per_1k"],
+            ascending=[True, False],
+        )
+        .reset_index(drop=True)
+    )
+
+    selected["line_width"] = _width_from_incidence(
+        selected["incidence_per_1k"]
+    )
+    return selected
+
+def _build_stress_storyline_figure(
+    weekly_surface: pd.DataFrame,
+    *,
+    family_label: str,
+    max_events: int,
+    modality_counts: tuple[int, ...] = (2, 3, 4),
+) -> go.Figure:
+    """
+    Prototype a storyline where modes converge only for shared stress events.
+
+    The y positions are categorical home lanes, not a continuous measurement.
+    Ribbon thickness encodes weekly incidence per 1,000 eligible observations.
+    """
+    display_events = _storyline_display_events(
+        weekly_surface,
+        max_events=max_events,
+        modality_counts=modality_counts,
+    )
+
+    figure = go.Figure()
+
+    if weekly_surface.empty:
+        return figure
+
+    x_min = weekly_surface["week_start"].min()
+    x_max = weekly_surface["week_start"].max()
+
+    # Stable home lanes: no vertical jitter carries quantitative meaning.
+    for modality in STORYLINE_MODALITY_ORDER:
+        y_home = STORYLINE_MODALITY_Y[modality]
+
+        figure.add_trace(
+            go.Scatter(
+                x=[
+                    x_min,
+                    x_max,
+                ],
+                y=[
+                    y_home,
+                    y_home,
+                ],
+                mode="lines",
+                name=modality,
+                line={
+                    "color": STORYLINE_MODALITY_COLORS[modality],
+                    "width": 2.2,
+                },
+                hoverinfo="skip",
+                showlegend=False,
+            )
+        )
+
+    # Each selected multi-mode weekly event pulls only participating modes
+    # toward a shared midpoint. The central striped flag makes membership
+    # readable even when several lanes converge.
+    approach_days = pd.Timedelta(days=4)
+
+    for _, event in display_events.iterrows():
+        week = pd.Timestamp(
+            event["week_start"]
+        )
+        signature = tuple(
+            event["modality_signature"]
+        )
+        participant_y = [
+            STORYLINE_MODALITY_Y[modality]
+            for modality in signature
+        ]
+        merge_y = float(
+            np.mean(participant_y)
+        )
+        width = float(
+            event["line_width"]
+        )
+
+        hover = (
+            f"<b>{event['signature_label']}</b>"
+            f"<br>Week of {week:%b %d, %Y}"
+            f"<br>{family_label} stress"
+            f"<br>Events: {int(event['event_count']):,}"
+            f"<br>Incidence: {event['incidence_per_1k']:.2f} per 1,000"
+            f"<br>Share of weekly stress: {event['weekly_stress_share'] * 100:.1f}%"
+            "<extra></extra>"
+        )
+
+        for modality in signature:
+            y_home = STORYLINE_MODALITY_Y[
+                modality
+            ]
+
+            figure.add_trace(
+                go.Scatter(
+                    x=[
+                        week - approach_days,
+                        week,
+                        week + approach_days,
+                    ],
+                    y=[
+                        y_home,
+                        merge_y,
+                        y_home,
+                    ],
+                    mode="lines",
+                    line={
+                        "color": STORYLINE_MODALITY_COLORS[modality],
+                        "width": width,
+                        "shape": "spline",
+                        "smoothing": 0.75,
+                    },
+                    hovertemplate=hover,
+                    showlegend=False,
+                )
+            )
+
+        # Banded flag: make exact modality membership visually unmistakable.
+        # WHY: the first prototype used a ~3-day-wide flag, which collapsed to
+        # only a few screen pixels across a three-year timeline.
+        flag_half_width = pd.Timedelta(days=6)
+        band_height = 0.18
+        total_height = (
+            band_height
+            * len(signature)
+        )
+        band_bottom = (
+            merge_y
+            - total_height / 2
+        )
+        band_top = (
+            merge_y
+            + total_height / 2
+        )
+
+        # A white-backed outline separates the flag from the converging paths.
+        figure.add_shape(
+            type="rect",
+            x0=week - flag_half_width,
+            x1=week + flag_half_width,
+            y0=band_bottom - 0.035,
+            y1=band_top + 0.035,
+            line={
+                "color": BRAND_COLORS["dark_teal"],
+                "width": 1.4,
+            },
+            fillcolor="rgba(255,255,255,0.96)",
+            layer="above",
+        )
+
+        for band_index, modality in enumerate(signature):
+            y0 = (
+                band_bottom
+                + band_index * band_height
+            )
+            y1 = y0 + band_height
+
+            figure.add_shape(
+                type="rect",
+                x0=week - flag_half_width,
+                x1=week + flag_half_width,
+                y0=y0,
+                y1=y1,
+                line={
+                    "color": "white",
+                    "width": 1.0,
+                },
+                fillcolor=STORYLINE_MODALITY_COLORS[
+                    modality
+                ],
+                layer="above",
+            )
+
+        # A visible outlined center marker reinforces the merge point and also
+        # provides a generous hover target without inventing another encoding.
+        figure.add_trace(
+            go.Scatter(
+                x=[week],
+                y=[merge_y],
+                mode="markers",
+                marker={
+                    "size": max(
+                        15.0,
+                        width * 2.0,
+                    ),
+                    "color": "rgba(255,255,255,0.01)",
+                    "line": {
+                        "color": BRAND_COLORS["dark_teal"],
+                        "width": 1.3,
+                    },
+                },
+                hovertemplate=hover,
+                showlegend=False,
+            )
+        )
+
+    cp_start = pd.Timestamp(
+        CONGESTION_PRICING_START_DATE
+    )
+
+    if x_min <= cp_start <= x_max:
+        figure.add_vline(
+            x=cp_start,
+            line_width=1.2,
+            line_dash="dot",
+            line_color=BRAND_COLORS["terracotta"],
+            opacity=0.75,
+        )
+
+        figure.add_annotation(
+            x=cp_start,
+            y=1.0,
+            yref="paper",
+            text="Jan 5, 2025 · congestion pricing begins",
+            showarrow=False,
+            xanchor="left",
+            yanchor="bottom",
+            font={
+                "size": 10,
+                "color": BRAND_COLORS["terracotta"],
+            },
+        )
+
+    figure.update_layout(
+        title={
+            "text": (
+                f"How did modes come together during {family_label.lower()} "
+                "stress?"
+            ),
+            "x": 0,
+            "xanchor": "left",
+            "font": {
+                "size": 18,
+                "color": BRAND_COLORS["dark_teal"],
+            },
+        },
+        height=570,
+        margin={
+            "l": 90,
+            "r": 35,
+            "t": 75,
+            "b": 55,
+        },
+        hovermode="closest",
+        showlegend=False,
+        paper_bgcolor="white",
+        plot_bgcolor=BRAND_COLORS["ice"],
+    )
+
+    figure.update_xaxes(
+        title=None,
+        showgrid=True,
+        gridcolor="rgba(131, 197, 190, 0.20)",
+        tickformat="%b<br>%Y",
+        hoverformat="%b %d, %Y",
+        linecolor=BRAND_COLORS["seafoam"],
+        tickfont={
+            "color": BRAND_COLORS["dark_teal"],
+        },
+    )
+
+    figure.update_yaxes(
+        title=None,
+        tickmode="array",
+        tickvals=[
+            STORYLINE_MODALITY_Y[modality]
+            for modality in STORYLINE_MODALITY_ORDER
+        ],
+        ticktext=list(
+            STORYLINE_MODALITY_ORDER
+        ),
+        range=[
+            -0.55,
+            3.55,
+        ],
+        showgrid=False,
+        zeroline=False,
+        tickfont={
+            "color": BRAND_COLORS["dark_teal"],
+        },
+    )
+
+    return figure
+
+
+
+def _storyline_takeaway(
+    weekly_surface: pd.DataFrame,
+    *,
+    max_events: int,
+    family_label: str,
+    modality_counts: tuple[int, ...] = (2, 3, 4),
+) -> str:
+    """Explain the most prominent shared mode pattern among displayed stress weeks."""
+    displayed = _storyline_display_events(
+        weekly_surface,
+        max_events=max_events,
+        modality_counts=modality_counts,
+    )
+
+    if displayed.empty:
+        return ""
+
+    strongest = displayed.loc[
+        displayed["incidence_per_1k"].idxmax()
+    ]
+
+    week = pd.Timestamp(
+        strongest["week_start"]
+    )
+
+    return (
+        f"Among the displayed **{family_label.lower()}-stress** weeks, "
+        f"**{strongest['signature_label']}** is the most prominent shared mode "
+        f"pattern. Its strongest episode occurred in the week of "
+        f"**{week:%b %d, %Y}**, reaching "
+        f"**{float(strongest['incidence_per_1k']):.2f} stress events per "
+        "1,000 eligible observations**."
+    )
+
+
+def _shared_modality_coverage_audit(
+    all_events: pd.DataFrame,
+    eligible: pd.DataFrame,
+    *,
+    max_events: int,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Check whether the current Top-N storyline hides 3-/4-mode weeks."""
+    coverage_rows = []
+    example_frames = []
+
+    for family_name in ["All", "Congestion", "Demand", "Both"]:
+        family_events, _ = _scout_family_events(all_events, family_name)
+        weekly = _weekly_storyline_surface(family_events, eligible)
+        if weekly.empty:
+            continue
+
+        weekly = weekly.copy()
+        weekly["modality_count"] = weekly["modality_signature"].map(len)
+        displayed = _storyline_display_events(weekly, max_events=max_events)
+
+        displayed_keys = (
+            set(zip(
+                pd.to_datetime(displayed["week_start"]),
+                displayed["modality_signature"].map(tuple),
+            ))
+            if not displayed.empty else set()
+        )
+
+        for modality_count in [2, 3, 4]:
+            subset = weekly.loc[
+                weekly["modality_count"].eq(modality_count)
+            ].copy()
+
+            if subset.empty:
+                coverage_rows.append({
+                    "family": family_name,
+                    "modalities": modality_count,
+                    "available_week_combinations": 0,
+                    "distinct_signatures": 0,
+                    "displayed_in_top_n": 0,
+                    "display_share_pct": 0.0,
+                    "median_incidence_per_1k": np.nan,
+                    "max_incidence_per_1k": np.nan,
+                })
+                continue
+
+            subset["_displayed"] = [
+                (pd.Timestamp(week), tuple(signature)) in displayed_keys
+                for week, signature in zip(
+                    subset["week_start"],
+                    subset["modality_signature"],
+                )
+            ]
+            available = int(len(subset))
+            retained = int(subset["_displayed"].sum())
+
+            coverage_rows.append({
+                "family": family_name,
+                "modalities": modality_count,
+                "available_week_combinations": available,
+                "distinct_signatures": int(
+                    subset["signature_label"].nunique()
+                ),
+                "displayed_in_top_n": retained,
+                "display_share_pct": 100.0 * retained / available,
+                "median_incidence_per_1k": float(
+                    subset["incidence_per_1k"].median()
+                ),
+                "max_incidence_per_1k": float(
+                    subset["incidence_per_1k"].max()
+                ),
+            })
+
+        unusual = weekly.loc[weekly["modality_count"].ge(3)].copy()
+        if not unusual.empty:
+            unusual["_displayed"] = [
+                (pd.Timestamp(week), tuple(signature)) in displayed_keys
+                for week, signature in zip(
+                    unusual["week_start"],
+                    unusual["modality_signature"],
+                )
+            ]
+            unusual["family"] = family_name
+            example_frames.append(
+                unusual.nlargest(5, "incidence_per_1k")[
+                    [
+                        "family", "week_start", "modality_count",
+                        "signature_label", "event_count",
+                        "incidence_per_1k", "_displayed",
+                    ]
+                ].rename(columns={"_displayed": "displayed_in_top_n"})
+            )
+
+    coverage = pd.DataFrame(coverage_rows)
+    if not coverage.empty:
+        for column in [
+            "display_share_pct",
+            "median_incidence_per_1k",
+            "max_incidence_per_1k",
+        ]:
+            coverage[column] = pd.to_numeric(
+                coverage[column], errors="coerce"
+            ).round(3)
+
+    examples = (
+        pd.concat(example_frames, ignore_index=True)
+        if example_frames
+        else pd.DataFrame(columns=[
+            "family", "week_start", "modality_count", "signature_label",
+            "event_count", "incidence_per_1k", "displayed_in_top_n",
+        ])
+    )
+    if not examples.empty:
+        examples["incidence_per_1k"] = pd.to_numeric(
+            examples["incidence_per_1k"], errors="coerce"
+        ).round(3)
+
+    return coverage, examples
+
+def _intersection_size_control(
+    *,
+    key_prefix: str,
+    default: tuple[int, ...] = (2, 3, 4),
+) -> tuple[int, ...]:
+    """Choose 2-, 3-, and/or 4-way shared-stress intersections."""
+    selected = st.multiselect(
+        "Show intersections with",
+        options=[2, 3, 4],
+        default=list(default),
+        format_func=lambda value: f"{value}-way",
+        key=f"{key_prefix}_intersection_sizes",
+        help=(
+            "2-way events join two modes. 3-way and 4-way events show rarer "
+            "higher-order convergence."
+        ),
+    )
+    return tuple(sorted(int(value) for value in selected))
+
+
+def _render_storyline_hero(
+    all_events: pd.DataFrame,
+    eligible: pd.DataFrame,
+) -> None:
+    """Teach the storyline once with a frozen, reproducible configuration."""
+    st.divider()
+    st.markdown("## When did mobility modes share the same stress?")
+    st.markdown(
+        """
+The UpSet views summarize **which mobility modes appeared together** in retained
+stress anomalies. This storyline adds **when**.
+
+Each mode stays on a fixed horizontal **home lane** until it participates in a
+shared weekly stress pattern. Participating modes bend toward the same event
+and meet at a **striped flag**; each stripe identifies one participating mode.
+**Thicker paths mean the exact combination was more prevalent**, measured as
+stress events per 1,000 eligible observations.
+
+This frozen example includes **2-, 3-, and 4-way intersections**. Higher-order
+intersections are rarer, so the display preserves limited representation of
+the strongest 3-/4-way events before filling the remaining positions by
+incidence. Their thickness still reflects their actual prevalence.
+        """
+    )
+
+    family = "All"
+    event_limit = 20
+    intersection_sizes = (2, 3, 4)
+
+    family_events, _ = _scout_family_events(all_events, family)
+    weekly = _weekly_storyline_surface(family_events, eligible)
+
+    figure = _build_stress_storyline_figure(
+        weekly,
+        family_label=family,
+        max_events=event_limit,
+        modality_counts=intersection_sizes,
+    )
+    st.plotly_chart(
+        figure,
+        width="stretch",
+        config={"displayModeBar": False, "responsive": True},
+        key="raw14_stress_storyline_hero",
+    )
+
+    takeaway = _storyline_takeaway(
+        weekly,
+        max_events=event_limit,
+        family_label=family,
+        modality_counts=intersection_sizes,
+    )
+    if takeaway:
+        render_chart_insight(takeaway)
+
+    st.caption(
+        "Frozen example · All retained stress · 20 displayed weekly events · "
+        "2-, 3-, and 4-way intersections · thickness = incidence per 1,000 "
+        "eligible observations."
+    )
+
+
+
+
 # =============================================================================
 # Page
 # =============================================================================
@@ -4489,9 +5438,12 @@ if PHASE_1_SCOUTING_MODE:
     st.stop()
 
 st.write(
-    "See how the composition of retained mobility stress anomalies changes "
-    "across time and place. Congestion stress leads the story; compound and "
-    "demand stress provide complementary views of how that pattern changed."
+    "Knowing when or where stress appeared still leaves an important question: "
+    "**which mobility modes were involved together?** This page treats each retained "
+    "stress anomaly as a combination of Taxi, FHVHV, Subway, and Bus participation, "
+    "then compares those combinations across policy periods, mobility environments, "
+    "and time. Congestion and Demand are inclusive views; **Both** isolates events "
+    "that carried both signals."
 )
 
 hero_events = _load_all_stress_events()
@@ -4539,35 +5491,13 @@ def _relative_change(pre_value: float, post_value: float) -> float:
     return 100.0 * (post_value / pre_value - 1.0) if pre_value else np.nan
 
 
-card1, card2, card3, card4 = st.columns(4)
-with card1:
-    st.metric(
-        "Congestion incidence",
-        f"{congestion_post:.1f} / 1K",
-        f"{_relative_change(congestion_pre, congestion_post):+.1f}% vs Pre-CP",
-        delta_color="inverse",
-        help="Congestion-stress anomalies per 1,000 eligible observations after congestion pricing.",
-    )
-with card2:
-    st.metric(
-        "Bus-only share",
-        f"{bus_post_share * 100:.1f}%",
-        f"{(bus_post_share - bus_pre_share) * 100:+.1f} pp vs Pre-CP",
-    )
-with card3:
-    st.metric(
-        "Demand incidence",
-        f"{demand_post:.1f} / 1K",
-        f"{_relative_change(demand_pre, demand_post):+.1f}% vs Pre-CP",
-        help="Demand-stress anomalies per 1,000 eligible observations after congestion pricing.",
-    )
-with card4:
-    st.metric(
-        "Compound incidence",
-        f"{both_post:.1f} / 1K",
-        f"{_relative_change(both_pre, both_post):+.1f}% vs Pre-CP",
-        help="Observations with both congestion and demand stress per 1,000 eligible observations after congestion pricing.",
-    )
+st.markdown("### Which modes tended to share the same stress events?")
+st.markdown(
+    "The UpSet views below show **exact modality combinations**. Filled dots identify "
+    "the participating modes; a vertical connector means those modes appeared in the "
+    "same stress event. Bar height shows that combination's share within the displayed "
+    "stress family, so the chart answers *what kinds of multimodal stress made up the set?*"
+)
 
 st.markdown("**Choose a comparison story**")
 congestion_tab, compound_tab, demand_tab = st.tabs(
@@ -4579,7 +5509,7 @@ congestion_tab, compound_tab, demand_tab = st.tabs(
 )
 
 with congestion_tab:
-    st.subheader("Congestion stress receded, but became more Bus-centered")
+    st.subheader("How did congestion-involved stress change?")
     _render_custom_comparison(
         congestion_events,
         hero_eligible,
@@ -4589,18 +5519,18 @@ with congestion_tab:
         measure="Composition share",
         chart_key_prefix="raw14_hero_congestion",
     )
-    st.info(
-        "**Takeaway —** Congestion-anomaly incidence fell from "
+    render_chart_insight(
+        "Congestion-involved anomaly incidence fell from "
         f"**{congestion_pre:.1f} to {congestion_post:.1f} per 1,000** "
         f"({_relative_change(congestion_pre, congestion_post):+.1f}%). At the "
         "same time, Bus-only anomalies grew from "
         f"**{bus_pre_share * 100:.1f}% to {bus_post_share * 100:.1f}%** of the "
-        "congestion family, so the smaller Post-CP set is more concentrated in "
-        "Bus stress."
+        "congestion-involved family, so the smaller Post-CP set is more "
+        "concentrated in Bus stress."
     )
 
 with compound_tab:
-    st.subheader("Compound demand-and-congestion stress differs sharply by environment")
+    st.subheader("How did compound stress differ by mobility environment?")
     _render_custom_comparison(
         both_events,
         hero_eligible,
@@ -4618,17 +5548,18 @@ with compound_tab:
     )
     strongest_pair = str(environment_separation["most_separated_pair"])
     max_tvd = float(environment_separation["max_tvd"])
-    st.info(
-        "**Takeaway —** Compound anomalies increased from "
+    render_chart_insight(
+        "Compound anomalies increased from "
         f"**{both_pre:.1f} to {both_post:.1f} per 1,000** "
-        f"({_relative_change(both_pre, both_post):+.1f}%). Their modality mix "
-        f"varies most between **{strongest_pair}** (composition distance "
-        f"**{max_tvd:.3f}**), showing that simultaneous demand and congestion "
-        "stress is not one citywide pattern."
+        f"({_relative_change(both_pre, both_post):+.1f}%). But the modes involved "
+        f"differ substantially across mobility environments: **{strongest_pair}** "
+        "shows the sharpest contrast in which modes participate together. "
+        "Simultaneous demand and congestion stress therefore takes different forms "
+        "across NYC rather than following one citywide pattern."
     )
 
 with demand_tab:
-    st.subheader("Demand stress surged and became more Taxi-centered")
+    st.subheader("How did demand-involved stress change?")
     _render_custom_comparison(
         demand_events,
         hero_eligible,
@@ -4646,326 +5577,285 @@ with demand_tab:
     )
     pre_label = str(pre_demand_leader.idxmax()) if not pre_demand_leader.empty else "n/a"
     post_label = str(post_demand_leader.idxmax()) if not post_demand_leader.empty else "n/a"
-    st.info(
-        "**Takeaway —** Demand-anomaly incidence rose from "
+    render_chart_insight(
+        "Demand-involved anomaly incidence rose from "
         f"**{demand_pre:.1f} to {demand_post:.1f} per 1,000** "
-        f"({_relative_change(demand_pre, demand_post):+.1f}%). The leading "
-        f"single-family signature shifted from **{pre_label}** before pricing "
-        f"to **{post_label}** afterward."
+        f"({_relative_change(demand_pre, demand_post):+.1f}%). The most common "
+        f"mode pattern shifted from **{pre_label}** Pre-CP to "
+        f"**{post_label}** Post-CP."
     )
 
-
-st.divider()
-
-
-
-with st.expander(
-    "How to read these UpSet views",
-    expanded=False,
-):
-    st.markdown(
-        """
-- **Each top bar is a composition share:** the percentage of anomalies in that
-  tab's stress family with the exact displayed combination of participating
-  modes.
-- **Filled dots identify the modes in the intersection.** A vertical connector
-  means more than one mode participated in the same stress event.
-- **Each panel ranks its own six most common modality combinations from left
-  to right.** Intersection numbers are local to that panel rather than shared
-  across the comparison.
-- **Bar axes use the same scale within each tab**, so bar heights remain
-  directly comparable even though the intersection order differs by panel.
-- Intersections are family-specific. Congestion uses speed and duration
-  drivers; Demand uses trip, ridership, and transfer drivers; compound stress
-  uses all recognized drivers among events that qualify for both families.
-- The bars do **not** necessarily sum to 100% because each panel shows only
-  its six most common modality combinations.
-        """
-    )
-
-
-with st.expander(
-    "What counts as a mobility stress anomaly?",
-    expanded=False,
-):
-    st.markdown(
-        """
-A **mobility stress anomaly** is a Taxi Zone × date × daypart event retained
-on the production surface after support from all three anomaly-detection
-frameworks. **Demand stress anomalies** identify positive demand shocks.
-**Congestion stress anomalies** identify congestion-oriented movement in speed
-or duration metrics. The same anomaly can belong to both families.
-
-The UpSet views collapse the relevant driver metrics to **Taxi, FHVHV, Subway,
-and Bus** so the comparison stays focused on mobility modes rather than
-individual measurements.
-        """
-    )
-
-
-st.markdown(
-    "## Build your own comparison"
-)
-
-st.caption(
-    "Choose one comparison dimension, then narrow the stress family, "
-    "time scope, temporal bucket, and measure. Spatial breakdowns remain "
-    "separate: policy geography and mobility environment are never nested."
-)
-
-all_events = (
-    _load_all_stress_events()
-)
-
-study_start = pd.Timestamp(
-    all_events[
-        "date"
-    ].min()
-).date()
-
-study_end = pd.Timestamp(
-    all_events[
-        "date"
-    ].max()
-).date()
-
-compare_by = st.selectbox(
-    "Compare by",
-    options=[
-        "Policy period",
-        "Policy geography",
-        "Mobility environment",
-    ],
-    index=0,
-    key="raw14_compare_by",
-)
-
-control_col1, control_col2, control_col3 = (
-    st.columns(3)
-)
-
-with control_col1:
-    stress_family = st.selectbox(
-        "Stress family",
-        options=list(
-            STRESS_FAMILY_OPTIONS
-        ),
-        index=0,
-        key="raw14_stress_family",
+card1, card2, card3, card4 = st.columns(4)
+with card1:
+    st.metric(
+        "Congestion-involved incidence",
+        f"{congestion_post:.1f} / 1K",
+        f"{_relative_change(congestion_pre, congestion_post):+.1f}% vs Pre-CP",
+        delta_color="off",
         help=(
-            "Demand uses trips, ridership, and transfers. Congestion uses "
-            "average speed and duration; Subway has no congestion metric. The "
-            "same stress anomaly can qualify for both families. All uses every "
-            "recognized driver metric in the production stress-anomaly surface."
+            "Congestion-involved anomalies per 1,000 eligible observations "
+            "Post-CP. Compound events are included when they carry congestion stress."
         ),
     )
-
-with control_col2:
-    measure = st.selectbox(
-        "Measure",
-        options=list(
-            MEASURE_OPTIONS
-        ),
-        index=0,
-        key="raw14_measure",
+with card2:
+    st.metric(
+        "Bus-only share",
+        f"{bus_post_share * 100:.1f}%",
+        f"{(bus_post_share - bus_pre_share) * 100:+.1f} pp vs Pre-CP",
+        delta_color="off",
+    )
+with card3:
+    st.metric(
+        "Demand-involved incidence",
+        f"{demand_post:.1f} / 1K",
+        f"{_relative_change(demand_pre, demand_post):+.1f}% vs Pre-CP",
+        delta_color="off",
         help=(
-            "Composition share asks what kinds of stress anomalies make up each "
-            "panel. Events per 1,000 eligible observations asks how often each "
-            "stress pattern occurred among all eligible Taxi Zone × date × "
-            "daypart observations in that panel."
+            "Demand-involved anomalies per 1,000 eligible observations Post-CP. "
+            "Compound events are included when they carry demand stress."
+        ),
+    )
+with card4:
+    st.metric(
+        "Compound incidence",
+        f"{both_post:.1f} / 1K",
+        f"{_relative_change(both_pre, both_post):+.1f}% vs Pre-CP",
+        delta_color="off",
+        help=(
+            "Anomalies carrying both congestion and demand stress per 1,000 "
+            "eligible observations Post-CP."
         ),
     )
 
-bucket_options = [
-    "All temporal buckets",
-    *_temporal_bucket_options(
-        all_events
+
+
+_render_storyline_hero(
+    hero_events,
+    hero_eligible,
+)
+
+
+with exploration_section(
+    key="raw14_exploration_area",
+    title="Build your own stress-pattern comparison",
+    description=(
+        "Choose one comparison dimension, then narrow the stress family, "
+        "time scope, time-of-week bucket, and measure. Policy geography and "
+        "mobility environment remain alternative—not nested—ways to segment space."
     ),
-]
-
-with control_col3:
-    temporal_bucket = st.selectbox(
-        "Temporal bucket",
-        options=bucket_options,
-        index=0,
-        format_func=(
-            _temporal_bucket_display
-        ),
-        key="raw14_temporal_bucket",
-    )
-
-
-group_column: str
-group_order: Sequence[str]
-group_display_labels: dict[
-    str,
-    str,
-] | None = None
-time_scope = "Full study"
-custom_date_range: object | None = None
-
-if compare_by == "Policy period":
-    group_column = (
-        "period_group"
-    )
-    group_order = (
-        POLICY_PERIOD_ORDER
-    )
-
-    st.caption(
-        "Policy-period comparison uses the full available Pre-CP and Post-CP "
-        "windows citywide."
-    )
-
-elif compare_by == "Policy geography":
-    group_column = (
-        "geography_group"
-    )
-    group_order = (
-        POLICY_GEOGRAPHY_ORDER
-    )
-
-    time_scope = st.selectbox(
-        "Time scope",
-        options=list(
-            TIME_SCOPE_OPTIONS
-        ),
-        index=0,
-        key="raw14_geo_time_scope",
-    )
-
-    if time_scope == "Custom range":
-        custom_date_range = st.date_input(
-            "Custom date range",
-            value=(
-                study_start,
-                study_end,
-            ),
-            min_value=(
-                study_start
-            ),
-            max_value=(
-                study_end
-            ),
-            key="raw14_geo_custom_dates",
-        )
-
-else:
-    group_column = (
-        "environment_group"
-    )
-    group_order = (
-        MOBILITY_ENVIRONMENT_ORDER
-    )
-    group_display_labels = (
-        MOBILITY_ENVIRONMENT_SHORT_LABELS
-    )
-
-    time_scope = st.selectbox(
-        "Time scope",
-        options=list(
-            TIME_SCOPE_OPTIONS
-        ),
-        index=0,
-        key="raw14_env_time_scope",
-    )
-
-    if time_scope == "Custom range":
-        custom_date_range = st.date_input(
-            "Custom date range",
-            value=(
-                study_start,
-                study_end,
-            ),
-            min_value=(
-                study_start
-            ),
-            max_value=(
-                study_end
-            ),
-            key="raw14_env_custom_dates",
-        )
-
-
-start_date, end_date = (
-    _resolve_date_window(
-        all_events,
-        time_scope,
-        custom_date_range,
-    )
-)
-
-scoped_events = (
-    _stress_family_filter(
-        all_events,
-        stress_family,
-    )
-)
-
-scoped_events = (
-    _filter_date_and_bucket(
-        scoped_events,
-        start_date=start_date,
-        end_date=end_date,
-        temporal_bucket=(
-            temporal_bucket
-        ),
-    )
-)
-
-# The independent modality drilldown always starts from the complete event
-# universe produced by the page-level family, date, and temporal controls.
-# Comparison-panel exclusions are applied only to the comparison above it.
-drilldown_base_events = scoped_events.copy()
-
-# Remove Unknown only when policy geography itself defines the panels.
-if (
-    group_column
-    == "geography_group"
 ):
-    scoped_events = scoped_events[
-        scoped_events[
+    all_events = (
+        _load_all_stress_events()
+    )
+
+    study_start = pd.Timestamp(
+        all_events[
+            "date"
+        ].min()
+    ).date()
+
+    study_end = pd.Timestamp(
+        all_events[
+            "date"
+        ].max()
+    ).date()
+
+    compare_by = st.selectbox(
+        "Compare by",
+        options=[
+            "Policy period",
+            "Policy geography",
+            "Mobility environment",
+        ],
+        index=0,
+        key="raw14_compare_by",
+    )
+
+    control_col1, control_col2, control_col3 = (
+        st.columns(3)
+    )
+
+    with control_col1:
+        stress_family = st.selectbox(
+            "Stress family",
+            options=list(
+                STRESS_FAMILY_OPTIONS
+            ),
+            index=0,
+            key="raw14_stress_family",
+            help=(
+                "Demand uses trips, ridership, and transfers. Congestion uses "
+                "average speed and duration; Subway has no congestion metric. "
+                "Congestion and Demand are inclusive, Both isolates events carrying "
+                "both signals, and All uses every recognized mobility driver."
+            ),
+        )
+
+    with control_col2:
+        measure = st.selectbox(
+            "Measure",
+            options=list(
+                MEASURE_OPTIONS
+            ),
+            index=0,
+            key="raw14_measure",
+            help=(
+                "Composition share asks what kinds of stress anomalies make up each "
+                "panel. Events per 1,000 eligible observations asks how often each "
+                "stress pattern occurred among all eligible Taxi Zone × date × "
+                "daypart observations in that panel."
+            ),
+        )
+
+    bucket_options = [
+        "All temporal buckets",
+        *_temporal_bucket_options(
+            all_events
+        ),
+    ]
+
+    with control_col3:
+        temporal_bucket = st.selectbox(
+            "Temporal bucket",
+            options=bucket_options,
+            index=0,
+            format_func=(
+                _temporal_bucket_display
+            ),
+            key="raw14_temporal_bucket",
+        )
+
+
+    group_column: str
+    group_order: Sequence[str]
+    group_display_labels: dict[
+        str,
+        str,
+    ] | None = None
+    time_scope = "Full study"
+    custom_date_range: object | None = None
+
+    if compare_by == "Policy period":
+        group_column = (
+            "period_group"
+        )
+        group_order = (
+            POLICY_PERIOD_ORDER
+        )
+
+        st.caption(
+            "Policy-period comparison uses the full available Pre-CP and Post-CP "
+            "windows citywide."
+        )
+
+    elif compare_by == "Policy geography":
+        group_column = (
             "geography_group"
-        ].isin(
+        )
+        group_order = (
             POLICY_GEOGRAPHY_ORDER
         )
-    ].copy()
+
+        time_scope = st.selectbox(
+            "Time scope",
+            options=list(
+                TIME_SCOPE_OPTIONS
+            ),
+            index=0,
+            key="raw14_geo_time_scope",
+        )
+
+        if time_scope == "Custom range":
+            custom_date_range = st.date_input(
+                "Custom date range",
+                value=(
+                    study_start,
+                    study_end,
+                ),
+                min_value=(
+                    study_start
+                ),
+                max_value=(
+                    study_end
+                ),
+                key="raw14_geo_custom_dates",
+            )
+
+    else:
+        group_column = (
+            "environment_group"
+        )
+        group_order = (
+            MOBILITY_ENVIRONMENT_ORDER
+        )
+        group_display_labels = (
+            MOBILITY_ENVIRONMENT_SHORT_LABELS
+        )
+
+        time_scope = st.selectbox(
+            "Time scope",
+            options=list(
+                TIME_SCOPE_OPTIONS
+            ),
+            index=0,
+            key="raw14_env_time_scope",
+        )
+
+        if time_scope == "Custom range":
+            custom_date_range = st.date_input(
+                "Custom date range",
+                value=(
+                    study_start,
+                    study_end,
+                ),
+                min_value=(
+                    study_start
+                ),
+                max_value=(
+                    study_end
+                ),
+                key="raw14_env_custom_dates",
+            )
 
 
-denominator: pd.DataFrame | None = None
-drilldown_base_denominator: pd.DataFrame | None = None
-
-if (
-    measure
-    == "Stress anomalies per 1,000 eligible observations"
-):
-    denominator = (
-        _load_eligible_observation_context()
+    start_date, end_date = (
+        _resolve_date_window(
+            all_events,
+            time_scope,
+            custom_date_range,
+        )
     )
 
-    denominator = (
+    scoped_events = (
+        _stress_family_filter(
+            all_events,
+            stress_family,
+        )
+    )
+
+    scoped_events = (
         _filter_date_and_bucket(
-            denominator,
-            start_date=(
-                start_date
-            ),
-            end_date=(
-                end_date
-            ),
+            scoped_events,
+            start_date=start_date,
+            end_date=end_date,
             temporal_bucket=(
                 temporal_bucket
             ),
         )
     )
 
-    drilldown_base_denominator = denominator.copy()
+    # The independent modality drilldown always starts from the complete event
+    # universe produced by the page-level family, date, and temporal controls.
+    # Comparison-panel exclusions are applied only to the comparison above it.
+    drilldown_base_events = scoped_events.copy()
 
+    # Remove Unknown only when policy geography itself defines the panels.
     if (
         group_column
         == "geography_group"
     ):
-        denominator = denominator[
-            denominator[
+        scoped_events = scoped_events[
+            scoped_events[
                 "geography_group"
             ].isin(
                 POLICY_GEOGRAPHY_ORDER
@@ -4973,676 +5863,807 @@ if (
         ].copy()
 
 
-date_caption = (
-    f"{start_date:%b %d, %Y} – "
-    f"{end_date:%b %d, %Y}"
-)
-
-st.markdown(
-    f"### {stress_family} stress anomalies · {compare_by}"
-)
-
-st.caption(
-    f"{date_caption}"
-    f" · {_temporal_bucket_display(temporal_bucket)}"
-    f" · {measure}"
-)
-
-if scoped_events.empty:
-    st.warning(
-        "No stress anomalies match this custom scope."
-    )
-else:
-    custom_summaries = (
-        _render_custom_comparison(
-            scoped_events,
-            denominator,
-            group_column=(
-                group_column
-            ),
-            group_order=(
-                group_order
-            ),
-            stress_family=(
-                stress_family
-            ),
-            measure=(
-                measure
-            ),
-            chart_key_prefix=(
-                "raw14_custom"
-            ),
-            group_display_labels=(
-                group_display_labels
-            ),
-        )
-    )
-
-    custom_insight = (
-        _custom_summary_insight(
-            scoped_events,
-            denominator,
-            group_column=(
-                group_column
-            ),
-            group_order=(
-                group_order
-            ),
-            group_display_labels=(
-                group_display_labels
-            ),
-            measure=(
-                measure
-            ),
-        )
-    )
-
-    if custom_insight:
-        st.info(
-            "**Takeaway —** "
-            + _custom_tell_me_insight(custom_insight)
-        )
-
-        st.markdown(
-            "**Custom view summary**"
-        )
-
-        _render_custom_summary_cards(
-            custom_insight
-        )
-
-    top_caption = (
-        _top_pattern_caption(
-            custom_summaries,
-            measure=(
-                measure
-            ),
-        )
-    )
-
-    if top_caption:
-        st.caption(
-            "Panel leaders · "
-            + top_caption
-        )
+    denominator: pd.DataFrame | None = None
+    drilldown_base_denominator: pd.DataFrame | None = None
 
     if (
         measure
         == "Stress anomalies per 1,000 eligible observations"
     ):
-        st.caption(
-            "Incidence is normalized by every eligible Taxi Zone × date × "
-            "daypart observation in the current scope—not only observations "
-            "flagged for stress. When the comparison uses policy geography, "
-            "Taxi Zones 264 and 265 are omitted because no policy-area "
-            "category is available for them."
+        denominator = (
+            _load_eligible_observation_context()
         )
 
-
-
-    # -----------------------------------------------------------------
-    # Phase 5 · Independent modality drill-down
-    # -----------------------------------------------------------------
-    st.divider()
-
-    st.header("Explore selected modalities")
-
-    st.caption(
-        "Start with the full stress-anomaly universe allowed by the controls "
-        "above, or narrow it using one geographic segmentation. Then choose "
-        "the modes you want to investigate. The combination chart preserves "
-        "every mode attached to each matching event, including unselected modes."
-    )
-
-    with st.expander(
-        "Which metrics define Demand and Congestion stress?",
-        expanded=False,
-    ):
-        st.markdown(
-            """
-            | Mode | Demand evidence | Congestion evidence |
-            |---|---|---|
-            | Taxi | Trips | Average speed, average duration |
-            | FHVHV | Trips | Average speed, average duration |
-            | Subway | Ridership, transfers | None |
-            | Bus | Trips | Average speed |
-            """
-        )
-        st.caption(
-            "A mode participates when at least one driver metric belonging to "
-            "the selected stress family appears in the event's reconciled "
-            "driver list."
-        )
-
-    if not drilldown_base_events.empty:
-        geography_col1, geography_col2 = st.columns(2)
-
-        with geography_col1:
-            drilldown_geography_scheme = st.selectbox(
-                "View geography by",
-                options=[
-                    "All geographies",
-                    "Policy geography",
-                    "Borough",
-                    "Mobility cluster",
-                ],
-                index=0,
-                key="raw14_detail_geography_scheme",
-                on_change=_clear_drilldown_geography_values,
-                help=(
-                    "Choose one geographic segmentation system. Policy "
-                    "geography, Borough, and Mobility cluster are alternatives; "
-                    "they are never combined."
+        denominator = (
+            _filter_date_and_bucket(
+                denominator,
+                start_date=(
+                    start_date
+                ),
+                end_date=(
+                    end_date
+                ),
+                temporal_bucket=(
+                    temporal_bucket
                 ),
             )
-
-        drilldown_events = drilldown_base_events.copy()
-        drilldown_denominator = (
-            drilldown_base_denominator.copy()
-            if drilldown_base_denominator is not None
-            else None
         )
-        geography_display = "All geographies"
-        geography_column: str | None = None
-        geography_value: str | None = None
 
-        if drilldown_geography_scheme != "All geographies":
-            if drilldown_geography_scheme == "Policy geography":
-                geography_column = "geography_group"
-                geography_options = [
-                    value
-                    for value in POLICY_GEOGRAPHY_ORDER
-                    if drilldown_events["geography_group"].eq(value).any()
-                ]
-                geography_format = lambda value: value
-                geography_key = "raw14_detail_policy_geography"
-            elif drilldown_geography_scheme == "Borough":
-                geography_column = "borough"
-                geography_options = sorted(
-                    value
-                    for value in drilldown_events["borough"].dropna().astype(str).unique()
-                    if value.strip() and value != "Unknown"
-                )
-                geography_format = lambda value: value
-                geography_key = "raw14_detail_borough"
-            else:
-                geography_column = "environment_group"
-                available_clusters = set(
-                    drilldown_events["environment_group"].dropna().astype(str)
-                )
-                geography_options = [
-                    value
-                    for value in MOBILITY_ENVIRONMENT_ORDER
-                    if value in available_clusters
-                ]
-                geography_format = lambda value: (
-                    MOBILITY_ENVIRONMENT_SHORT_LABELS.get(value, value).replace("<br>", " ")
-                )
-                geography_key = "raw14_detail_cluster"
+        drilldown_base_denominator = denominator.copy()
 
-            with geography_col2:
-                geography_value = st.selectbox(
-                    "Geography value",
-                    options=geography_options,
-                    format_func=geography_format,
-                    key=geography_key,
+        if (
+            group_column
+            == "geography_group"
+        ):
+            denominator = denominator[
+                denominator[
+                    "geography_group"
+                ].isin(
+                    POLICY_GEOGRAPHY_ORDER
                 )
-
-            geography_display = geography_format(geography_value)
-            drilldown_events = drilldown_events[
-                drilldown_events[geography_column].astype(str).eq(str(geography_value))
             ].copy()
-            if drilldown_denominator is not None:
-                drilldown_denominator = drilldown_denominator[
-                    drilldown_denominator[geography_column].astype(str).eq(str(geography_value))
-                ].copy()
-        else:
-            with geography_col2:
-                st.caption(
-                    "No geographic filter applied. The drilldown uses the full "
-                    "stress-anomaly universe allowed by the page-level controls."
-                )
 
-        panel_modalities = _available_modalities(
-            drilldown_events,
+
+    # The storyline always needs the eligible observation universe because
+    # line thickness is incidence per 1,000. Reuse the explorer's existing
+    # date and temporal-bucket filters even when the UpSet itself is showing
+    # composition share rather than incidence.
+    storyline_eligible = _load_eligible_observation_context()
+
+    storyline_eligible = _filter_date_and_bucket(
+        storyline_eligible,
+        start_date=start_date,
+        end_date=end_date,
+        temporal_bucket=temporal_bucket,
+    )
+
+    # Match the same policy-geography panel contract used by the UpSet view.
+    if group_column == "geography_group":
+        storyline_eligible = storyline_eligible[
+            storyline_eligible["geography_group"].isin(
+                POLICY_GEOGRAPHY_ORDER
+            )
+        ].copy()
+
+
+    date_caption = (
+        f"{start_date:%b %d, %Y} – "
+        f"{end_date:%b %d, %Y}"
+    )
+
+    st.markdown(
+        f"### {stress_family} stress anomalies · {compare_by}"
+    )
+
+    st.caption(
+        f"{date_caption}"
+        f" · {_temporal_bucket_display(temporal_bucket)}"
+        f" · {measure}"
+    )
+
+    if scoped_events.empty:
+        st.warning(
+            "No stress anomalies match this custom scope."
+        )
+    else:
+        custom_summaries = (
+            _render_custom_comparison(
+                scoped_events,
+                denominator,
+                group_column=(
+                    group_column
+                ),
+                group_order=(
+                    group_order
+                ),
+                stress_family=(
+                    stress_family
+                ),
+                measure=(
+                    measure
+                ),
+                chart_key_prefix=(
+                    "raw14_custom"
+                ),
+                group_display_labels=(
+                    group_display_labels
+                ),
+            )
+        )
+
+        custom_insight = (
+            _custom_summary_insight(
+                scoped_events,
+                denominator,
+                group_column=(
+                    group_column
+                ),
+                group_order=(
+                    group_order
+                ),
+                group_display_labels=(
+                    group_display_labels
+                ),
+                measure=(
+                    measure
+                ),
+            )
+        )
+
+        if custom_insight:
+            render_chart_insight(
+                _custom_tell_me_insight(custom_insight)
+            )
+
+            st.markdown(
+                "**Custom view summary**"
+            )
+
+            _render_custom_summary_cards(
+                custom_insight
+            )
+
+        top_caption = (
+            _top_pattern_caption(
+                custom_summaries,
+                measure=(
+                    measure
+                ),
+            )
+        )
+
+        if top_caption:
+            st.caption(
+                "Panel leaders · "
+                + top_caption
+            )
+
+        if (
+            measure
+            == "Stress anomalies per 1,000 eligible observations"
+        ):
+            st.caption(
+                "Incidence is normalized by every eligible Taxi Zone × date × "
+                "daypart observation in the current scope—not only observations "
+                "flagged for stress. When the comparison uses policy geography, "
+                "Taxi Zones 264 and 265 are omitted because no policy-area "
+                "category is available for them."
+            )
+
+
+
+        # -----------------------------------------------------------------
+        # Storyline · same filtered universe as the UpSet comparison above
+        # -----------------------------------------------------------------
+        st.divider()
+
+        storyline_events, _ = _scout_family_events(
+            scoped_events,
+            stress_family,
+        )
+
+        _render_filtered_storyline(
+            storyline_events,
+            storyline_eligible,
             stress_family=stress_family,
         )
 
-        signature_counts = drilldown_events["modality_signature"].value_counts()
-        top_signature = list(signature_counts.index[0]) if not signature_counts.empty else []
+        # -----------------------------------------------------------------
+        # Phase 5 · Independent modality drill-down
+        # -----------------------------------------------------------------
+        st.divider()
 
-        # Start with one mode from the leading pattern so the initial view is
-        # immediately readable and does not imply a broad multimode requirement.
-        default_modalities = [
-            modality
-            for modality in top_signature[:1]
-            if modality in panel_modalities
-        ]
+        st.header("Explore selected modalities")
 
-        if (
-            not default_modalities
-            and panel_modalities
+        st.caption(
+            "Start with the full stress-anomaly universe allowed by the controls "
+            "above, or narrow it using one geographic segmentation. Then choose "
+            "the modes you want to investigate. The combination chart preserves "
+            "every mode attached to each matching event, including unselected modes."
+        )
+
+        with st.expander(
+            "Which metrics define Demand and Congestion stress?",
+            expanded=False,
         ):
+            st.markdown(
+                """
+                | Mode | Demand evidence | Congestion evidence |
+                |---|---|---|
+                | Taxi | Trips | Average speed, average duration |
+                | FHVHV | Trips | Average speed, average duration |
+                | Subway | Ridership, transfers | None |
+                | Bus | Trips | Average speed |
+                """
+            )
+            st.caption(
+                "A mode participates when at least one driver metric belonging to "
+                "the selected stress family appears in the event's reconciled "
+                "driver list."
+            )
+
+        if not drilldown_base_events.empty:
+            geography_col1, geography_col2 = st.columns(2)
+
+            with geography_col1:
+                drilldown_geography_scheme = st.selectbox(
+                    "View geography by",
+                    options=[
+                        "All geographies",
+                        "Policy geography",
+                        "Borough",
+                        "Mobility environment",
+                    ],
+                    index=0,
+                    key="raw14_detail_geography_scheme",
+                    on_change=_clear_drilldown_geography_values,
+                    help=(
+                        "Choose one geographic segmentation system. Policy "
+                        "geography, Borough, and Mobility cluster are alternatives; "
+                        "they are never combined."
+                    ),
+                )
+
+            drilldown_events = drilldown_base_events.copy()
+            drilldown_denominator = (
+                drilldown_base_denominator.copy()
+                if drilldown_base_denominator is not None
+                else None
+            )
+            geography_display = "All geographies"
+            geography_column: str | None = None
+            geography_value: str | None = None
+
+            if drilldown_geography_scheme != "All geographies":
+                if drilldown_geography_scheme == "Policy geography":
+                    geography_column = "geography_group"
+                    geography_options = [
+                        value
+                        for value in POLICY_GEOGRAPHY_ORDER
+                        if drilldown_events["geography_group"].eq(value).any()
+                    ]
+                    geography_format = lambda value: value
+                    geography_key = "raw14_detail_policy_geography"
+                elif drilldown_geography_scheme == "Borough":
+                    geography_column = "borough"
+                    geography_options = sorted(
+                        value
+                        for value in drilldown_events["borough"].dropna().astype(str).unique()
+                        if value.strip() and value != "Unknown"
+                    )
+                    geography_format = lambda value: value
+                    geography_key = "raw14_detail_borough"
+                else:
+                    geography_column = "environment_group"
+                    available_clusters = set(
+                        drilldown_events["environment_group"].dropna().astype(str)
+                    )
+                    geography_options = [
+                        value
+                        for value in MOBILITY_ENVIRONMENT_ORDER
+                        if value in available_clusters
+                    ]
+                    geography_format = lambda value: (
+                        MOBILITY_ENVIRONMENT_SHORT_LABELS.get(value, value).replace("<br>", " ")
+                    )
+                    geography_key = "raw14_detail_cluster"
+
+                with geography_col2:
+                    geography_value = st.selectbox(
+                        "Geography value",
+                        options=geography_options,
+                        format_func=geography_format,
+                        key=geography_key,
+                    )
+
+                geography_display = geography_format(geography_value)
+                drilldown_events = drilldown_events[
+                    drilldown_events[geography_column].astype(str).eq(str(geography_value))
+                ].copy()
+                if drilldown_denominator is not None:
+                    drilldown_denominator = drilldown_denominator[
+                        drilldown_denominator[geography_column].astype(str).eq(str(geography_value))
+                    ].copy()
+            else:
+                with geography_col2:
+                    st.caption(
+                        "No geographic filter applied. The drilldown uses the full "
+                        "stress-anomaly universe allowed by the page-level controls."
+                    )
+
+            panel_modalities = _available_modalities(
+                drilldown_events,
+                stress_family=stress_family,
+            )
+
+            signature_counts = drilldown_events["modality_signature"].value_counts()
+            top_signature = list(signature_counts.index[0]) if not signature_counts.empty else []
+
+            # Start with one mode from the leading pattern so the initial view is
+            # immediately readable and does not imply a broad multimode requirement.
             default_modalities = [
-                panel_modalities[0]
+                modality
+                for modality in top_signature[:1]
+                if modality in panel_modalities
             ]
 
-        mode_col1, mode_col2 = st.columns(2)
-
-        with mode_col1:
-            selected_modalities = st.multiselect(
-                "Modes to include",
-                options=panel_modalities,
-                default=(
-                    default_modalities
-                ),
-                key="raw14_detail_modalities",
-                help=(
-                    "With the default match rule, an event is included when "
-                    "at least one selected mode participates. Change the "
-                    "match rule to require every selected mode."
-                ),
-            )
-
-        with mode_col2:
-            match_rule = st.selectbox(
-                "Mode matching rule",
-                options=MATCH_RULE_OPTIONS,
-                index=0,
-                key="raw14_detail_match_rule",
-                help=(
-                    "OR includes an event when at least one selected mode "
-                    "appears. AND requires all selected modes; modes not "
-                    "selected may still appear."
-                ),
-            )
-
-        if not selected_modalities:
-            st.info(
-                "Select at least one modality to inspect."
-            )
-        else:
-            selected_pattern_events = (
-                _filter_selected_modalities(
-                    drilldown_events,
-                    selected_modalities=(
-                        selected_modalities
-                    ),
-                    match_rule=match_rule,
-                )
-            )
-
-            selected_event_count = int(
-                len(
-                    selected_pattern_events
-                )
-            )
-
-            panel_event_count = int(len(drilldown_events))
-
-            panel_share = (
-                selected_event_count
-                / panel_event_count
-                if panel_event_count
-                else np.nan
-            )
-
-            unique_zone_count = int(
-                selected_pattern_events[
-                    "taxi_zone_id"
-                ].nunique()
-            )
-
-            median_strength = (
-                selected_pattern_events[
-                    "event_median_directional_strength"
+            if (
+                not default_modalities
+                and panel_modalities
+            ):
+                default_modalities = [
+                    panel_modalities[0]
                 ]
-                .median()
-                if (
-                    "event_median_directional_strength"
-                    in selected_pattern_events.columns
-                )
-                else np.nan
-            )
 
-            driver_breakdown = (
-                _metric_driver_breakdown(
-                    selected_pattern_events,
-                    stress_family=(
-                        stress_family
+            mode_col1, mode_col2 = st.columns(2)
+
+            with mode_col1:
+                selected_modalities = st.multiselect(
+                    "Modes to include",
+                    options=panel_modalities,
+                    default=(
+                        default_modalities
                     ),
-                    selected_modalities=(
-                        selected_modalities
+                    key="raw14_detail_modalities",
+                    help=(
+                        "With the default match rule, an event is included when "
+                        "at least one selected mode participates. Change the "
+                        "match rule to require every selected mode."
                     ),
                 )
-            )
 
-            scoped_event_count = int(len(drilldown_base_events))
-            is_any_rule = match_rule == MATCH_RULE_ANY
-            modality_text = _natural_join(
-                selected_modalities,
-                conjunction=("or" if is_any_rule else "and"),
-            )
-            funnel_parts = [f"Current scope: **{scoped_event_count:,}**"]
-            if drilldown_geography_scheme != "All geographies":
-                funnel_parts.append(
-                    f"{geography_display}: **{panel_event_count:,}**"
+            with mode_col2:
+                match_rule = st.selectbox(
+                    "Mode matching rule",
+                    options=MATCH_RULE_OPTIONS,
+                    index=0,
+                    key="raw14_detail_match_rule",
+                    help=(
+                        "OR includes an event when at least one selected mode "
+                        "appears. AND requires all selected modes; modes not "
+                        "selected may still appear."
+                    ),
                 )
-            funnel_parts.append(f"Mode filter: **{selected_event_count:,}**")
-            st.caption(" → ".join(funnel_parts))
 
-            if len(selected_modalities) == 1:
-                rule_explanation = (
-                    f"A stress anomaly is included when **{selected_modalities[0]}** "
-                    "appears in its driver evidence. With one selected mode, "
-                    "the OR and AND rules return the same events."
-                )
-            elif is_any_rule:
-                rule_explanation = (
-                    "A stress anomaly is included when **"
-                    + modality_text.replace(" or ", " OR ")
-                    + "** appears in its driver evidence."
+            if not selected_modalities:
+                st.info(
+                    "Select at least one modality to inspect."
                 )
             else:
-                rule_explanation = (
-                    "A stress anomaly is included only when **"
-                    + modality_text.replace(" and ", " AND ")
-                    + "** all appear in its driver evidence. Other mobility "
-                    "modes may also appear."
+                selected_pattern_events = (
+                    _filter_selected_modalities(
+                        drilldown_events,
+                        selected_modalities=(
+                            selected_modalities
+                        ),
+                        match_rule=match_rule,
+                    )
                 )
 
-            st.info(
-                f"**{selected_event_count:,} stress anomalies included.** "
-                + rule_explanation
-            )
-
-            metric_col1, metric_col2, metric_col3, metric_col4 = (
-                st.columns(4)
-            )
-
-            metric_col1.metric(
-                "Included stress anomalies",
-                f"{selected_event_count:,}",
-            )
-
-            metric_col2.metric(
-                "Share of geography scope",
-                (
-                    f"{panel_share * 100:.1f}%"
-                    if not pd.isna(
-                        panel_share
+                selected_event_count = int(
+                    len(
+                        selected_pattern_events
                     )
-                    else "n/a"
-                ),
-            )
+                )
 
-            metric_col3.metric(
-                "Taxi Zones involved",
-                f"{unique_zone_count:,}",
-            )
+                panel_event_count = int(len(drilldown_events))
 
-            metric_col4.metric(
-                "Median directional strength",
-                _format_strength(
-                    median_strength
-                ),
-            )
-
-            if (
-                drilldown_denominator is not None
-                and measure
-                == "Stress anomalies per 1,000 eligible observations"
-            ):
-                panel_eligible_count = int(len(drilldown_denominator))
-
-                selected_incidence = (
+                panel_share = (
                     selected_event_count
-                    / panel_eligible_count
-                    * 1000
-                    if panel_eligible_count
+                    / panel_event_count
+                    if panel_event_count
                     else np.nan
                 )
 
-                if not pd.isna(
-                    selected_incidence
-                ):
-                    st.caption(
-                        "Selected-modality stress-anomaly incidence: "
-                        f"**{selected_incidence:.2f} events per 1,000 "
-                        "eligible observations**."
+                unique_zone_count = int(
+                    selected_pattern_events[
+                        "taxi_zone_id"
+                    ].nunique()
+                )
+
+                median_strength = (
+                    selected_pattern_events[
+                        "event_median_directional_strength"
+                    ]
+                    .median()
+                    if (
+                        "event_median_directional_strength"
+                        in selected_pattern_events.columns
                     )
-
-            bucket_breakdown = (
-                _temporal_bucket_breakdown(
-                    selected_pattern_events
+                    else np.nan
                 )
-            )
 
-            zone_breakdown = (
-                _zone_breakdown(
-                    selected_pattern_events
-                )
-            )
-
-            exact_signature_count = int(
-                selected_pattern_events["modality_signature"].nunique()
-            )
-            selected_pattern_events = selected_pattern_events.copy()
-            selected_pattern_events["_drilldown_group"] = "Selection"
-            selected_combination_summary = _custom_panel_summary(
-                selected_pattern_events,
-                None,
-                group_column="_drilldown_group",
-                group_label="Selection",
-                measure="Composition share",
-                stress_family=stress_family,
-            )
-            combination_chart_is_informative = (
-                exact_signature_count > 1
-                and not selected_combination_summary.empty
-            )
-
-            driver_chart_is_informative = (
-                not driver_breakdown.empty
-                and not np.isclose(
-                    driver_breakdown["event_share"].astype(float),
-                    1.0,
-                ).all()
-            )
-
-            bucket_chart_is_informative = (
-                temporal_bucket == "All temporal buckets"
-                and selected_pattern_events["temporal_bucket"].nunique() > 1
-            )
-
-            drill_col1, drill_col2, drill_col3 = (
-                st.columns(
-                    3,
-                    gap="medium",
-                )
-            )
-
-            with drill_col1:
-                if combination_chart_is_informative:
-                    st.markdown("**How the selected modes combine**")
-                    combination_y_max = _custom_y_max(
-                        {"Selection": selected_combination_summary},
-                        "Composition share",
-                    )
-                    st.plotly_chart(
-                        _build_custom_upset_panel(
-                            selected_combination_summary,
-                            panel_label="Matching events",
-                            panel_color=BRAND_COLORS["dark_teal"],
-                            y_max=combination_y_max,
-                            show_modality_labels=True,
-                            modalities=_modalities_for_family(stress_family),
-                            measure="Composition share",
-                            stress_family=stress_family,
+                driver_breakdown = (
+                    _metric_driver_breakdown(
+                        selected_pattern_events,
+                        stress_family=(
+                            stress_family
                         ),
-                        width="stretch",
-                        config={"displayModeBar": False},
-                        key="raw14_detail_combinations",
+                        selected_modalities=(
+                            selected_modalities
+                        ),
                     )
-                    combination_leader = selected_combination_summary.iloc[0]
-                    st.info(
-                        "**Takeaway —** The leading exact combination is "
-                        f"**{combination_leader['signature_label']}**, accounting "
-                        f"for **{float(combination_leader['event_share']) * 100:.1f}%** "
-                        "of included stress anomalies."
-                    )
-                    if exact_signature_count > len(selected_combination_summary):
-                        st.caption(
-                            f"Showing the six leading combinations out of "
-                            f"{exact_signature_count:,} represented in this match."
-                        )
-                else:
-                    st.markdown("**Driver evidence within the match**")
+                )
 
-                    if driver_breakdown.empty:
+                scoped_event_count = int(len(drilldown_base_events))
+                is_any_rule = match_rule == MATCH_RULE_ANY
+                modality_text = _natural_join(
+                    selected_modalities,
+                    conjunction=("or" if is_any_rule else "and"),
+                )
+                funnel_parts = [f"Current scope: **{scoped_event_count:,}**"]
+                if drilldown_geography_scheme != "All geographies":
+                    funnel_parts.append(
+                        f"{geography_display}: **{panel_event_count:,}**"
+                    )
+                funnel_parts.append(f"Mode filter: **{selected_event_count:,}**")
+                st.caption(" → ".join(funnel_parts))
+
+                if len(selected_modalities) == 1:
+                    rule_explanation = (
+                        f"A stress anomaly is included when **{selected_modalities[0]}** "
+                        "appears in its driver evidence. With one selected mode, "
+                        "the OR and AND rules return the same events."
+                    )
+                elif is_any_rule:
+                    rule_explanation = (
+                        "A stress anomaly is included when **"
+                        + modality_text.replace(" or ", " OR ")
+                        + "** appears in its driver evidence."
+                    )
+                else:
+                    rule_explanation = (
+                        "A stress anomaly is included only when **"
+                        + modality_text.replace(" and ", " AND ")
+                        + "** all appear in its driver evidence. Other mobility "
+                        "modes may also appear."
+                    )
+
+                st.info(
+                    f"**{selected_event_count:,} stress anomalies included.** "
+                    + rule_explanation
+                )
+
+                metric_col1, metric_col2, metric_col3, metric_col4 = (
+                    st.columns(4)
+                )
+
+                metric_col1.metric(
+                    "Included stress anomalies",
+                    f"{selected_event_count:,}",
+                )
+
+                metric_col2.metric(
+                    "Share of geography scope",
+                    (
+                        f"{panel_share * 100:.1f}%"
+                        if not pd.isna(
+                            panel_share
+                        )
+                        else "n/a"
+                    ),
+                )
+
+                metric_col3.metric(
+                    "Taxi Zones involved",
+                    f"{unique_zone_count:,}",
+                )
+
+                metric_col4.metric(
+                    "Median directional strength",
+                    _format_strength(
+                        median_strength
+                    ),
+                )
+
+                if (
+                    drilldown_denominator is not None
+                    and measure
+                    == "Stress anomalies per 1,000 eligible observations"
+                ):
+                    panel_eligible_count = int(len(drilldown_denominator))
+
+                    selected_incidence = (
+                        selected_event_count
+                        / panel_eligible_count
+                        * 1000
+                        if panel_eligible_count
+                        else np.nan
+                    )
+
+                    if not pd.isna(
+                        selected_incidence
+                    ):
                         st.caption(
-                            "No defining-driver detail is available for this "
+                            "Selected-modality stress-anomaly incidence: "
+                            f"**{selected_incidence:.2f} events per 1,000 "
+                            "eligible observations**."
+                        )
+
+                bucket_breakdown = (
+                    _temporal_bucket_breakdown(
+                        selected_pattern_events
+                    )
+                )
+
+                zone_breakdown = (
+                    _zone_breakdown(
+                        selected_pattern_events
+                    )
+                )
+
+                exact_signature_count = int(
+                    selected_pattern_events["modality_signature"].nunique()
+                )
+                selected_pattern_events = selected_pattern_events.copy()
+                selected_pattern_events["_drilldown_group"] = "Selection"
+                selected_combination_summary = _custom_panel_summary(
+                    selected_pattern_events,
+                    None,
+                    group_column="_drilldown_group",
+                    group_label="Selection",
+                    measure="Composition share",
+                    stress_family=stress_family,
+                )
+                combination_chart_is_informative = (
+                    exact_signature_count > 1
+                    and not selected_combination_summary.empty
+                )
+
+                driver_chart_is_informative = (
+                    not driver_breakdown.empty
+                    and not np.isclose(
+                        driver_breakdown["event_share"].astype(float),
+                        1.0,
+                    ).all()
+                )
+
+                bucket_chart_is_informative = (
+                    temporal_bucket == "All temporal buckets"
+                    and selected_pattern_events["temporal_bucket"].nunique() > 1
+                )
+
+                drill_col1, drill_col2, drill_col3 = (
+                    st.columns(
+                        3,
+                        gap="medium",
+                    )
+                )
+
+                with drill_col1:
+                    if combination_chart_is_informative:
+                        st.markdown("**How the selected modes combine**")
+                        combination_y_max = _custom_y_max(
+                            {"Selection": selected_combination_summary},
+                            "Composition share",
+                        )
+                        st.plotly_chart(
+                            _build_custom_upset_panel(
+                                selected_combination_summary,
+                                panel_label="Matching events",
+                                panel_color=BRAND_COLORS["dark_teal"],
+                                y_max=combination_y_max,
+                                show_modality_labels=True,
+                                modalities=_modalities_for_family(stress_family),
+                                measure="Composition share",
+                                stress_family=stress_family,
+                            ),
+                            width="stretch",
+                            config={"displayModeBar": False},
+                            key="raw14_detail_combinations",
+                        )
+                        combination_leader = selected_combination_summary.iloc[0]
+                        render_chart_insight(
+                            "The leading exact combination is "
+                            f"**{combination_leader['signature_label']}**, accounting "
+                            f"for **{float(combination_leader['event_share']) * 100:.1f}%** "
+                            "of included stress anomalies."
+                        )
+                        if exact_signature_count > len(selected_combination_summary):
+                            st.caption(
+                                f"Showing the six leading combinations out of "
+                                f"{exact_signature_count:,} represented in this match."
+                            )
+                    else:
+                        st.markdown("**Driver evidence within the match**")
+
+                        if driver_breakdown.empty:
+                            st.caption(
+                                "No defining-driver detail is available for this "
+                                "selection."
+                            )
+                        elif not driver_chart_is_informative:
+                            st.caption(
+                                "Not charted: this match leaves one exact modality "
+                                "combination, and each selected mode maps directly "
+                                "to the displayed driver metric. Every bar would be "
+                                "100% by construction."
+                            )
+                        else:
+                            st.plotly_chart(
+                                _horizontal_share_chart(
+                                    driver_breakdown,
+                                    category_column="metric_label",
+                                    value_column="event_share",
+                                    hover_count_column="event_count",
+                                    value_title="Share of selection",
+                                    key_color=BRAND_COLORS["dark_teal"],
+                                ),
+                                width="stretch",
+                                config={"displayModeBar": False},
+                                key="raw14_detail_metrics",
+                            )
+                            metric_leader = driver_breakdown.iloc[0]
+                            render_chart_insight(
+                                f"**{metric_leader['metric_label']}** is the most common "
+                                "defining driver in this selection, appearing in "
+                                f"**{float(metric_leader['event_share']) * 100:.1f}%** "
+                                "of included stress anomalies."
+                            )
+
+                with drill_col2:
+                    st.markdown(
+                        "**Top temporal buckets**"
+                    )
+
+                    if bucket_breakdown.empty:
+                        st.caption(
+                            "No temporal-bucket detail is available for this "
                             "selection."
                         )
-                    elif not driver_chart_is_informative:
+                    elif temporal_bucket != "All temporal buckets":
                         st.caption(
-                            "Not charted: this match leaves one exact modality "
-                            "combination, and each selected mode maps directly "
-                            "to the displayed driver metric. Every bar would be "
-                            "100% by construction."
+                            "Not charted: the current page scope already fixes the "
+                            f"temporal bucket at **{_temporal_bucket_display(temporal_bucket)}**."
+                        )
+                    elif not bucket_chart_is_informative:
+                        only_bucket = _temporal_bucket_display(
+                            str(bucket_breakdown.iloc[0]["temporal_bucket"])
+                        )
+                        st.caption(
+                            "Not charted: all matching anomalies happen to fall in "
+                            f"**{only_bucket}** within the current scope."
                         )
                     else:
                         st.plotly_chart(
                             _horizontal_share_chart(
-                                driver_breakdown,
-                                category_column="metric_label",
-                                value_column="event_share",
-                                hover_count_column="event_count",
-                                value_title="Share of selection",
-                                key_color=BRAND_COLORS["dark_teal"],
+                                bucket_breakdown,
+                                category_column=(
+                                    "bucket_label"
+                                ),
+                                value_column=(
+                                    "event_share"
+                                ),
+                                hover_count_column=(
+                                    "event_count"
+                                ),
+                                value_title=(
+                                    "Share of selection"
+                                ),
+                                key_color=(
+                                    BRAND_COLORS[
+                                        "terracotta"
+                                    ]
+                                ),
                             ),
                             width="stretch",
-                            config={"displayModeBar": False},
-                            key="raw14_detail_metrics",
+                            config={
+                                "displayModeBar": False,
+                            },
+                            key="raw14_detail_buckets",
                         )
-                        metric_leader = driver_breakdown.iloc[0]
-                        st.info(
-                            "**Takeaway —** "
-                            f"**{metric_leader['metric_label']}** is the most common "
-                            "defining driver in this selection, appearing in "
-                            f"**{float(metric_leader['event_share']) * 100:.1f}%** "
-                            "of included stress anomalies."
+                        bucket_leader = bucket_breakdown.iloc[0]
+                        render_chart_insight(
+                            f"**{bucket_leader['bucket_label']}** contains the "
+                            "largest share of this selection at "
+                            f"**{float(bucket_leader['event_share']) * 100:.1f}%**."
                         )
 
-            with drill_col2:
-                st.markdown(
-                    "**Top temporal buckets**"
-                )
-
-                if bucket_breakdown.empty:
-                    st.caption(
-                        "No temporal-bucket detail is available for this "
-                        "selection."
-                    )
-                elif temporal_bucket != "All temporal buckets":
-                    st.caption(
-                        "Not charted: the current page scope already fixes the "
-                        f"temporal bucket at **{_temporal_bucket_display(temporal_bucket)}**."
-                    )
-                elif not bucket_chart_is_informative:
-                    only_bucket = _temporal_bucket_display(
-                        str(bucket_breakdown.iloc[0]["temporal_bucket"])
-                    )
-                    st.caption(
-                        "Not charted: all matching anomalies happen to fall in "
-                        f"**{only_bucket}** within the current scope."
-                    )
-                else:
-                    st.plotly_chart(
-                        _horizontal_share_chart(
-                            bucket_breakdown,
-                            category_column=(
-                                "bucket_label"
-                            ),
-                            value_column=(
-                                "event_share"
-                            ),
-                            hover_count_column=(
-                                "event_count"
-                            ),
-                            value_title=(
-                                "Share of selection"
-                            ),
-                            key_color=(
-                                BRAND_COLORS[
-                                    "terracotta"
-                                ]
-                            ),
-                        ),
-                        width="stretch",
-                        config={
-                            "displayModeBar": False,
-                        },
-                        key="raw14_detail_buckets",
-                    )
-                    bucket_leader = bucket_breakdown.iloc[0]
-                    st.info(
-                        "**Takeaway —** "
-                        f"**{bucket_leader['bucket_label']}** contains the "
-                        "largest share of this selection at "
-                        f"**{float(bucket_leader['event_share']) * 100:.1f}%**."
+                with drill_col3:
+                    st.markdown(
+                        "**Top Taxi Zones**"
                     )
 
-            with drill_col3:
-                st.markdown(
-                    "**Top Taxi Zones**"
-                )
+                    if zone_breakdown.empty:
+                        st.caption(
+                            "No Taxi Zone detail is available for this selection."
+                        )
+                    else:
+                        st.plotly_chart(
+                            _horizontal_share_chart(
+                                zone_breakdown,
+                                category_column=(
+                                    "zone_label"
+                                ),
+                                value_column=(
+                                    "event_share"
+                                ),
+                                hover_count_column=(
+                                    "event_count"
+                                ),
+                                value_title=(
+                                    "Share of selection"
+                                ),
+                                key_color=(
+                                    BRAND_COLORS[
+                                        "seafoam"
+                                    ]
+                                ),
+                            ),
+                            width="stretch",
+                            config={
+                                "displayModeBar": False,
+                            },
+                            key="raw14_detail_zones",
+                        )
+                        zone_leader = zone_breakdown.iloc[0]
+                        render_chart_insight(
+                            f"**{zone_leader['zone_label']}** is the leading Taxi "
+                            "Zone in this selection, accounting for "
+                            f"**{float(zone_leader['event_share']) * 100:.1f}%** "
+                            "of selected anomalies."
+                        )
 
-                if zone_breakdown.empty:
+                if driver_chart_is_informative and not combination_chart_is_informative:
                     st.caption(
-                        "No Taxi Zone detail is available for this selection."
-                    )
-                else:
-                    st.plotly_chart(
-                        _horizontal_share_chart(
-                            zone_breakdown,
-                            category_column=(
-                                "zone_label"
-                            ),
-                            value_column=(
-                                "event_share"
-                            ),
-                            hover_count_column=(
-                                "event_count"
-                            ),
-                            value_title=(
-                                "Share of selection"
-                            ),
-                            key_color=(
-                                BRAND_COLORS[
-                                    "seafoam"
-                                ]
-                            ),
-                        ),
-                        width="stretch",
-                        config={
-                            "displayModeBar": False,
-                        },
-                        key="raw14_detail_zones",
-                    )
-                    zone_leader = zone_breakdown.iloc[0]
-                    st.info(
-                        "**Takeaway —** "
-                        f"**{zone_leader['zone_label']}** is the leading Taxi "
-                        "Zone in this selection, accounting for "
-                        f"**{float(zone_leader['event_share']) * 100:.1f}%** "
-                        "of selected anomalies."
+                        "Defining-driver shares are restricted to the selected stress "
+                        "family and selected modalities. They can overlap because one "
+                        "event can contain more than one defining metric—for example, "
+                        "Subway ridership and transfers or Taxi speed and duration."
                     )
 
-            if driver_chart_is_informative and not combination_chart_is_informative:
-                st.caption(
-                    "Defining-driver shares are restricted to the selected stress "
-                    "family and selected modalities. They can overlap because one "
-                    "event can contain more than one defining metric—for example, "
-                    "Subway ridership and transfers or Taxi speed and duration."
-                )
+# =============================================================================
+# Closing synthesis
+# =============================================================================
+st.divider()
+
+st.markdown("### What this page establishes")
+st.markdown(
+    "Mobility stress was not a single systemwide condition. The modes involved in "
+    "stress events changed with the stress family, policy period, mobility environment, "
+    "and week. Looking at exact modality combinations shows whether unusual conditions "
+    "were isolated to one mode or shared across several, while the storyline adds the "
+    "missing temporal dimension: when those multimodal combinations actually occurred."
+)
+
+with st.expander("How this page works", expanded=False):
+    st.markdown(
+        """
+        **1. Define one stress event at a consistent grain.** A mobility stress anomaly
+        is one Taxi Zone × date × daypart observation retained after support from the
+        project's anomaly-detection methods.
+
+        **2. Separate demand and congestion signals.** Demand stress reflects positive
+        shocks in trips, ridership, or transfers. Congestion stress reflects
+        congestion-oriented movement in speed or duration. The **Congestion** and
+        **Demand** views are inclusive, so a compound event can appear in both;
+        **Both** isolates events carrying both signals.
+
+        **3. Collapse metric evidence to mobility modes.** Defining metrics are grouped
+        into **Taxi, FHVHV, Subway, and Bus** so the UpSet views compare exact modality
+        combinations rather than individual measurements.
+
+        **4. Read UpSet bars as composition, not total system volume.** Filled dots show
+        the modes in an exact intersection, and the top bar shows that combination's
+        share within the displayed family. Each panel ranks its own six most common
+        combinations, so the displayed bars need not sum to 100%.
+
+        **5. Use incidence when the question is how common stress was.** Incidence is
+        expressed per **1,000 eligible observations**, which keeps scopes with different
+        amounts of usable data comparable.
+
+        **6. Add time with the shared-stress storyline.** Each mode has a home lane.
+        Lines converge when multiple modes participate in the same weekly stress
+        combination, and line thickness represents incidence per 1,000 eligible
+        observations. The displayed set preserves strong higher-order combinations
+        before filling remaining positions by incidence so uncommon multimodal structure
+        is not automatically hidden.
+        """
+    )
+
+st.caption(
+    "Evidence scope: retained mobility stress anomalies and their defining modality "
+    "combinations. Differences across the January 2025 policy boundary describe how "
+    "observed stress patterns changed; they do not establish that congestion pricing "
+    "caused those changes."
+)

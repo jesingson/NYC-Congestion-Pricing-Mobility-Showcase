@@ -25,9 +25,7 @@ from app.data_access.spatial_aggregations import (
     ALL_TEMPORAL_BUCKETS_LABEL,
 )
 from app.data_access.spatial_visuals import (
-    BRAND_COLORS,
     MAP_CONFIG,
-    apply_branding,
     calculate_robust_symmetric_bound,
     get_zone_geojson,
 )
@@ -37,7 +35,13 @@ from app.data_access.zone_profile_app_tables import (
 from app.data_access.zone_profiles import (
     get_zone_catalog,
 )
-from app.utils.project_branding import inject_app_css, render_chart_insight
+from app.utils.project_branding import (
+    BRAND_COLORS,
+    apply_branding,
+    exploration_section,
+    inject_app_css,
+    render_chart_insight,
+)
 
 
 # ---------------------------------------------------------------------
@@ -755,12 +759,14 @@ def _render_saved_story(
         format="video/mp4",
     )
 
-    render_chart_insight(what_to_watch)
+    st.info(
+        f"**What to watch —** {what_to_watch}"
+    )
 
     st.caption(
         (
             "Map color shows change from each Taxi Zone's own pre-CP "
-            "reference. Orange dots mark stress anomalies where the displayed "
+            "reference. Terracotta dots mark stress anomalies where the displayed "
             "metric was one of the event drivers."
         )
     )
@@ -1223,11 +1229,9 @@ def _build_timeline_figure(
     panel: pd.DataFrame,
     anomalies: pd.DataFrame,
     focus_label: str,
-    metric_column: str,
-    pre_cp_baseline: float,
     show_anomalies: bool,
 ) -> go.Figure:
-    """Build the compact selected-geography timeline."""
+    """Build the selected-geography timeline using the median zone index."""
     if panel.empty:
         return go.Figure()
 
@@ -1238,9 +1242,9 @@ def _build_timeline_figure(
             dropna=False,
         )
         .agg(
-            focus_value=(
-                metric_column,
-                "mean",
+            focus_index=(
+                "pulse_index",
+                "median",
             ),
             zone_count=(
                 "taxi_zone_id",
@@ -1249,17 +1253,6 @@ def _build_timeline_figure(
         )
         .reset_index()
         .sort_values("date")
-    )
-
-    daily["focus_index"] = np.where(
-        (
-            pd.notna(pre_cp_baseline)
-            and pre_cp_baseline != 0
-        ),
-        daily["focus_value"]
-        / pre_cp_baseline
-        * 100,
-        np.nan,
     )
 
     fig = make_subplots(
@@ -1286,7 +1279,7 @@ def _build_timeline_figure(
                 "width": 3,
             },
             name=(
-                f"{focus_label} average"
+                f"{focus_label} median zone index"
             ),
             hovertemplate=(
                 "<b>%{x|%b %d, %Y}</b><br>"
@@ -1384,7 +1377,7 @@ def _build_timeline_figure(
         },
         title={
             "text": (
-                f"{focus_label} over time"
+                f"{focus_label} median Taxi Zone index over time"
             )
         },
         legend={
@@ -1401,7 +1394,7 @@ def _build_timeline_figure(
     )
 
     fig.update_yaxes(
-        title_text="Index (pre-CP = 100)",
+        title_text="Median Taxi Zone index (each zone's pre-CP = 100)",
         secondary_y=False,
     )
 
@@ -1477,31 +1470,6 @@ def _render_custom_view(
                 ]
                 .copy()
             )
-
-        pre_cp_daily = (
-            focus_scope_panel.loc[
-                focus_scope_panel["date"]
-                < CONGESTION_PRICING_START_DATE
-            ]
-            .groupby(
-                "date",
-                observed=True,
-                dropna=False,
-            )
-            .agg(
-                focus_value=(
-                    selected_metric,
-                    "mean",
-                ),
-            )
-            .reset_index()
-        )
-
-        focus_pre_baseline = (
-            pre_cp_daily["focus_value"].mean()
-            if not pre_cp_daily.empty
-            else np.nan
-        )
 
         focus_panel = (
             focus_scope_panel[
@@ -1699,12 +1667,6 @@ def _render_custom_view(
                     if map_focus == "Borough"
                     else "Citywide"
                 ),
-                metric_column=(
-                    selected_metric
-                ),
-                pre_cp_baseline=(
-                    focus_pre_baseline
-                ),
                 show_anomalies=(
                     show_anomalies
                 ),
@@ -1730,33 +1692,24 @@ def _render_custom_view(
             dropna=False,
         )
         .agg(
-            focus_value=(
-                selected_metric,
-                "mean",
+            focus_index=(
+                "pulse_index",
+                "median",
             ),
         )
         .reset_index()
         .sort_values("date")
     )
 
-    focus_window_avg = (
-        window_daily["focus_value"].mean()
+    focus_window_index = (
+        window_daily["focus_index"].mean()
         if not window_daily.empty
         else np.nan
     )
 
     focus_change = (
-        (
-            focus_window_avg
-            - focus_pre_baseline
-        )
-        / focus_pre_baseline
-        * 100
-        if (
-            pd.notna(focus_pre_baseline)
-            and pd.notna(focus_window_avg)
-            and focus_pre_baseline != 0
-        )
+        focus_window_index - 100.0
+        if pd.notna(focus_window_index)
         else np.nan
     )
 
@@ -1781,7 +1734,7 @@ def _render_custom_view(
 
         latest_value = (
             latest_focus_row[
-                "focus_value"
+                "focus_index"
             ]
         )
 
@@ -1825,9 +1778,10 @@ def _render_custom_view(
         )
         render_chart_insight(
             f"The map contains **{zones_in_view:,} Taxi Zones** in "
-            f"**{geography_label}**. Their selected-window {metric_label.lower()} "
-            f"average is **{_format_percent(focus_change)} versus the pre-CP "
-            f"baseline**, with **{focus_anomaly_days:,} metric-linked "
+            f"**{geography_label}**. Across the selected window, the average "
+            f"daily median zone index is **{focus_window_index:.1f}** "
+            f"(**{_format_percent(focus_change)} versus each zone's own pre-CP "
+            f"reference**), with **{focus_anomaly_days:,} metric-linked "
             "stress-anomaly days** in the focus geography."
         )
 
@@ -1843,11 +1797,12 @@ def _render_custom_view(
             ),
         )
         render_chart_insight(
-            f"The latest displayed {metric_label.lower()} value is "
-            f"**{_format_number(latest_value)} on "
+            f"The latest displayed median zone index is "
+            f"**{latest_value:.1f} on "
             f"{latest_date.strftime('%b %d, %Y') if pd.notna(latest_date) else 'an unavailable date'}**; "
-            f"the selected-window average is **{_format_number(focus_window_avg)}** "
-            f"versus a pre-CP baseline of **{_format_number(focus_pre_baseline)}**."
+            f"the selected-window average daily median is "
+            f"**{focus_window_index:.1f}**, where **100** represents each "
+            "Taxi Zone's own pre-CP reference."
         )
 
     with right_col:
@@ -1857,8 +1812,8 @@ def _render_custom_view(
 
         st.caption(
             (
-                "The selected window is compared with the same geography's "
-                "pre-CP baseline."
+                "The summary uses each Taxi Zone's own pre-CP reference. "
+                "The geography-level index is the median zone index by date."
             )
         )
 
@@ -1890,16 +1845,16 @@ def _render_custom_view(
         )
 
         quick_card3.metric(
-            "Pre-CP baseline",
-            _format_number(
-                focus_pre_baseline
-            ),
+            "Baseline index",
+            "100",
         )
 
         quick_card4.metric(
-            "Window avg.",
-            _format_number(
-                focus_window_avg
+            "Window index",
+            (
+                f"{focus_window_index:.1f}"
+                if pd.notna(focus_window_index)
+                else "Unavailable"
             ),
         )
 
@@ -1940,9 +1895,11 @@ def _render_custom_view(
 
         st.caption(
             (
-                f"Latest window value on "
+                f"Latest median zone index on "
                 f"{latest_date_text}: "
-                f"{_format_number(latest_value)}"
+                f"{latest_value:.1f}"
+                if pd.notna(latest_value)
+                else f"Latest median zone index on {latest_date_text}: Unavailable"
             )
         )
 
@@ -1969,14 +1926,20 @@ st.title(
 
 st.write(
     (
-        "Mobility did not move uniformly across New York. "
-        "Watch how individual Taxi Zones departed from their own "
-        "pre-congestion-pricing patterns, where those shifts persisted, "
-        "and when unusual metric-linked events appeared."
+        "A static map can show where mobility was high or low on one date, but it cannot "
+        "show how those patterns spread, persisted, or disappeared. This page animates "
+        "each Taxi Zone against its own pre-congestion-pricing reference so spatial "
+        "change can be followed through time without treating the city as one average."
     )
 )
 
 st.header("Featured mobility stories")
+st.write(
+    "The curated stories below hold the metric, geography, time of week, and date window "
+    "fixed so the moving spatial pattern is the evidence. **Teal** means a Taxi Zone is "
+    "above its own pre-CP reference; **terracotta** means it is below. A terracotta dot "
+    "marks a date when the displayed metric was identified as a driver of a stress anomaly."
+)
 
 
 # ---------------------------------------------------------------------
@@ -2054,258 +2017,291 @@ else:
 # Custom explorer
 # ---------------------------------------------------------------------
 
-st.divider()
-
-st.header("Explore Mobility Pulse patterns")
-
-st.write(
-    (
-        "Use the custom builder when you want a different metric, "
-        "time bucket, geography, or date range than the curated stories."
-    )
-)
-
-st.info(
-    (
-        "Custom interactive animations are generated only after you click "
-        "**Build custom animation**. Long windows are sampled to keep the "
-        "interactive view responsive; the curated stories use every available "
-        "observation date."
-    )
-)
-
-zone_catalog = (
-    get_zone_catalog()
-    .copy()
-)
-
-borough_options = sorted(
-    [
-        borough
-        for borough
-        in (
-            zone_catalog[
-                "borough"
-            ]
-            .dropna()
-            .astype(str)
-            .unique()
-            .tolist()
-        )
-        if borough != "Unknown"
-    ]
-)
-
-default_borough_index = (
-    borough_options.index(
-        "Manhattan"
-    )
-    if "Manhattan"
-    in borough_options
-    else 0
-)
-
-default_custom_start = max(
-    DATA_WINDOW_START,
-    (
-        pd.Timestamp(
-            DATA_WINDOW_END
-        )
-        - pd.Timedelta(
-            days=(
-                DEFAULT_CUSTOM_WINDOW_DAYS
-            )
-        )
-    ).date(),
-)
-
-with st.expander(
-    "Custom animation controls",
-    expanded=False,
+with exploration_section(
+    key="raw10_exploration_area",
+    title="Explore Mobility Pulse patterns",
+    description=(
+        "Build a custom animated map when you want a different mobility metric, "
+        "time bucket, geography, or date range from the curated stories above."
+    ),
 ):
-    with st.form(
-        "mobility_pulse_custom_form"
-    ):
+    st.info(
         (
-            control1,
-            control2,
-            control3,
-        ) = st.columns(3)
-
-        with control1:
-            custom_metric = (
-                st.selectbox(
-                    "Metric to animate",
-                    options=PULSE_METRICS,
-                    index=(
-                        PULSE_METRICS.index(
-                            DEFAULT_METRIC
-                        )
-                    ),
-                    format_func=lambda metric: (
-                        METRIC_LABELS.get(
-                            metric,
-                            metric,
-                        )
-                    ),
-                    key=(
-                        "mobility_pulse_custom_metric"
-                    ),
-                )
-            )
-
-        with control2:
-            custom_temporal_bucket = (
-                st.selectbox(
-                    "Temporal bucket",
-                    options=[
-                        ALL_TEMPORAL_BUCKETS_LABEL,
-                        *TEMPORAL_BUCKET_ORDER,
-                    ],
-                    index=0,
-                    key=(
-                        "mobility_pulse_custom_bucket"
-                    ),
-                )
-            )
-
-        with control3:
-            custom_show_anomalies = (
-                st.checkbox(
-                    "Show stress anomalies",
-                    value=True,
-                    key=(
-                        "mobility_pulse_custom_anomalies"
-                    ),
-                    help=(
-                        "Show stress anomalies where the displayed metric "
-                        "was identified as one of the event drivers."
-                    ),
-                )
-            )
-
-        date_col, geography_col = st.columns(
-            [
-                2,
-                1,
-            ]
+            "Custom interactive animations are generated only after you click "
+            "**Build custom animation**. Long windows are sampled to keep the "
+            "interactive view responsive; the curated stories use every available "
+            "observation date."
         )
-
-        with date_col:
-            custom_date_window = (
-                st.date_input(
-                    "Animation window",
-                    value=(
-                        default_custom_start,
-                        DATA_WINDOW_END,
-                    ),
-                    min_value=(
-                        DATA_WINDOW_START
-                    ),
-                    max_value=(
-                        DATA_WINDOW_END
-                    ),
-                    key=(
-                        "mobility_pulse_custom_window"
-                    ),
-                    help=(
-                        "Custom animations are capped at approximately "
-                        f"{CUSTOM_MAX_FRAMES:,} frames. Longer windows are "
-                        "sampled."
-                    ),
-                )
-            )
-
-        with geography_col:
-            custom_geography = (
-                st.selectbox(
-                    "Geography",
-                    options=[
-                        "Citywide",
-                        *borough_options,
-                    ],
-                    index=0,
-                    key=(
-                        "mobility_pulse_custom_geography"
-                    ),
-                    help=(
-                        "Choose Citywide or focus the animation on one borough."
-                    ),
-                )
-            )
-
-        custom_map_focus = (
-            "Citywide"
-            if custom_geography == "Citywide"
-            else "Borough"
-        )
-
-        custom_borough = (
-            custom_geography
-            if custom_map_focus == "Borough"
-            else (
-                borough_options[
-                    default_borough_index
-                ]
-                if borough_options
-                else ""
-            )
-        )
-
-        st.caption(
-            (
-                "What to notice: "
-                f"{_metric_notice(custom_metric)}"
-            )
-        )
-
-        custom_submitted = (
-            st.form_submit_button(
-                "Build custom animation",
-                type="primary",
-            )
-        )
-
-
-if custom_submitted:
-    _render_custom_view(
-        selected_metric=(
-            custom_metric
-        ),
-        temporal_bucket=(
-            custom_temporal_bucket
-        ),
-        show_anomalies=(
-            custom_show_anomalies
-        ),
-        date_window=(
-            custom_date_window
-        ),
-        map_focus=(
-            custom_map_focus
-        ),
-        selected_borough=(
-            custom_borough
-        ),
-        zone_catalog=(
-            zone_catalog
-        ),
     )
+
+    zone_catalog = (
+        get_zone_catalog()
+        .copy()
+    )
+
+    borough_options = sorted(
+        [
+            borough
+            for borough
+            in (
+                zone_catalog[
+                    "borough"
+                ]
+                .dropna()
+                .astype(str)
+                .unique()
+                .tolist()
+            )
+            if borough != "Unknown"
+        ]
+    )
+
+    default_borough_index = (
+        borough_options.index(
+            "Manhattan"
+        )
+        if "Manhattan"
+        in borough_options
+        else 0
+    )
+
+    default_custom_start = max(
+        DATA_WINDOW_START,
+        (
+            pd.Timestamp(
+                DATA_WINDOW_END
+            )
+            - pd.Timedelta(
+                days=(
+                    DEFAULT_CUSTOM_WINDOW_DAYS
+                )
+            )
+        ).date(),
+    )
+
+    with st.expander(
+        "Choose custom animation settings",
+        expanded=True,
+    ):
+        with st.form(
+            "mobility_pulse_custom_form"
+        ):
+            (
+                control1,
+                control2,
+                control3,
+            ) = st.columns(3)
+
+            with control1:
+                custom_metric = (
+                    st.selectbox(
+                        "Metric to animate",
+                        options=PULSE_METRICS,
+                        index=(
+                            PULSE_METRICS.index(
+                                DEFAULT_METRIC
+                            )
+                        ),
+                        format_func=lambda metric: (
+                            METRIC_LABELS.get(
+                                metric,
+                                metric,
+                            )
+                        ),
+                        key=(
+                            "mobility_pulse_custom_metric"
+                        ),
+                    )
+                )
+
+            with control2:
+                custom_temporal_bucket = (
+                    st.selectbox(
+                        "Temporal bucket",
+                        options=[
+                            ALL_TEMPORAL_BUCKETS_LABEL,
+                            *TEMPORAL_BUCKET_ORDER,
+                        ],
+                        index=0,
+                        format_func=_format_temporal_bucket,
+                        key=(
+                            "mobility_pulse_custom_bucket"
+                        ),
+                    )
+                )
+
+            with control3:
+                custom_show_anomalies = (
+                    st.checkbox(
+                        "Show stress anomalies",
+                        value=True,
+                        key=(
+                            "mobility_pulse_custom_anomalies"
+                        ),
+                        help=(
+                            "Show stress anomalies where the displayed metric "
+                            "was identified as one of the event drivers."
+                        ),
+                    )
+                )
+
+            date_col, geography_col = st.columns(
+                [
+                    2,
+                    1,
+                ]
+            )
+
+            with date_col:
+                custom_date_window = (
+                    st.date_input(
+                        "Animation window",
+                        value=(
+                            default_custom_start,
+                            DATA_WINDOW_END,
+                        ),
+                        min_value=(
+                            DATA_WINDOW_START
+                        ),
+                        max_value=(
+                            DATA_WINDOW_END
+                        ),
+                        key=(
+                            "mobility_pulse_custom_window"
+                        ),
+                        help=(
+                            "Custom animations are capped at approximately "
+                            f"{CUSTOM_MAX_FRAMES:,} frames. Longer windows are "
+                            "sampled."
+                        ),
+                    )
+                )
+
+            with geography_col:
+                custom_geography = (
+                    st.selectbox(
+                        "Geography",
+                        options=[
+                            "Citywide",
+                            *borough_options,
+                        ],
+                        index=0,
+                        key=(
+                            "mobility_pulse_custom_geography"
+                        ),
+                        help=(
+                            "Choose Citywide or focus the animation on one borough."
+                        ),
+                    )
+                )
+
+            custom_map_focus = (
+                "Citywide"
+                if custom_geography == "Citywide"
+                else "Borough"
+            )
+
+            custom_borough = (
+                custom_geography
+                if custom_map_focus == "Borough"
+                else (
+                    borough_options[
+                        default_borough_index
+                    ]
+                    if borough_options
+                    else ""
+                )
+            )
+
+            st.caption(
+                (
+                    "What to notice: "
+                    f"{_metric_notice(custom_metric)}"
+                )
+            )
+
+            custom_submitted = (
+                st.form_submit_button(
+                    "Build custom animation",
+                    type="primary",
+                )
+            )
+
+
+    if custom_submitted:
+        _render_custom_view(
+            selected_metric=(
+                custom_metric
+            ),
+            temporal_bucket=(
+                custom_temporal_bucket
+            ),
+            show_anomalies=(
+                custom_show_anomalies
+            ),
+            date_window=(
+                custom_date_window
+            ),
+            map_focus=(
+                custom_map_focus
+            ),
+            selected_borough=(
+                custom_borough
+            ),
+            zone_catalog=(
+                zone_catalog
+            ),
+        )
+
 
 
 # ---------------------------------------------------------------------
-# Reading guide
+# Closing synthesis
 # ---------------------------------------------------------------------
 
 st.divider()
 
-st.header("How to read this page")
-
+st.markdown("### What this page establishes")
 st.markdown(
-    """
-    - **Map color:** teal means the displayed metric is above that Taxi Zone's own pre-CP reference; terracotta means it is below.
-    - **Orange dot:** at least one stress anomaly occurred on that date where the displayed metric was identified as an event driver. The production stress-anomaly surface retains events identified by all three anomaly-detection methods.
-    - **Curated stories:** pre-rendered and use every available observation date in the selected period.
-    - **Custom animations:** interactive and generated only when requested. Long windows are sampled to keep playback responsive.
-    """
+    "Mobility change was spatial as well as temporal. Taxi Zones did not move away from "
+    "their earlier patterns at the same time or by the same amount, and some departures "
+    "persisted while others were brief or geographically concentrated. Following the map "
+    "through time exposes that evolving spatial structure in a way that either a static "
+    "map or a citywide trend line would flatten."
+)
+
+with st.expander("How this page works", expanded=False):
+    st.markdown(
+        """
+        **1. Give every Taxi Zone its own reference point.** Each displayed value is
+        compared with that Taxi Zone's own pre-CP average for the selected mobility
+        measure and time bucket. An index of **100** is the zone's own pre-CP reference.
+
+        **2. Use color to show direction from that reference.** Teal means the displayed
+        metric is above the zone's reference; terracotta means it is below. Because each
+        zone has its own baseline, the animation emphasizes relative local change rather
+        than raw differences in scale between neighborhoods.
+
+        **3. Mark stress-anomaly dates separately.** A terracotta dot means at least one
+        stress anomaly occurred on that date where the displayed metric was identified
+        as one of the event drivers. The dot is an event marker, not the magnitude of the
+        underlying mobility change.
+
+        **4. Preserve full timing in the curated stories.** Pre-rendered stories use
+        every available observation date in their selected period. Custom interactive
+        animations are generated only when requested and sample long windows to keep
+        browser playback responsive.
+
+        **5. Summarize the geography without mixing incompatible units.** The custom
+        timeline uses the median Taxi Zone index by date. That keeps count and speed
+        measures on the same relative scale instead of applying one geography-level
+        aggregation rule to fundamentally different metrics.
+        """
+    )
+
+st.caption(
+    "Evidence scope: observed Taxi-Zone mobility relative to each zone's own pre-CP "
+    "reference, with metric-linked stress anomalies overlaid where available. The "
+    "animation describes when and where observed patterns changed; it does not establish "
+    "that congestion pricing caused those changes."
 )

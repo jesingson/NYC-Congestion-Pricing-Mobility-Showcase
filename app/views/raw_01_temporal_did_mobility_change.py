@@ -10,7 +10,6 @@ import streamlit as st
 from app.data_access.aggregations import (
     CORE_METRICS,
     add_rolling_average,
-    build_raw01_frozen_interpretation,
     build_selected_view_interpretation,
     format_summary_for_display,
     get_available_filter_values,
@@ -32,6 +31,7 @@ from app.data_access.loaders import (
 from app.utils.project_branding import (
     BRAND_COLORS,
     apply_branding,
+    exploration_section,
     inject_app_css,
     render_chart_insight,
 )
@@ -619,8 +619,11 @@ st.caption("TEMPORAL OVERVIEW")
 st.title("Did mobility change after congestion pricing?")
 
 st.write(
-    "Compare mobility before and after the January 2025 launch, then test whether the "
-    "observed pattern persists across metrics, geographies, time windows, and temporal buckets."
+    "A citywide average can tell us whether mobility looked different after congestion "
+    "pricing began, but not whether that difference was broad, persistent, or limited to "
+    "particular measures and places. This page compares observed mobility before and after "
+    "the January 2025 launch, then lets you test how the pattern changes across geography, "
+    "time of day, and the length of the post-launch window."
 )
 
 st.divider()
@@ -635,19 +638,15 @@ summary_df = get_pre_post_metric_summary(metrics=CORE_METRICS)
 trend_df = get_indexed_daily_trends(metrics=CORE_METRICS, smoothing_window=14)
 adjustment_daily_df = get_daily_metric_trends(metrics=CORE_METRICS)
 
-st.markdown(build_raw01_frozen_interpretation(summary_df))
-
-hero_metrics = st.multiselect(
-    "Show metrics in hero chart",
-    options=CORE_METRICS,
-    default=HERO_DEFAULT_METRICS,
-    format_func=lambda metric_name: METRIC_LABELS.get(metric_name, metric_name),
-    help="Demand metrics are shown by default to keep the hero readable. Add speed metrics when useful.",
+st.markdown(
+    "The opening view puts the three citywide demand measures on a common index so their "
+    "different units can be compared directly. **100 is each measure's own pre-CP average**; "
+    "values above or below 100 show how far observed demand moved from that reference."
 )
 
-if not hero_metrics:
-    st.warning("Select at least one metric to show in the hero chart.")
-    hero_metrics = HERO_DEFAULT_METRICS
+# Keep the editorial hero fixed on the three demand measures. Readers can
+# investigate every core metric in the exploration workspace below.
+hero_metrics = HERO_DEFAULT_METRICS.copy()
 
 fig = go.Figure()
 
@@ -694,15 +693,15 @@ fig.update_layout(
 fig = apply_branding(fig)
 fig = _apply_bottom_legend(fig, bottom_margin=115)
 
-st.plotly_chart(fig, width="stretch")
+st.plotly_chart(fig, width="stretch", key="raw01_plotly_01")
 
 render_chart_insight(
     _build_hero_metric_insight(summary_df, metrics=hero_metrics)
 )
 
 st.caption(
-    "Indexed values compare each selected metric against its own pre-CP average. "
-    "Demand metrics are shown by default; speed metrics can be added with the selector."
+    "Hero focus: Citywide Taxi trips, Subway ridership, and FHVHV trips · "
+    "14-day smoothing · January 2023 through the latest available date."
 )
 
 taxi_change = summary_df.loc[
@@ -777,195 +776,193 @@ else:
 with st.expander("Show pre/post summary across core metrics", expanded=False):
     _display_summary_table(summary_df)
 
-with st.expander("How to read this view", expanded=False):
-    st.markdown(
-        """
-        - The chart is **descriptive**, not causal. It shows how observed mobility changed before
-          versus after congestion pricing began.
-        - The post-CP period is shorter than the pre-CP period, so the summary table compares
-          **daily averages**, not total period counts.
-        - Count metrics are aggregated by summing observed activity.
-        - Speed metrics use weighted averages where possible: Taxi speed is weighted by Taxi trips,
-          FHVHV speed is weighted by FHVHV trips, and Bus speed is weighted by Bus trip count.
-        - The **Gateway + adjacent** option combines gateway-to-CBD zones with zones immediately adjacent
-          to the CBD so the broader approach area can be evaluated together.
-        - Trend guides in the Explore section are optional visual aids. A full-period fitted line summarizes
-          the selected window with one simple direction; separate pre/post lines can reveal differences
-          across the CP boundary, but they can also overstate discontinuity in noisy series.
-        - Later forecasting and counterfactual pages will handle the stronger question of what mobility
-          might have looked like without congestion pricing.
-        """
-    )
-
-st.divider()
-
 # =============================================================================
 # Explore view
 # =============================================================================
 
-st.header("Explore temporal change")
-
-st.markdown(
-    """
-    Start with a saved view, then use the tabs below to inspect either the detailed daily pattern
-    or the persistence of the post-CP adjustment. Shared controls apply to both tabs; only the
-    controls specific to each chart appear inside that tab.
-    """
-)
-
-_initialize_raw01_controls()
-
-st.selectbox(
-    "Start with a saved view",
-    options=RAW01_SAVED_VIEW_OPTIONS,
-    key="raw01_saved_view",
-    on_change=_apply_raw01_saved_view,
-)
-
-active_saved_view = st.session_state.get("raw01_saved_view", "None")
-
-if active_saved_view == "None":
-    st.info("Custom view: the controls below no longer match a saved view.")
-else:
-    st.info(INTERESTING_VIEWS[active_saved_view]["interpretation"])
-
-filter_values = get_available_filter_values()
-
-if "raw01_borough" not in st.session_state and filter_values["boroughs"]:
-    st.session_state["raw01_borough"] = filter_values["boroughs"][0]
-
-if (
-    "raw01_cbd_spatial_category" not in st.session_state
-    and filter_values["cbd_spatial_categories"]
+with exploration_section(
+    key="raw01_exploration_area",
+    title="Explore temporal change",
+    description=(
+        "Choose a saved view or build your own to see how observed mobility "
+        "changed by metric, geography, temporal bucket, and time window."
+    ),
 ):
-    st.session_state["raw01_cbd_spatial_category"] = filter_values["cbd_spatial_categories"][0]
+    _initialize_raw01_controls()
 
-metric = st.selectbox(
-    "Metric",
-    options=CORE_METRICS,
-    format_func=lambda metric_name: METRIC_LABELS.get(metric_name, metric_name),
-    key="raw01_metric",
-    on_change=_mark_raw01_custom,
-)
-
-control_col1, control_col2 = st.columns(2)
-
-with control_col1:
-    geography_scope = st.selectbox(
-        "Geography scope",
-        options=RAW01_GEO_OPTIONS,
-        format_func=_format_raw01_geography_scope,
-        key="raw01_geography_scope",
-        on_change=_mark_raw01_custom,
+    st.selectbox(
+        "Start with a saved view",
+        options=RAW01_SAVED_VIEW_OPTIONS,
+        key="raw01_saved_view",
+        on_change=_apply_raw01_saved_view,
     )
 
-with control_col2:
-    temporal_bucket_options = ["All temporal buckets"] + TEMPORAL_BUCKET_ORDER
+    active_saved_view = st.session_state.get("raw01_saved_view", "None")
 
-    temporal_bucket = st.selectbox(
-        "Temporal bucket",
-        options=temporal_bucket_options,
-        key="raw01_temporal_bucket",
-        on_change=_mark_raw01_custom,
-    )
-
-
-borough = None
-cbd_spatial_category = None
-mobility_regime_cluster_label = None
-
-if geography_scope == "Borough":
-    borough = st.selectbox(
-        "Borough",
-        options=filter_values["boroughs"],
-        key="raw01_borough",
-        on_change=_mark_raw01_custom,
-    )
-
-elif geography_scope == "CBD spatial category":
-    cbd_spatial_category = st.selectbox(
-        "CBD spatial category",
-        options=filter_values["cbd_spatial_categories"],
-        key="raw01_cbd_spatial_category",
-        on_change=_mark_raw01_custom,
-    )
-elif geography_scope == "Mobility regime cluster":
-    mobility_regime_cluster_label = st.selectbox(
-        "Mobility environment",
-        options=get_mobility_regime_cluster_options(),
-        format_func=format_mobility_regime_cluster_label,
-        key="raw01_mobility_regime_cluster",
-        on_change=_mark_raw01_custom,
-    )
-
-
-daily_tab, adjustment_tab = st.tabs([
-    "Daily trend",
-    "Post-CP persistence",
-])
-
-with daily_tab:
-    st.markdown(
-        "Explore the full observed timeline, including smoothing, custom dates, "
-        "and optional trend guides."
-    )
-    c1, c2 = st.columns(2)
-    with c1:
-        smoothing_window_label = st.selectbox(
-            "Smoothing", RAW01_SMOOTHING_OPTIONS,
-            key="raw01_smoothing", on_change=_mark_raw01_custom,
-        )
-    with c2:
-        trend_guide = st.selectbox(
-            "Trend guide",
-            ["None", "Full-period trend line", "Separate pre/post trend lines"],
-            key="raw01_trend_guide",
-        )
-    d1, d2 = st.columns(2)
-    with d1:
-        date_start = st.date_input(
-            "Start date", min_value=STUDY_START_DATE.date(),
-            max_value=STUDY_END_DATE.date(), key="raw01_start_date",
-            on_change=_mark_raw01_custom,
-        )
-    with d2:
-        date_end = st.date_input(
-            "End date", min_value=STUDY_START_DATE.date(),
-            max_value=STUDY_END_DATE.date(), key="raw01_end_date",
-            on_change=_mark_raw01_custom,
-        )
-    if date_start > date_end:
-        st.warning("Start date must be before or equal to end date.")
+    if active_saved_view == "None":
+        st.info("Custom view: the controls below no longer match a saved view.")
     else:
-        smoothing_window = {
-            "None": None, "7-day rolling average": 7,
-            "14-day rolling average": 14, "28-day rolling average": 28,
-        }[smoothing_window_label]
-        date_range = (pd.Timestamp(date_start), pd.Timestamp(date_end))
-        daily_df = get_daily_metric_trends(
-            metrics=[metric], temporal_bucket=temporal_bucket,
-            borough=borough, cbd_spatial_category=cbd_spatial_category,
-            mobility_regime_cluster_label=mobility_regime_cluster_label,
-            date_range=date_range,
+        st.info(INTERESTING_VIEWS[active_saved_view]["interpretation"])
+
+    filter_values = get_available_filter_values()
+
+    if "raw01_borough" not in st.session_state and filter_values["boroughs"]:
+        st.session_state["raw01_borough"] = filter_values["boroughs"][0]
+
+    if (
+        "raw01_cbd_spatial_category" not in st.session_state
+        and filter_values["cbd_spatial_categories"]
+    ):
+        st.session_state["raw01_cbd_spatial_category"] = filter_values["cbd_spatial_categories"][0]
+
+    metric = st.selectbox(
+        "Metric",
+        options=CORE_METRICS,
+        format_func=lambda metric_name: METRIC_LABELS.get(metric_name, metric_name),
+        key="raw01_metric",
+        on_change=_mark_raw01_custom,
+    )
+
+    control_col1, control_col2 = st.columns(2)
+
+    with control_col1:
+        geography_scope = st.selectbox(
+            "Geography scope",
+            options=RAW01_GEO_OPTIONS,
+            format_func=_format_raw01_geography_scope,
+            key="raw01_geography_scope",
+            on_change=_mark_raw01_custom,
         )
-        daily_df = add_rolling_average(daily_df, metrics=[metric], window=smoothing_window)
-        summary = get_pre_post_metric_summary(
-            metrics=[metric], temporal_bucket=temporal_bucket,
-            borough=borough, cbd_spatial_category=cbd_spatial_category,
-            mobility_regime_cluster_label=mobility_regime_cluster_label,
-            date_range=date_range,
+
+    with control_col2:
+        temporal_bucket_options = ["All temporal buckets"] + TEMPORAL_BUCKET_ORDER
+
+        temporal_bucket = st.selectbox(
+            "Temporal bucket",
+            options=temporal_bucket_options,
+            key="raw01_temporal_bucket",
+            on_change=_mark_raw01_custom,
         )
-        label = METRIC_LABELS.get(metric, metric)
-        display_col = f"{metric}_display"
-        chart = go.Figure()
-        if smoothing_window is not None:
+
+
+    borough = None
+    cbd_spatial_category = None
+    mobility_regime_cluster_label = None
+
+    if geography_scope == "Borough":
+        borough = st.selectbox(
+            "Borough",
+            options=filter_values["boroughs"],
+            key="raw01_borough",
+            on_change=_mark_raw01_custom,
+        )
+
+    elif geography_scope == "CBD spatial category":
+        cbd_spatial_category = st.selectbox(
+            "CBD spatial category",
+            options=filter_values["cbd_spatial_categories"],
+            key="raw01_cbd_spatial_category",
+            on_change=_mark_raw01_custom,
+        )
+    elif geography_scope == "Mobility regime cluster":
+        mobility_regime_cluster_label = st.selectbox(
+            "Mobility environment",
+            options=get_mobility_regime_cluster_options(),
+            format_func=format_mobility_regime_cluster_label,
+            key="raw01_mobility_regime_cluster",
+            on_change=_mark_raw01_custom,
+        )
+
+
+    daily_tab, adjustment_tab = st.tabs([
+        "Daily trend",
+        "Post-CP persistence",
+    ])
+
+    with daily_tab:
+        st.markdown(
+            "Explore the full observed timeline, including smoothing, custom dates, "
+            "and optional trend guides."
+        )
+        c1, c2 = st.columns(2)
+        with c1:
+            smoothing_window_label = st.selectbox(
+                "Smoothing", RAW01_SMOOTHING_OPTIONS,
+                key="raw01_smoothing", on_change=_mark_raw01_custom,
+            )
+        with c2:
+            trend_guide = st.selectbox(
+                "Trend guide",
+                ["None", "Full-period trend line", "Separate pre/post trend lines"],
+                key="raw01_trend_guide",
+            )
+        d1, d2 = st.columns(2)
+        with d1:
+            date_start = st.date_input(
+                "Start date", min_value=STUDY_START_DATE.date(),
+                max_value=STUDY_END_DATE.date(), key="raw01_start_date",
+                on_change=_mark_raw01_custom,
+            )
+        with d2:
+            date_end = st.date_input(
+                "End date", min_value=STUDY_START_DATE.date(),
+                max_value=STUDY_END_DATE.date(), key="raw01_end_date",
+                on_change=_mark_raw01_custom,
+            )
+        if date_start > date_end:
+            st.warning("Start date must be before or equal to end date.")
+        else:
+            smoothing_window = {
+                "None": None, "7-day rolling average": 7,
+                "14-day rolling average": 14, "28-day rolling average": 28,
+            }[smoothing_window_label]
+            date_range = (pd.Timestamp(date_start), pd.Timestamp(date_end))
+            daily_df = get_daily_metric_trends(
+                metrics=[metric], temporal_bucket=temporal_bucket,
+                borough=borough, cbd_spatial_category=cbd_spatial_category,
+                mobility_regime_cluster_label=mobility_regime_cluster_label,
+                date_range=date_range,
+            )
+            daily_df = add_rolling_average(daily_df, metrics=[metric], window=smoothing_window)
+            summary = get_pre_post_metric_summary(
+                metrics=[metric], temporal_bucket=temporal_bucket,
+                borough=borough, cbd_spatial_category=cbd_spatial_category,
+                mobility_regime_cluster_label=mobility_regime_cluster_label,
+                date_range=date_range,
+            )
+            label = METRIC_LABELS.get(metric, metric)
+            display_col = f"{metric}_display"
+            chart = go.Figure()
+            if smoothing_window is not None:
+                chart.add_trace(
+                    go.Scatter(
+                        x=daily_df["date"],
+                        y=daily_df[metric],
+                        mode="lines",
+                        name="Daily value",
+                        line={"color": "rgba(0,109,119,0.25)"},
+                        hovertemplate=(
+                            "Date: %{x|%b %d, %Y}<br>"
+                            f"{label}: %{{y:,.1f}}"
+                            "<extra>%{fullData.name}</extra>"
+                        ),
+                    )
+                )
+
             chart.add_trace(
                 go.Scatter(
                     x=daily_df["date"],
-                    y=daily_df[metric],
+                    y=daily_df[display_col],
                     mode="lines",
-                    name="Daily value",
-                    line={"color": "rgba(0,109,119,0.25)"},
+                    name=(
+                        smoothing_window_label
+                        if smoothing_window
+                        else "Daily value"
+                    ),
+                    line={
+                        "color": BRAND_COLORS["dark_teal"],
+                        "width": 3,
+                    },
                     hovertemplate=(
                         "Date: %{x|%b %d, %Y}<br>"
                         f"{label}: %{{y:,.1f}}"
@@ -973,88 +970,112 @@ with daily_tab:
                     ),
                 )
             )
+            if date_range[0] <= CONGESTION_PRICING_START_DATE <= date_range[1]:
+                chart.add_vline(
+                    x=CONGESTION_PRICING_START_DATE, line_dash="dash",
+                    line_color=BRAND_COLORS["terracotta"],
+                    annotation_text="CP starts", annotation_position="top left",
+                )
+            if trend_guide == "Full-period trend line":
+                _add_full_period_trend_line(chart, daily_df, metric_col=metric, color=BRAND_COLORS["terracotta"])
+            elif trend_guide == "Separate pre/post trend lines":
+                _add_period_trend_line(chart, daily_df, metric_col=metric, label="Pre-CP fitted line", period="pre_cp", color=BRAND_COLORS["terracotta"])
+                _add_period_trend_line(chart, daily_df, metric_col=metric, label="Post-CP fitted line", period="post_cp", color=BRAND_COLORS["dark_teal"])
+            chart.update_layout(title=f"{label} over time", xaxis_title="Date", yaxis_title=label, hovermode="x unified", height=500)
+            chart = _apply_bottom_legend(apply_branding(chart), bottom_margin=105)
+            st.plotly_chart(chart, width="stretch", key="raw01_daily_timeline_chart")
+            insight = build_selected_view_interpretation(
+                summary, metric=metric, geography_scope=geography_scope,
+                temporal_bucket=temporal_bucket, borough=borough,
+                cbd_spatial_category=cbd_spatial_category,
+                mobility_regime_cluster_label=mobility_regime_cluster_label,
+            )
+            render_chart_insight(insight)
+            m1,m2,m3=st.columns(3)
+            m1.metric("Pre-CP daily average", f"{summary['pre_daily_average'].iloc[0]:,.2f}")
+            m2.metric("Post-CP daily average", f"{summary['post_daily_average'].iloc[0]:,.2f}")
+            m3.metric("Post vs pre difference", f"{summary['percent_change'].iloc[0]:,.2f}%")
+            with st.expander("Show selected pre/post summary", expanded=False):
+                _display_summary_table(summary)
 
-        chart.add_trace(
-            go.Scatter(
-                x=daily_df["date"],
-                y=daily_df[display_col],
-                mode="lines",
-                name=(
-                    smoothing_window_label
-                    if smoothing_window
-                    else "Daily value"
-                ),
-                line={
-                    "color": BRAND_COLORS["dark_teal"],
-                    "width": 3,
-                },
-                hovertemplate=(
-                    "Date: %{x|%b %d, %Y}<br>"
-                    f"{label}: %{{y:,.1f}}"
-                    "<extra>%{fullData.name}</extra>"
-                ),
-            )
+    with adjustment_tab:
+        st.markdown(
+            "Compare monthly post-CP movement with the immediate pre-CP baseline "
+            "to see whether changes persisted, faded, or emerged gradually."
         )
-        if date_range[0] <= CONGESTION_PRICING_START_DATE <= date_range[1]:
-            chart.add_vline(
-                x=CONGESTION_PRICING_START_DATE, line_dash="dash",
-                line_color=BRAND_COLORS["terracotta"],
-                annotation_text="CP starts", annotation_position="top left",
-            )
-        if trend_guide == "Full-period trend line":
-            _add_full_period_trend_line(chart, daily_df, metric_col=metric, color=BRAND_COLORS["terracotta"])
-        elif trend_guide == "Separate pre/post trend lines":
-            _add_period_trend_line(chart, daily_df, metric_col=metric, label="Pre-CP fitted line", period="pre_cp", color=BRAND_COLORS["terracotta"])
-            _add_period_trend_line(chart, daily_df, metric_col=metric, label="Post-CP fitted line", period="post_cp", color=BRAND_COLORS["dark_teal"])
-        chart.update_layout(title=f"{label} over time", xaxis_title="Date", yaxis_title=label, hovermode="x unified", height=500)
-        chart = _apply_bottom_legend(apply_branding(chart), bottom_margin=105)
-        st.plotly_chart(chart, width="stretch", key="raw01_daily_timeline_chart")
-        insight = build_selected_view_interpretation(
-            summary, metric=metric, geography_scope=geography_scope,
-            temporal_bucket=temporal_bucket, borough=borough,
-            cbd_spatial_category=cbd_spatial_category,
+        st.caption(
+            f"This view uses calendar months and a fixed {ADJUSTMENT_BASELINE_DAYS}-day "
+            "immediate pre-CP baseline. Smoothing and arbitrary date windows do not apply."
+        )
+        daily_df = get_daily_metric_trends(
+            metrics=[metric], temporal_bucket=temporal_bucket,
+            borough=borough, cbd_spatial_category=cbd_spatial_category,
             mobility_regime_cluster_label=mobility_regime_cluster_label,
+            date_range=(STUDY_START_DATE, STUDY_END_DATE),
         )
+        adjustment_df = _build_monthly_adjustment_path(daily_df, metrics=[metric])
+        label = METRIC_LABELS.get(metric, metric)
+        chart = _build_adjustment_figure(
+            adjustment_df, title=f"{label}: monthly post-CP adjustment path", height=520,
+        )
+        st.plotly_chart(chart, width="stretch", key="raw01_adjustment_path_chart")
+        insight = _build_adjustment_interpretation(adjustment_df, metric=metric)
         render_chart_insight(insight)
+        path = adjustment_df.loc[adjustment_df["metric"].eq(metric)].sort_values("period_order")
+        if path.empty:
+            baseline = first_idx = latest_idx = np.nan
+        else:
+            baseline = path.iloc[0]["baseline_value"]
+            post = path.loc[path["period_order"].gt(0)]
+            first_idx = post.iloc[0]["index_value"] if not post.empty else np.nan
+            latest_idx = post.tail(min(3, len(post)))["index_value"].mean() if not post.empty else np.nan
         m1,m2,m3=st.columns(3)
-        m1.metric("Pre-CP daily average", f"{summary['pre_daily_average'].iloc[0]:,.2f}")
-        m2.metric("Post-CP daily average", f"{summary['post_daily_average'].iloc[0]:,.2f}")
-        m3.metric("Post vs pre difference", f"{summary['percent_change'].iloc[0]:,.2f}%")
-        with st.expander("Show selected pre/post summary", expanded=False):
-            _display_summary_table(summary)
+        m1.metric(f"Final {ADJUSTMENT_BASELINE_DAYS}-day pre-CP average", f"{baseline:,.2f}" if pd.notna(baseline) else "—")
+        m2.metric("First post-CP month", f"{first_idx:.1f}" if pd.notna(first_idx) else "—", delta=f"{first_idx-100:+.1f} vs baseline" if pd.notna(first_idx) else None)
+        m3.metric("Latest 3-month average", f"{latest_idx:.1f}" if pd.notna(latest_idx) else "—", delta=f"{latest_idx-100:+.1f} vs baseline" if pd.notna(latest_idx) else None)
 
-with adjustment_tab:
+st.markdown("### What this page establishes")
+st.markdown(
+    "The broad pre/post shift is only one part of the mobility story. Some observed "
+    "differences persisted beyond the launch period while others faded, emerged later, "
+    "or varied across measures, places, and times of day. That variation is why a single "
+    "citywide before-and-after number cannot fully describe how NYC mobility changed."
+)
+
+with st.expander("How this page works", expanded=False):
     st.markdown(
-        "Compare monthly post-CP movement with the immediate pre-CP baseline "
-        "to see whether changes persisted, faded, or emerged gradually."
+        f"""
+        **1. Compare observed mobility before and after launch.** The main summaries use
+        **daily averages**, rather than total period counts, because the post-CP period is
+        shorter than the pre-CP period.
+
+        **2. Put different demand measures on a common index.** The hero sets each demand
+        measure's own pre-CP average to **100**. That makes Taxi trips, Subway ridership,
+        and FHVHV trips visually comparable without pretending they share the same units.
+
+        **3. Check whether a change persisted.** The monthly adjustment view uses the final
+        **{ADJUSTMENT_BASELINE_DAYS} pre-CP days** as its reference. It helps distinguish an
+        early shift that faded from one that remained visible or emerged later.
+
+        **4. Aggregate each measure appropriately.** Count metrics are summed. Speed metrics
+        use activity-weighted averages where possible: Taxi speed is weighted by Taxi trips,
+        FHVHV speed by FHVHV trips, and Bus speed by Bus trip count.
+
+        **5. Let the reader change the comparison.** The explorer can narrow the analysis by
+        mobility measure, geography, temporal bucket, date window, and smoothing. Optional
+        fitted trend lines are visual guides; they summarize direction but should not be read
+        as causal estimates or sharp policy effects.
+
+        **6. Keep the claim descriptive.** These views compare what was observed before and
+        after congestion pricing began. They do not estimate the no-congestion-pricing path.
+        """
     )
-    st.caption(
-        f"This view uses calendar months and a fixed {ADJUSTMENT_BASELINE_DAYS}-day "
-        "immediate pre-CP baseline. Smoothing and arbitrary date windows do not apply."
-    )
-    daily_df = get_daily_metric_trends(
-        metrics=[metric], temporal_bucket=temporal_bucket,
-        borough=borough, cbd_spatial_category=cbd_spatial_category,
-        mobility_regime_cluster_label=mobility_regime_cluster_label,
-        date_range=(STUDY_START_DATE, STUDY_END_DATE),
-    )
-    adjustment_df = _build_monthly_adjustment_path(daily_df, metrics=[metric])
-    label = METRIC_LABELS.get(metric, metric)
-    chart = _build_adjustment_figure(
-        adjustment_df, title=f"{label}: monthly post-CP adjustment path", height=520,
-    )
-    st.plotly_chart(chart, width="stretch", key="raw01_adjustment_path_chart")
-    insight = _build_adjustment_interpretation(adjustment_df, metric=metric)
-    render_chart_insight(insight)
-    path = adjustment_df.loc[adjustment_df["metric"].eq(metric)].sort_values("period_order")
-    if path.empty:
-        baseline = first_idx = latest_idx = np.nan
-    else:
-        baseline = path.iloc[0]["baseline_value"]
-        post = path.loc[path["period_order"].gt(0)]
-        first_idx = post.iloc[0]["index_value"] if not post.empty else np.nan
-        latest_idx = post.tail(min(3, len(post)))["index_value"].mean() if not post.empty else np.nan
-    m1,m2,m3=st.columns(3)
-    m1.metric(f"Final {ADJUSTMENT_BASELINE_DAYS}-day pre-CP average", f"{baseline:,.2f}" if pd.notna(baseline) else "—")
-    m2.metric("First post-CP month", f"{first_idx:.1f}" if pd.notna(first_idx) else "—", delta=f"{first_idx-100:+.1f} vs baseline" if pd.notna(first_idx) else None)
-    m3.metric("Latest 3-month average", f"{latest_idx:.1f}" if pd.notna(latest_idx) else "—", delta=f"{latest_idx-100:+.1f} vs baseline" if pd.notna(latest_idx) else None)
+
+st.caption(
+    "Evidence scope: observed NYC mobility from January 2023 through the latest date "
+    "available in the Showcase data. January 5, 2025 marks the congestion-pricing launch. "
+    "Pre/post differences are descriptive and can reflect seasonality, longer-run trends, "
+    "weather, other events, or other changes occurring over the same period; this page does "
+    "not by itself establish that congestion pricing caused the observed differences."
+)
+

@@ -24,6 +24,7 @@ from app.data_access.mobility_environments import (
 from app.utils.project_branding import (
     BRAND_COLORS,
     apply_branding,
+    exploration_section,
     inject_app_css,
     render_chart_insight,
 )
@@ -602,8 +603,10 @@ st.caption("TIME-OF-DAY PATTERNS")
 st.title("When did mobility change most?")
 
 st.write(
-    "Compare pre/post differences across weekday, weekend, and time-of-day buckets to see "
-    "when each mobility mode changed most."
+    "A citywide pre/post average can hide when a mobility shift actually occurred. A change "
+    "concentrated overnight can tell a different story from one spread across the workday. "
+    "This page breaks the observed pre/post difference into weekday, weekend, and time-of-day "
+    "windows so we can see when each mobility measure changed most."
 )
 
 st.divider()
@@ -616,10 +619,10 @@ st.header("When were the largest demand shifts?")
 
 st.markdown(
     """
-    The largest temporal-bucket demand shifts were concentrated in **Taxi trips**, especially in
-    late-night, evening, and weekend windows. Subway ridership also increased across the full bucket
-    structure, but more evenly. FHVHV trips showed a more mixed pattern, with stronger gains in
-    AM/midday/PM periods and weaker late-night or weekend-evening movement.
+    The opening chart compares the **20 largest demand shifts** across Taxi trips,
+    Subway ridership, and FHVHV trips. Each bar is one weekday/weekend × time-of-day
+    bucket, measured as the percent difference between its post-CP and pre-CP daily
+    averages. Positive bars were higher after launch; negative bars were lower.
     """
 )
 
@@ -627,12 +630,12 @@ summary_df = get_temporal_bucket_metric_summary(metrics=CORE_METRICS)
 demand_summary_df = summary_df[summary_df["metric"].isin(DEMAND_METRICS)].copy()
 
 fig = _build_multimodal_demand_chart(demand_summary_df, top_n=20)
-st.plotly_chart(fig, width="stretch")
+st.plotly_chart(fig, width="stretch", key="raw02_plotly_01")
 render_chart_insight(_build_hero_takeaway(demand_summary_df))
 
 st.caption(
-    "Bars compare post-CP daily averages against pre-CP daily averages within each temporal bucket. "
-    "The hero chart ranks demand metrics only: Taxi trips, Subway ridership, and FHVHV trips."
+    "Hero focus: Citywide demand · 10 weekday/weekend × time-of-day buckets · "
+    "Taxi trips, Subway ridership, and FHVHV trips."
 )
 
 mode_bucket_counts = _build_mode_count_summary(demand_summary_df)
@@ -689,219 +692,245 @@ with st.expander("Show supporting data tables", expanded=False):
     )
     _display_summary_table(taxi_bucket_df)
 
-with st.expander("How to read this view", expanded=False):
-    st.markdown(
-        """
-        - Each row compares the pre-CP and post-CP **daily average** for one temporal bucket.
-        - The hero chart uses demand/activity metrics only: Taxi trips, Subway ridership, and FHVHV trips.
-        - Speed metrics are excluded from the hero because they answer a different question: service performance,
-          not demand timing.
-        - The **Gateway + adjacent** option combines gateway-to-CBD zones with zones immediately adjacent
-          to the CBD so their timing patterns can be evaluated together.
-        - The temporal buckets combine weekday/weekend with time-of-day windows.
-        - Count metrics are aggregated by summing observed activity within each date and temporal bucket.
-        - This page is descriptive. It shows when observed differences are largest, not why they happened.
-        """
-    )
-
-st.divider()
-
 # =============================================================================
 # Explore view
 # =============================================================================
 
-st.header("Explore time-of-day patterns")
-
-st.markdown(
-    """
-    Start with a saved view, or adjust the controls to test whether the timing pattern changes by
-    mode, geography, weekday/weekend grouping, or ranking method.
-    """
-)
-
-_initialize_raw02_controls()
-
-st.selectbox(
-    "Start with a saved view",
-    options=RAW02_SAVED_VIEW_OPTIONS,
-    key="raw02_saved_view",
-    on_change=_apply_raw02_saved_view,
-)
-
-active_saved_view = st.session_state.get("raw02_saved_view", "None")
-
-if active_saved_view == "None":
-    st.info("Custom view: the controls below no longer match a saved view.")
-else:
-    st.info(INTERESTING_VIEWS[active_saved_view]["interpretation"])
-
-filter_values = get_available_filter_values()
-
-if "raw02_borough" not in st.session_state and filter_values["boroughs"]:
-    st.session_state["raw02_borough"] = filter_values["boroughs"][0]
-
-if (
-    "raw02_cbd_spatial_category" not in st.session_state
-    and filter_values["cbd_spatial_categories"]
+with exploration_section(
+    key="raw02_exploration_area",
+    title="Explore time-of-day patterns",
+    description=(
+        "Start with a saved view or build your own to test how timing patterns "
+        "change by mobility measure, geography, weekday versus weekend, and "
+        "the way the temporal buckets are ordered."
+    ),
 ):
-    st.session_state["raw02_cbd_spatial_category"] = filter_values["cbd_spatial_categories"][0]
+    _initialize_raw02_controls()
 
-control_col1, control_col2, control_col3 = st.columns(3)
-
-with control_col1:
-    metric = st.selectbox(
-        "Metric",
-        options=CORE_METRICS,
-        format_func=lambda metric_name: METRIC_LABELS.get(metric_name, metric_name),
-        key="raw02_metric",
-        on_change=_mark_raw02_custom,
+    st.selectbox(
+        "Start with a saved view",
+        options=RAW02_SAVED_VIEW_OPTIONS,
+        key="raw02_saved_view",
+        on_change=_apply_raw02_saved_view,
     )
 
-with control_col2:
-    geography_scope = st.selectbox(
-        "Geography scope",
-        options=RAW02_GEO_OPTIONS,
-        format_func=_format_raw02_geography_scope,
-        key="raw02_geography_scope",
-        on_change=_mark_raw02_custom,
-    )
+    active_saved_view = st.session_state.get("raw02_saved_view", "None")
 
-with control_col3:
-    week_part = st.selectbox(
-        "Weekday/weekend filter",
-        options=RAW02_WEEK_PART_OPTIONS,
-        key="raw02_week_part",
-        on_change=_mark_raw02_custom,
-    )
+    if active_saved_view == "None":
+        st.info("Custom view: the controls below no longer match a saved view.")
+    else:
+        st.info(INTERESTING_VIEWS[active_saved_view]["interpretation"])
 
-borough = None
-cbd_spatial_category = None
-mobility_regime_cluster_label = None
+    filter_values = get_available_filter_values()
 
-if geography_scope == "Borough":
-    borough = st.selectbox(
-        "Borough",
-        options=filter_values["boroughs"],
-        key="raw02_borough",
-        on_change=_mark_raw02_custom,
-    )
+    if "raw02_borough" not in st.session_state and filter_values["boroughs"]:
+        st.session_state["raw02_borough"] = filter_values["boroughs"][0]
 
-elif geography_scope == "CBD spatial category":
-    cbd_spatial_category = st.selectbox(
-        "CBD spatial category",
-        options=filter_values["cbd_spatial_categories"],
-        key="raw02_cbd_spatial_category",
-        on_change=_mark_raw02_custom,
-    )
-elif geography_scope == "Mobility regime cluster":
-    mobility_regime_cluster_label = st.selectbox(
-        "Mobility environment",
-        options=get_mobility_regime_cluster_options(),
-        format_func=format_mobility_regime_cluster_label,
-        key="raw02_mobility_regime_cluster",
-        on_change=_mark_raw02_custom,
-    )
+    if (
+        "raw02_cbd_spatial_category" not in st.session_state
+        and filter_values["cbd_spatial_categories"]
+    ):
+        st.session_state["raw02_cbd_spatial_category"] = filter_values["cbd_spatial_categories"][0]
 
-control_col4, control_col5 = st.columns(2)
+    control_col1, control_col2, control_col3 = st.columns(3)
 
-with control_col4:
-    sort_mode = st.selectbox(
-        "Sort order",
-        options=RAW02_SORT_MODE_OPTIONS,
-        key="raw02_sort_mode",
-        help=(
-            "High to low and low to high sort by the currently displayed value mode. "
-            "Largest absolute shift sorts by magnitude regardless of sign."
-        ),
-        on_change=_mark_raw02_custom,
-    )
+    with control_col1:
+        metric = st.selectbox(
+            "Metric",
+            options=CORE_METRICS,
+            format_func=lambda metric_name: METRIC_LABELS.get(metric_name, metric_name),
+            key="raw02_metric",
+            on_change=_mark_raw02_custom,
+        )
 
-with control_col5:
-    value_mode = st.selectbox(
-        "Value mode",
-        options=RAW02_VALUE_MODE_OPTIONS,
-        key="raw02_value_mode",
-        on_change=_mark_raw02_custom,
-    )
+    with control_col2:
+        geography_scope = st.selectbox(
+            "Geography scope",
+            options=RAW02_GEO_OPTIONS,
+            format_func=_format_raw02_geography_scope,
+            key="raw02_geography_scope",
+            on_change=_mark_raw02_custom,
+        )
 
-selected_summary_df = get_temporal_bucket_metric_summary(
-    metrics=CORE_METRICS,
-    borough=borough,
-    cbd_spatial_category=cbd_spatial_category,
-    mobility_regime_cluster_label=mobility_regime_cluster_label,
-)
+    with control_col3:
+        week_part = st.selectbox(
+            "Weekday/weekend filter",
+            options=RAW02_WEEK_PART_OPTIONS,
+            key="raw02_week_part",
+            on_change=_mark_raw02_custom,
+        )
 
-selected_bucket_df = filter_temporal_bucket_summary_for_metric(
-    selected_summary_df,
-    metric=metric,
-    week_part=week_part,
-    sort_mode="Temporal order",
-)
+    borough = None
+    cbd_spatial_category = None
+    mobility_regime_cluster_label = None
 
-selected_bucket_df = _sort_selected_bucket_df(
-    selected_bucket_df,
-    sort_mode=sort_mode,
-    value_mode=value_mode,
-)
+    if geography_scope == "Borough":
+        borough = st.selectbox(
+            "Borough",
+            options=filter_values["boroughs"],
+            key="raw02_borough",
+            on_change=_mark_raw02_custom,
+        )
 
-selected_metric_label = METRIC_LABELS.get(metric, metric)
+    elif geography_scope == "CBD spatial category":
+        cbd_spatial_category = st.selectbox(
+            "CBD spatial category",
+            options=filter_values["cbd_spatial_categories"],
+            key="raw02_cbd_spatial_category",
+            on_change=_mark_raw02_custom,
+        )
+    elif geography_scope == "Mobility regime cluster":
+        mobility_regime_cluster_label = st.selectbox(
+            "Mobility environment",
+            options=get_mobility_regime_cluster_options(),
+            format_func=format_mobility_regime_cluster_label,
+            key="raw02_mobility_regime_cluster",
+            on_change=_mark_raw02_custom,
+        )
 
-selected_fig = _build_selected_bucket_chart(
-    selected_bucket_df,
-    metric=metric,
-    metric_label=selected_metric_label,
-    value_mode=value_mode,
-)
+    control_col4, control_col5 = st.columns(2)
 
-st.plotly_chart(selected_fig, width="stretch")
+    with control_col4:
+        sort_mode = st.selectbox(
+            "Sort order",
+            options=RAW02_SORT_MODE_OPTIONS,
+            key="raw02_sort_mode",
+            help=(
+                "High to low and low to high sort by the currently displayed value mode. "
+                "Largest absolute shift sorts by magnitude regardless of sign."
+            ),
+            on_change=_mark_raw02_custom,
+        )
 
-render_chart_insight(
-    _build_selected_view_interpretation(
-        selected_bucket_df,
-        metric_label=selected_metric_label,
-        geography_scope=geography_scope,
-        week_part=week_part,
+    with control_col5:
+        value_mode = st.selectbox(
+            "Value mode",
+            options=RAW02_VALUE_MODE_OPTIONS,
+            key="raw02_value_mode",
+            on_change=_mark_raw02_custom,
+        )
+
+    selected_summary_df = get_temporal_bucket_metric_summary(
+        metrics=CORE_METRICS,
         borough=borough,
         cbd_spatial_category=cbd_spatial_category,
         mobility_regime_cluster_label=mobility_regime_cluster_label,
     )
+
+    selected_bucket_df = filter_temporal_bucket_summary_for_metric(
+        selected_summary_df,
+        metric=metric,
+        week_part=week_part,
+        sort_mode="Temporal order",
+    )
+
+    selected_bucket_df = _sort_selected_bucket_df(
+        selected_bucket_df,
+        sort_mode=sort_mode,
+        value_mode=value_mode,
+    )
+
+    selected_metric_label = METRIC_LABELS.get(metric, metric)
+
+    selected_fig = _build_selected_bucket_chart(
+        selected_bucket_df,
+        metric=metric,
+        metric_label=selected_metric_label,
+        value_mode=value_mode,
+    )
+
+    st.plotly_chart(selected_fig, width="stretch", key="raw02_plotly_02")
+
+    render_chart_insight(
+        _build_selected_view_interpretation(
+            selected_bucket_df,
+            metric_label=selected_metric_label,
+            geography_scope=geography_scope,
+            week_part=week_part,
+            borough=borough,
+            cbd_spatial_category=cbd_spatial_category,
+            mobility_regime_cluster_label=mobility_regime_cluster_label,
+        )
+    )
+
+    valid_selected_df = selected_bucket_df.dropna(subset=["percent_change"])
+    if valid_selected_df.empty:
+        st.warning("This selection does not have enough observed pre/post data to summarize.")
+    else:
+        top_selected_row = valid_selected_df.sort_values(
+            "percent_change",
+            ascending=False,
+        ).iloc[0]
+        bottom_selected_row = valid_selected_df.sort_values(
+            "percent_change",
+            ascending=True,
+        ).iloc[0]
+        card_labels = _selected_metric_card_labels(valid_selected_df)
+
+        metric_col1, metric_col2, metric_col3 = st.columns(3)
+
+        with metric_col1:
+            st.metric(
+                label=card_labels["count_label"],
+                value=card_labels["count_value"],
+            )
+
+        with metric_col2:
+            st.metric(
+                label=card_labels["top_label"],
+                value=f"{top_selected_row['percent_change']:.1f}%",
+                delta=top_selected_row["temporal_bucket_label"],
+            )
+
+        with metric_col3:
+            st.metric(
+                label=card_labels["bottom_label"],
+                value=f"{bottom_selected_row['percent_change']:.1f}%",
+                delta=bottom_selected_row["temporal_bucket_label"],
+            )
+
+    with st.expander("Show selected bucket data", expanded=False):
+        _display_summary_table(selected_bucket_df)
+
+st.markdown("### What this page establishes")
+st.markdown(
+    "Timing materially changes the pre/post picture. Some mobility shifts were concentrated "
+    "in particular weekday, weekend, or time-of-day windows, while others were distributed "
+    "more broadly. A single citywide average therefore compresses meaningful differences "
+    "in when NYC's mobility patterns changed."
 )
 
-valid_selected_df = selected_bucket_df.dropna(subset=["percent_change"])
-if valid_selected_df.empty:
-    st.warning("This selection does not have enough observed pre/post data to summarize.")
-else:
-    top_selected_row = valid_selected_df.sort_values(
-        "percent_change",
-        ascending=False,
-    ).iloc[0]
-    bottom_selected_row = valid_selected_df.sort_values(
-        "percent_change",
-        ascending=True,
-    ).iloc[0]
-    card_labels = _selected_metric_card_labels(valid_selected_df)
+with st.expander("How this page works", expanded=False):
+    st.markdown(
+        """
+        **1. Divide the week into comparable time windows.** The analysis uses ten
+        temporal buckets: five parts of the day for weekdays and the same five for
+        weekends.
 
-    metric_col1, metric_col2, metric_col3 = st.columns(3)
+        **2. Compare daily averages within each bucket.** Every value compares the
+        post-CP daily average with the pre-CP daily average for the same temporal bucket.
+        This avoids treating the longer pre-CP period as if it were directly comparable
+        through total counts.
 
-    with metric_col1:
-        st.metric(
-            label=card_labels["count_label"],
-            value=card_labels["count_value"],
-        )
+        **3. Keep the hero focused on demand.** The opening chart uses Taxi trips,
+        Subway ridership, and FHVHV trips. Speed measures remain available in the
+        explorer because they answer a related but different question about movement
+        and service conditions.
 
-    with metric_col2:
-        st.metric(
-            label=card_labels["top_label"],
-            value=f"{top_selected_row['percent_change']:.1f}%",
-            delta=top_selected_row["temporal_bucket_label"],
-        )
+        **4. Aggregate activity before comparing it.** Count metrics are summed within
+        each date and temporal bucket. The explorer can then repeat the comparison for
+        the city as a whole, a borough, a policy geography, or a Mobility Environment.
 
-    with metric_col3:
-        st.metric(
-            label=card_labels["bottom_label"],
-            value=f"{bottom_selected_row['percent_change']:.1f}%",
-            delta=bottom_selected_row["temporal_bucket_label"],
-        )
+        **5. Use ranking as a lens, not as a causal claim.** Sorting surfaces the time
+        windows with the largest observed differences. It does not show why those
+        differences occurred.
+        """
+    )
 
-with st.expander("Show selected bucket data", expanded=False):
-    _display_summary_table(selected_bucket_df)
+st.caption(
+    "Evidence scope: observed NYC mobility before and after the January 5, 2025 "
+    "congestion-pricing launch. The page describes when pre/post differences were "
+    "largest; it does not by itself establish that congestion pricing caused those "
+    "differences."
+)
+

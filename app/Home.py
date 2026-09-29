@@ -43,11 +43,6 @@ pages = {
             title="Zone Profile",
             icon=":material/location_on:",
         ),
-        st.Page(
-            "views/raw_16_mobility_environment_profiler.py",
-            title="Mobility Environment Profiler",
-            icon=":material/account_tree:",
-        ),
     ],
 
     "Relationships & Dynamics": [
@@ -83,7 +78,25 @@ pages = {
         ),
     ],
 
-    "Diagnostics": [
+    "Mobility Types & Drivers": [
+        st.Page(
+            "views/raw_16_mobility_environment_profiler.py",
+            title="Mobility Environment Profiler",
+            icon=":material/account_tree:",
+        ),
+        st.Page(
+            "views/raw_26_mobility_day_types.py",
+            title="Mobility Day Types",
+            icon=":material/calendar_month:",
+        ),
+        st.Page(
+            "views/raw_27_mobility_drivers.py",
+            title="Mobility Drivers",
+            icon=":material/stacked_line_chart:",
+        ),
+    ],
+
+    "Stress & Anomalies": [
         st.Page(
             "views/raw_12_stress_anomalies_over_time.py",
             title="Stress Anomaly Temporal Explorer",
@@ -111,11 +124,57 @@ pages = {
         ),
     ],
 
-    "Planned Work": [
+    "Forecasting & Reliability": [
         st.Page(
-            "views/future_forecasting_counterfactual.py",
-            title="Forecasting",
+            "views/raw_18_forecast_scorecard.py",
+            title="Forecast Scorecard",
             icon=":material/query_stats:",
+        ),
+        st.Page(
+            "views/raw_19_forecast_reliability.py",
+            title="Forecast Reliability",
+            icon=":material/verified:",
+        ),
+        st.Page(
+            "views/raw_20_forecast_wins_misses.py",
+            title="Forecast Wins & Misses",
+            icon=":material/balance:",
+        ),
+    ],
+
+    "No-CP Counterfactual Mobility": [
+        st.Page(
+            "views/raw_21_counterfactual_overview.py",
+            title="Counterfactual Overview",
+            icon=":material/alt_route:",
+        ),
+        st.Page(
+            "views/raw_22_counterfactual_geography.py",
+            title="Counterfactual Geography",
+            icon=":material/layers:",
+        ),
+        st.Page(
+            "views/raw_23_multimodal_counterfactuals.py",
+            title="Multimodal Counterfactuals",
+            icon=":material/route:",
+        ),
+        st.Page(
+            "views/raw_24_counterfactual_robustness.py",
+            title="Counterfactual Robustness",
+            icon=":material/fact_check:",
+        ),
+        st.Page(
+            "views/raw_25_counterfactual_calibration.py",
+            title="Gap Calibration",
+            icon=":material/straighten:",
+        ),
+    ],
+
+    "About the Project": [
+        st.Page(
+            "views/about_source_pipeline.py",
+            title="About the Source Pipeline",
+            icon=":material/account_tree:",
         ),
     ],
 }

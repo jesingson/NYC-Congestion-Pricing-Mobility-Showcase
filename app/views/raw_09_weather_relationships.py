@@ -8,6 +8,9 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from app.data_access.loaders import (
+    CONGESTION_PRICING_START_DATE,
+)
 from app.data_access.weather_relationships import (
     ALL_TEMPORAL_BUCKETS_LABEL,
     MOBILITY_LABELS,
@@ -21,20 +24,17 @@ from app.data_access.weather_relationships import (
     load_relationship_date_bounds,
     load_zone_lookup,
 )
-from app.utils.project_branding import inject_app_css, render_chart_insight
+from app.utils.project_branding import (
+    BRAND_COLORS,
+    apply_branding,
+    exploration_section,
+    inject_app_css,
+    render_chart_insight,
+)
 
 
-CP_START_DATE = pd.Timestamp("2025-01-05")
-
-BRAND_COLORS = {
-    "dark_teal": "#006D77",
-    "seafoam": "#83C5BE",
-    "ice": "#EDF6F9",
-    "pale_peach": "#FFDDD2",
-    "terracotta": "#E29578",
-    "charcoal": "#243238",
-    "gray": "#66747A",
-}
+CP_START_DATE = CONGESTION_PRICING_START_DATE
+NEUTRAL_GRAY = "#66747A"
 
 PRE_COLOR = BRAND_COLORS["dark_teal"]
 POST_COLOR = BRAND_COLORS["terracotta"]
@@ -63,7 +63,7 @@ SAVED_VIEWS = (
         temporal_bucket="weekday_evening",
         geography="Citywide",
         description=(
-            "The strongest relationship in the citywide scan."
+            "A strong citywide temperature-and-bus-speed relationship."
         ),
     ),
     SavedView(
@@ -279,16 +279,16 @@ def _build_scatter_figure(
                 )
             )
 
+    figure = apply_branding(figure)
+
     figure.update_layout(
         height=520,
         margin={
-            "l": 20,
-            "r": 20,
-            "t": 25,
-            "b": 20,
+            "l": 55,
+            "r": 30,
+            "t": 45,
+            "b": 65,
         },
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
         legend={
             "orientation": "h",
             "yanchor": "bottom",
@@ -420,7 +420,7 @@ def _build_time_figure(
             x=CP_START_DATE,
             line_width=2,
             line_dash="dash",
-            line_color=BRAND_COLORS["gray"],
+            line_color=NEUTRAL_GRAY,
             annotation_text="Congestion pricing",
             annotation_position="top left",
         )
@@ -445,16 +445,16 @@ def _build_time_figure(
     if weather_metric == "precipitation":
         weather_axis["rangemode"] = "tozero"
 
+    figure = apply_branding(figure)
+
     figure.update_layout(
         height=470,
         margin={
-            "l": 20,
-            "r": 35,
-            "t": 25,
-            "b": 20,
+            "l": 55,
+            "r": 70,
+            "t": 45,
+            "b": 60,
         },
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
         barmode="overlay",
         legend={
             "orientation": "h",
@@ -599,8 +599,14 @@ def _dynamic_interpretation(
                     f"{_format_correlation(post_value)} after)."
                 )
 
+    geography_phrase = (
+        "citywide"
+        if geography_label == "Citywide"
+        else geography_label
+    )
+
     body = (
-        f"Across {geography_label.lower()} {temporal_label.lower()} observations, "
+        f"Across {geography_phrase} {temporal_label.lower()} observations, "
         f"{weather_label.lower()} and {mobility_label.lower()} had a "
         f"Spearman correlation of {_format_correlation(all_spearman)} across "
         f"{observation_count:,} matched observations. {support}."
@@ -681,6 +687,7 @@ def _apply_saved_view(
 
 
 def _mark_custom() -> None:
+    st.session_state["raw09_saved_view"] = "Custom"
     st.session_state["raw09_applied_saved_view"] = "Custom"
 
 
@@ -771,11 +778,13 @@ st.caption("WEATHER RELATIONSHIPS")
 st.title("How did weather relate to mobility?")
 
 st.write(
-    "Explore how weather conditions moved with transportation demand and "
-    "speed across the city and within individual Taxi Zones."
+    "Weather changes alongside many of the same daily and seasonal patterns that shape "
+    "transportation. This page asks whether mobility demand and speeds tended to move "
+    "with weather conditions, while keeping association separate from an explanation "
+    "of why mobility changed."
 )
 
-st.header("Bus speeds were lower on warmer weekday evenings")
+st.header("How did temperature relate to weekday-evening bus speed?")
 
 hero_pair = build_weather_relationship_pair_data(
     mobility_metric="avg_bus_speed",
@@ -821,8 +830,11 @@ hero_post_value = (
 )
 
 st.write(
-    "Warmer weekday evenings were associated with lower citywide bus speeds. "
-    "The relationship remained negative before and after congestion pricing."
+    "The fixed opening example pairs **citywide Bus Average Speed** with "
+    "**Temperature** on weekday evenings. Each point is a matched observation. "
+    "Spearman correlation summarizes whether the two measures generally move in the "
+    "same or opposite direction; the before/after cards show whether that association "
+    "looked similar on the two sides of the congestion-pricing launch."
 )
 
 hero_card_1, hero_card_2, hero_card_3 = st.columns(3)
@@ -867,18 +879,13 @@ hero_headline, hero_body = _dynamic_interpretation(
 )
 render_chart_insight(f"**{hero_headline}.** {hero_body}")
 
-st.info(
-    "This view shows association, not causation. Seasonal travel patterns, "
-    "traffic, roadway conditions, and service changes may affect both measures."
-)
-
-st.divider()
-
-st.header("Explore weather and mobility")
-
 saved_view_labels = [
     saved_view.label
     for saved_view in SAVED_VIEWS
+]
+saved_view_options = [
+    *saved_view_labels,
+    "Custom",
 ]
 
 
@@ -886,6 +893,10 @@ def _apply_selected_saved_view() -> None:
     selected_label = st.session_state[
         "raw09_saved_view"
     ]
+
+    if selected_label == "Custom":
+        st.session_state["raw09_applied_saved_view"] = "Custom"
+        return
 
     selected_view = next(
         view
@@ -900,311 +911,369 @@ def _apply_selected_saved_view() -> None:
     )
 
 
-selected_saved_view = st.selectbox(
-    "Saved view",
-    options=saved_view_labels,
-    key="raw09_saved_view",
-    on_change=_apply_selected_saved_view,
-)
-
-selected_saved_view_config = next(
-    saved_view
-    for saved_view in SAVED_VIEWS
-    if saved_view.label == selected_saved_view
-)
-
-st.caption(
-    selected_saved_view_config.description
-)
-
-control_row_1 = st.columns(
-    [1.2, 1.8, 1.8]
-)
-
-with control_row_1[0]:
-    geography = st.selectbox(
-        "Geography",
-        options=["Citywide", "Taxi Zone"],
-        key="raw09_geography",
-        on_change=_mark_custom,
+with exploration_section(
+    key="raw09_exploration_area",
+    title="Explore weather and mobility",
+    description=(
+        "Choose a saved view or build your own to compare weather with mobility "
+        "by geography, time of week, and date range."
+    ),
+):
+    selected_saved_view = st.selectbox(
+        "Saved view",
+        options=saved_view_options,
+        key="raw09_saved_view",
+        on_change=_apply_selected_saved_view,
     )
 
-with control_row_1[1]:
-    mobility_metric = st.selectbox(
-        "Mobility metric",
-        options=list(MOBILITY_METRICS),
-        format_func=lambda value: MOBILITY_LABELS[value],
-        key="raw09_mobility_metric",
-        on_change=_mark_custom,
-    )
-
-with control_row_1[2]:
-    weather_metric = st.selectbox(
-        "Weather metric",
-        options=list(WEATHER_METRICS),
-        format_func=lambda value: WEATHER_LABELS[value],
-        key="raw09_weather_metric",
-        on_change=_mark_custom,
-    )
-
-selected_zone_id: int | None = None
-selected_zone_label = "Citywide"
-
-if geography == "Taxi Zone":
-    zone_options = zone_lookup["taxi_zone_id"].astype(int).tolist()
-
-    zone_label_map = {
-        int(row.taxi_zone_id): (
-            f"{row.zone} · {row.borough}"
+    if selected_saved_view == "Custom":
+        st.caption(
+            "Custom view · adjust geography, mobility, weather, time of week, or dates."
         )
-        for row in zone_lookup.itertuples()
-    }
+    else:
+        selected_saved_view_config = next(
+            saved_view
+            for saved_view in SAVED_VIEWS
+            if saved_view.label == selected_saved_view
+        )
+        st.caption(
+            selected_saved_view_config.description
+        )
+
+    control_row_1 = st.columns(
+        [1.2, 1.8, 1.8]
+    )
+
+    with control_row_1[0]:
+        geography = st.selectbox(
+            "Geography",
+            options=["Citywide", "Taxi Zone"],
+            key="raw09_geography",
+            on_change=_mark_custom,
+        )
+
+    with control_row_1[1]:
+        mobility_metric = st.selectbox(
+            "Mobility metric",
+            options=list(MOBILITY_METRICS),
+            format_func=lambda value: MOBILITY_LABELS[value],
+            key="raw09_mobility_metric",
+            on_change=_mark_custom,
+        )
+
+    with control_row_1[2]:
+        weather_metric = st.selectbox(
+            "Weather metric",
+            options=list(WEATHER_METRICS),
+            format_func=lambda value: WEATHER_LABELS[value],
+            key="raw09_weather_metric",
+            on_change=_mark_custom,
+        )
+
+    selected_zone_id: int | None = None
+    selected_zone_label = "Citywide"
+
+    if geography == "Taxi Zone":
+        zone_options = zone_lookup["taxi_zone_id"].astype(int).tolist()
+
+        zone_label_map = {
+            int(row.taxi_zone_id): (
+                f"{row.zone} · {row.borough}"
+            )
+            for row in zone_lookup.itertuples()
+        }
+
+        if (
+            st.session_state.get("raw09_zone_id")
+            not in zone_options
+        ):
+            st.session_state["raw09_zone_id"] = zone_options[0]
+
+        selected_zone_id = st.selectbox(
+            "Taxi Zone",
+            options=zone_options,
+            format_func=lambda value: zone_label_map[value],
+            key="raw09_zone_id",
+            on_change=_mark_custom,
+        )
+
+        selected_zone_label = zone_label_map[
+            selected_zone_id
+        ]
+
+    control_row_2 = st.columns(
+        [1.5, 1.2, 1.2, 1]
+    )
+
+    with control_row_2[0]:
+        temporal_bucket = st.selectbox(
+            "Time of week",
+            options=list(TEMPORAL_BUCKETS),
+            format_func=lambda value: TEMPORAL_BUCKET_LABELS[value],
+            key="raw09_temporal_bucket",
+            on_change=_mark_custom,
+        )
+
+    with control_row_2[1]:
+        start_date = st.date_input(
+            "Start date",
+            min_value=minimum_date.date(),
+            max_value=maximum_date.date(),
+            key="raw09_start_date",
+            on_change=_mark_custom,
+        )
+
+    with control_row_2[2]:
+        end_date = st.date_input(
+            "End date",
+            min_value=minimum_date.date(),
+            max_value=maximum_date.date(),
+            key="raw09_end_date",
+            on_change=_mark_custom,
+        )
+
+    with control_row_2[3]:
+        show_periods = st.toggle(
+            "Compare pre/post",
+            key="raw09_show_periods",
+            on_change=_mark_custom,
+        )
+
+    if start_date > end_date:
+        st.error(
+            "The start date must be on or before the end date."
+        )
+        st.stop()
+
+    pair_data = build_weather_relationship_pair_data(
+        mobility_metric=mobility_metric,
+        weather_metric=weather_metric,
+        temporal_bucket=temporal_bucket,
+        taxi_zone_id=selected_zone_id,
+        start_date=start_date,
+        end_date=end_date,
+    )
+
+    minimum_support = (
+        20
+        if temporal_bucket
+        != ALL_TEMPORAL_BUCKETS_LABEL
+        else 30
+    )
+
+    statistics = calculate_relationship_statistics(
+        pair_data,
+        minimum_observations=minimum_support,
+    )
+
+    all_row = _extract_period_row(
+        statistics,
+        "all",
+    )
 
     if (
-        st.session_state.get("raw09_zone_id")
-        not in zone_options
+        pair_data.empty
+        or all_row is None
+        or not bool(all_row["supported"])
     ):
-        st.session_state["raw09_zone_id"] = zone_options[0]
+        st.warning(
+            "There are not enough matched observations to estimate this "
+            "relationship reliably. Broaden the date range, choose Citywide, "
+            "or select another time-of-week view."
+        )
+        st.stop()
 
-    selected_zone_id = st.selectbox(
-        "Taxi Zone",
-        options=zone_options,
-        format_func=lambda value: zone_label_map[value],
-        key="raw09_zone_id",
-        on_change=_mark_custom,
+    observation_count = int(
+        all_row["observation_count"]
     )
 
-    selected_zone_label = zone_label_map[
-        selected_zone_id
-    ]
+    if observation_count < 45:
+        st.warning(
+            f"Only {observation_count:,} matched observations are available. "
+            "Treat this relationship as exploratory."
+        )
+    elif observation_count < 120:
+        st.caption(
+            f"Support note: {observation_count:,} matched observations are "
+            "available, so this view should be interpreted with some caution."
+        )
 
-control_row_2 = st.columns(
-    [1.5, 1.2, 1.2, 1]
-)
-
-with control_row_2[0]:
-    temporal_bucket = st.selectbox(
-        "Time of week",
-        options=list(TEMPORAL_BUCKETS),
-        format_func=lambda value: TEMPORAL_BUCKET_LABELS[value],
-        key="raw09_temporal_bucket",
-        on_change=_mark_custom,
-    )
-
-with control_row_2[1]:
-    start_date = st.date_input(
-        "Start date",
-        min_value=minimum_date.date(),
-        max_value=maximum_date.date(),
-        key="raw09_start_date",
-        on_change=_mark_custom,
-    )
-
-with control_row_2[2]:
-    end_date = st.date_input(
-        "End date",
-        min_value=minimum_date.date(),
-        max_value=maximum_date.date(),
-        key="raw09_end_date",
-        on_change=_mark_custom,
-    )
-
-with control_row_2[3]:
-    show_periods = st.toggle(
-        "Compare pre/post",
-        key="raw09_show_periods",
-        on_change=_mark_custom,
-    )
-
-if start_date > end_date:
-    st.error(
-        "The start date must be on or before the end date."
-    )
-    st.stop()
-
-pair_data = build_weather_relationship_pair_data(
-    mobility_metric=mobility_metric,
-    weather_metric=weather_metric,
-    temporal_bucket=temporal_bucket,
-    taxi_zone_id=selected_zone_id,
-    start_date=start_date,
-    end_date=end_date,
-)
-
-minimum_support = (
-    20
-    if temporal_bucket
-    != ALL_TEMPORAL_BUCKETS_LABEL
-    else 30
-)
-
-statistics = calculate_relationship_statistics(
-    pair_data,
-    minimum_observations=minimum_support,
-)
-
-all_row = _extract_period_row(
-    statistics,
-    "all",
-)
-
-if (
-    pair_data.empty
-    or all_row is None
-    or not bool(all_row["supported"])
-):
-    st.warning(
-        "There are not enough matched observations to estimate this "
-        "relationship reliably. Broaden the date range, choose Citywide, "
-        "or select another time-of-week view."
-    )
-    st.stop()
-
-observation_count = int(
-    all_row["observation_count"]
-)
-
-if observation_count < 45:
-    st.warning(
-        f"Only {observation_count:,} matched observations are available. "
-        "Treat this relationship as exploratory."
-    )
-elif observation_count < 120:
     st.caption(
-        f"Support note: {observation_count:,} matched observations are "
-        "available, so this view should be interpreted with some caution."
+        f"Current view: {st.session_state['raw09_applied_saved_view']}"
     )
 
-st.caption(
-    f"Current view: {st.session_state['raw09_applied_saved_view']}"
-)
+    _render_relationship_cards(statistics)
 
-_render_relationship_cards(statistics)
+    relationship_tab, time_tab = st.tabs(
+        [
+            "Relationship",
+            "Over time",
+        ]
+    )
 
-relationship_tab, time_tab = st.tabs(
-    [
-        "Relationship",
-        "Over time",
+    weather_label = WEATHER_LABELS[
+        weather_metric
     ]
-)
+    mobility_label = MOBILITY_LABELS[
+        mobility_metric
+    ]
+    temporal_label = TEMPORAL_BUCKET_LABELS[
+        temporal_bucket
+    ]
 
-weather_label = WEATHER_LABELS[
-    weather_metric
-]
-mobility_label = MOBILITY_LABELS[
-    mobility_metric
-]
-temporal_label = TEMPORAL_BUCKET_LABELS[
-    temporal_bucket
-]
-
-with relationship_tab:
-    relationship_figure = _build_scatter_figure(
-        pair_data,
-        weather_label=weather_label,
-        mobility_label=mobility_label,
-        show_periods=show_periods,
-    )
-
-    st.plotly_chart(
-        relationship_figure,
-        width="stretch",
-        key="raw09_explorer_scatter",
-        config={
-            "displayModeBar": False,
-        },
-    )
-
-    insight_headline, insight_body = _dynamic_interpretation(
-        statistics,
-        weather_label=weather_label,
-        mobility_label=mobility_label,
-        temporal_label=temporal_label,
-        geography_label=selected_zone_label,
-    )
-
-    render_chart_insight(f"**{insight_headline}.** {insight_body}")
-
-with time_tab:
-    st.write(
-        "Mobility uses the left axis and weather the right. Compare timing "
-        "and direction, not line or bar height."
-    )
-
-    time_figure = _build_time_figure(
-        pair_data,
-        weather_metric=weather_metric,
-        weather_label=weather_label,
-        mobility_label=mobility_label,
-    )
-
-    st.plotly_chart(
-        time_figure,
-        width="stretch",
-        key="raw09_explorer_time_series",
-        config={
-            "displayModeBar": False,
-        },
-    )
-    render_chart_insight(
-        _time_series_takeaway(
+    with relationship_tab:
+        relationship_figure = _build_scatter_figure(
             pair_data,
+            weather_label=weather_label,
+            mobility_label=mobility_label,
+            show_periods=show_periods,
+        )
+
+        st.plotly_chart(
+            relationship_figure,
+            width="stretch",
+            key="raw09_explorer_scatter",
+            config={
+                "displayModeBar": False,
+            },
+        )
+        st.caption(
+            "Points are matched dates. Trend lines are simple linear guides; "
+            "the summary cards report both Spearman and Pearson correlations."
+        )
+
+        insight_headline, insight_body = _dynamic_interpretation(
             statistics,
             weather_label=weather_label,
             mobility_label=mobility_label,
+            temporal_label=temporal_label,
+            geography_label=selected_zone_label,
         )
-    )
 
-with st.expander("View matched observations"):
-    detail_table = pair_data[
-        [
-            "date",
-            "pre_post_cp",
-            "weather_value",
-            "mobility_value",
-        ]
-    ].copy()
+        render_chart_insight(f"**{insight_headline}.** {insight_body}")
 
-    detail_table = detail_table.rename(
-        columns={
-            "date": "Date",
-            "pre_post_cp": "Period",
-            "weather_value": weather_label,
-            "mobility_value": mobility_label,
-        }
-    )
+    with time_tab:
+        st.write(
+            "Mobility uses the left axis and weather the right. Compare timing "
+            "and direction, not line or bar height."
+        )
 
-    detail_table["Period"] = (
-        detail_table["Period"]
-        .map(
-            {
-                "pre_cp": "Before congestion pricing",
-                "post_cp": "After congestion pricing",
+        time_figure = _build_time_figure(
+            pair_data,
+            weather_metric=weather_metric,
+            weather_label=weather_label,
+            mobility_label=mobility_label,
+        )
+
+        st.plotly_chart(
+            time_figure,
+            width="stretch",
+            key="raw09_explorer_time_series",
+            config={
+                "displayModeBar": False,
+            },
+        )
+        render_chart_insight(
+            _time_series_takeaway(
+                pair_data,
+                statistics,
+                weather_label=weather_label,
+                mobility_label=mobility_label,
+            )
+        )
+
+    with st.expander("View matched observations"):
+        detail_table = pair_data[
+            [
+                "date",
+                "pre_post_cp",
+                "weather_value",
+                "mobility_value",
+            ]
+        ].copy()
+
+        detail_table = detail_table.rename(
+            columns={
+                "date": "Date",
+                "pre_post_cp": "Period",
+                "weather_value": weather_label,
+                "mobility_value": mobility_label,
             }
         )
-    )
 
-    st.dataframe(
-        detail_table.sort_values(
-            "Date",
-            ascending=False,
-        ),
-        width="stretch",
-        hide_index=True,
-        column_config={
-            "Date": st.column_config.DateColumn(
-                format="MMM D, YYYY"
+        detail_table["Period"] = (
+            detail_table["Period"]
+            .map(
+                {
+                    "pre_cp": "Before congestion pricing",
+                    "post_cp": "After congestion pricing",
+                }
+            )
+        )
+
+        st.dataframe(
+            detail_table.sort_values(
+                "Date",
+                ascending=False,
             ),
-            weather_label: st.column_config.NumberColumn(
-                format="%.2f"
-            ),
-            mobility_label: st.column_config.NumberColumn(
-                format="%.2f"
-            ),
-        },
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Date": st.column_config.DateColumn(
+                    format="MMM D, YYYY"
+                ),
+                weather_label: st.column_config.NumberColumn(
+                    format="%.2f"
+                ),
+                mobility_label: st.column_config.NumberColumn(
+                    format="%.2f"
+                ),
+            },
+        )
+
+
+st.markdown("### What this page establishes")
+st.markdown(
+    "Weather and mobility can move together, but the strength and direction of that "
+    "relationship depend on the weather measure, mobility measure, geography, and time "
+    "of week being compared. A visible association is therefore useful context for "
+    "understanding mobility variation, not a standalone explanation for it."
+)
+
+with st.expander("How this page works", expanded=False):
+    st.markdown(
+        """
+        **1. Match weather and mobility on the same observations.** Each scatterplot
+        point pairs a weather value with a mobility value for the same date and selected
+        time-of-week context.
+
+        **2. Use Spearman as the primary relationship measure.** Spearman correlation
+        describes whether two measures generally rise or fall together, including
+        monotonic relationships that are not perfectly linear. Values range from **−1**
+        to **+1**.
+
+        **3. Use Pearson as a complementary check.** Pearson correlation measures linear
+        association. When Pearson and Spearman differ substantially, the relationship
+        may not be well summarized by a simple straight-line pattern.
+
+        **4. Treat scatterplot trend lines as visual guides.** The fitted lines help the
+        eye see broad direction. They are not the same statistic as the Spearman
+        correlation used in the primary interpretation.
+
+        **5. Compare timing as well as association.** The time-series view places
+        mobility and weather on separate axes so their chronology can be compared. Axis
+        heights are not directly comparable; timing and direction are the useful cues.
+
+        **6. Keep weather association separate from causation.** Seasonal travel
+        patterns, traffic, roadway conditions, service changes, and other factors can
+        affect both weather-linked mobility patterns and the observed transportation
+        measures.
+        """
     )
 
 st.caption(
-    "Correlations describe association, not causation. Seasonal, roadway, "
-    "service, and travel-demand conditions may affect both measures."
+    "Evidence scope: matched observed weather and NYC mobility measurements over the "
+    "selected dates and time-of-week context. Correlations describe association, not "
+    "causation; they do not establish that weather caused the observed mobility changes."
 )
+

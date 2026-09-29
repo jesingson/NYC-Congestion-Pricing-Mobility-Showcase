@@ -17,7 +17,12 @@ from app.data_access.anomalies import (
     load_metric_history,
     load_selected_anomaly_events,
 )
-from app.utils.project_branding import inject_app_css
+from app.data_access.loaders import CONGESTION_PRICING_START_DATE
+from app.utils.project_branding import (
+    exploration_section,
+    inject_app_css,
+    render_chart_insight,
+)
 
 
 PAGE_CAPTION = "STRESS ANOMALY EVENT PROFILER"
@@ -446,7 +451,7 @@ def _build_scouting_report() -> str:
     candidates["post_cp_bonus"] = (
         candidates.get("pre_post_cp", "").astype(str).str.lower().eq("post_cp")
         if "pre_post_cp" in candidates.columns
-        else candidates["date"].ge(pd.Timestamp("2025-01-05"))
+        else candidates["date"].ge(pd.Timestamp(CONGESTION_PRICING_START_DATE))
     ).astype(float)
     candidates["hero_score"] = (
         candidates["ranking_strength"].rank(pct=True).fillna(0) * 0.35
@@ -740,36 +745,44 @@ def _load_frozen_hero() -> tuple[pd.Series, pd.DataFrame, pd.DataFrame]:
 
 
 def _evidence_table(evidence: pd.DataFrame) -> pd.DataFrame:
+    """Return reader-facing evidence without overstating contextual metrics."""
     table = evidence.copy()
     table["difference"] = table["observed_value"] - table["expected_value"]
-    positive = table["residual_zscore"].gt(0)
+
     unavailable = (
         table["support_status"].eq("unavailable")
         | table["observed_value"].isna()
         | table["expected_value"].isna()
         | table["residual_zscore"].isna()
     )
+    defining = table["is_defining_driver"].fillna(False).astype(bool)
+    counter_stress = table["is_counter_stress"].fillna(False).astype(bool)
+    demand_metric = table["metric"].isin(DEMAND_METRICS)
+    speed_metric = table["metric"].str.contains("speed", na=False)
+    duration_metric = table["metric"].str.contains("duration", na=False)
+
     table["why_it_matters"] = np.select(
         [
             unavailable,
-            ~unavailable & table["metric"].isin(DEMAND_METRICS) & positive,
-            ~unavailable & table["metric"].isin(DEMAND_METRICS) & ~positive,
-            ~unavailable & table["metric"].str.contains("speed", na=False) & positive,
-            ~unavailable & table["metric"].str.contains("speed", na=False) & ~positive,
-            ~unavailable & table["metric"].str.contains("duration", na=False) & positive,
-            ~unavailable & table["metric"].str.contains("duration", na=False) & ~positive,
+            defining & demand_metric,
+            defining & speed_metric,
+            defining & duration_metric,
+            ~defining & counter_stress & demand_metric,
+            ~defining & counter_stress & speed_metric,
+            ~defining & counter_stress & duration_metric,
         ],
         [
             "No comparable baseline — unavailable",
-            "Higher activity than expected — stress aligned",
-            "Lower activity than expected — counter-stress",
-            "Faster movement than expected — counter-stress",
-            "Slower movement than expected — stress aligned",
-            "Longer travel time than expected — stress aligned",
-            "Shorter travel time than expected — counter-stress",
+            "Higher activity than expected — defining stress driver",
+            "Slower movement than expected — defining stress driver",
+            "Longer travel time than expected — defining stress driver",
+            "Lower activity than expected — counter-stress context",
+            "Faster movement than expected — counter-stress context",
+            "Shorter travel time than expected — counter-stress context",
         ],
-        default="Departure from expectation",
+        default="Context only — not a defining stress driver",
     )
+
     table["statistical_distance"] = table["residual_zscore"].map(
         lambda value: "Not available"
         if pd.isna(value)
@@ -778,6 +791,7 @@ def _evidence_table(evidence: pd.DataFrame) -> pd.DataFrame:
             f"{'above' if value > 0 else 'below'}"
         )
     )
+
     return table.rename(
         columns={
             "metric_label": "Metric",
@@ -1114,7 +1128,7 @@ def _metric_history_chart(
         ),
         tooltip=marker_tooltip,
     )
-    policy_date = pd.Timestamp("2025-01-05")
+    policy_date = pd.Timestamp(CONGESTION_PRICING_START_DATE)
     layers: list[alt.Chart] = [band, lines, markers]
     if context_start <= policy_date <= context_end:
         policy_rule = alt.Chart(pd.DataFrame({"date": [policy_date]})).mark_rule(
@@ -1262,7 +1276,7 @@ def _render_metric_history(
                 "This series used the fallback because it missed the modeled-support "
                 "requirement for " + "; ".join(failed_requirements) + "."
             )
-    st.info(
+    render_chart_insight(
         f"For this event, **{metric_label}** was observed at "
         f"**{selected_diagnostic['observed_value']:,.3f}** versus "
         f"**{selected_diagnostic['expected_value']:,.3f}** expected—"
@@ -1278,8 +1292,11 @@ inject_app_css()
 st.caption(PAGE_CAPTION)
 st.title(PAGE_TITLE)
 st.write(
-    "Open one stress-anomaly event and trace the evidence behind its flag: the "
-    "observed values, modeled expectations, defining metrics, and support status."
+    "The earlier anomaly views show when stress appeared, where it appeared, and which "
+    "modes participated. This page moves from pattern to diagnosis: it opens one "
+    "Taxi Zone × date × daypart event and traces the observed values, expected values, "
+    "defining metrics, and support method that caused the observation to be retained "
+    "as a stress anomaly."
 )
 
 try:
@@ -1307,7 +1324,7 @@ st.write(
 )
 st.altair_chart(_event_context_chart(hero_zone_context), width="stretch")
 featured_day_events = int(hero_zone_context["date"].eq(hero_date).sum())
-st.info(
+render_chart_insight(
     f"Brooklyn Navy Yard recorded **{len(hero_zone_context):,} stress-anomaly "
     f"events** in this 12-month window. **{featured_day_events:,}** occurred on "
     f"**{hero_date:%B %d, %Y}**; the selected weekend-overnight event is outlined."
@@ -1331,9 +1348,11 @@ card_4.metric(
 
 st.subheader("Why this observation was flagged")
 st.write(
-    "For this one Brooklyn Navy Yard overnight observation, for-hire demand was "
-    "far above expectation while bus movement was slower than expected. The event "
-    "therefore contains both demand and congestion stress."
+    "The table compares the observed value with the event's expected value for each "
+    "**stress-aligned defining metric**. Higher-than-expected demand and "
+    "slower-than-expected movement count as stress only when they clear the project's "
+    "residual-scale threshold; the interpretation below summarizes what the evidence "
+    "shows for this featured event."
 )
 st.dataframe(
     _evidence_table(defining_evidence).style.format(
@@ -1352,15 +1371,15 @@ evidence_lookup = defining_evidence.set_index("metric")
 bus = evidence_lookup.loc["avg_bus_speed"]
 fhv = evidence_lookup.loc["fhvhv_trip_count"]
 taxi = evidence_lookup.loc["taxi_trip_count"]
-st.info(
-    "This event was flagged as **Both** because two kinds of "
-    "stress appeared in the same Taxi Zone × date × time-window observation. "
+render_chart_insight(
+    "This event was flagged as **Both** because demand and congestion stress "
+    "appeared in the same Taxi Zone × date × daypart observation. "
     f"FHVHV trips reached **{fhv['observed_value']:,.0f}** versus "
     f"**{fhv['expected_value']:,.0f}** expected, and Taxi trips reached "
     f"**{taxi['observed_value']:,.0f}** versus **{taxi['expected_value']:,.1f}**. "
     f"At the same time, average bus speed fell to **{bus['observed_value']:.2f} mph** "
     f"versus **{bus['expected_value']:.2f} mph** expected. These co-occurring "
-    "deviations—not the neighborhood’s overall history—define this event."
+    "deviations—not the neighborhood's overall history—define this event."
 )
 
 st.subheader("See the selected metric in temporal context")
@@ -1390,288 +1409,241 @@ with st.expander("See counter-stress and other contextual measurements"):
         width="stretch",
     )
 
-with st.expander("How to read this event case file"):
-    st.markdown(
-        "- The first table contains only **stress-aligned defining metrics**: higher "
-        "demand, slower speeds, or longer trip durations that also clear the upstream "
-        "1.28 residual-scale threshold.\n"
-        "- Observed and expected values remain in their original units; the page "
-        "does not ask readers to interpret residuals alone.\n"
-        "- Demand pressure means unusually high trip or ridership activity. "
-        "Congestion pressure means slower speeds or longer durations.\n"
-        "- The three featured drivers have **modeled** support. Metrics with fallback "
-        "support are labeled explicitly. **Modeled** support uses the preferred "
-        "same-daypart seasonal decomposition. **Fallback** means observations exist "
-        "but the series was too sparse, too short-lived, or too flat for that model; "
-        "its expected value is the running mean of prior observations in the same "
-        "daypart. **Unavailable** means there were no observations from which to "
-        "estimate either direction or expectation.\n"
-        "- A continuous surrounding trend and seasonal decomposition are not yet "
-        "available from the event-only diagnostic export."
+with exploration_section(
+    key="raw15_exploration_area",
+    title="Find and inspect another event",
+    description=(
+        "Choose a Taxi Zone, narrow the date and time context, then select a "
+        "stress-anomaly event to inspect its defining metrics and observed-versus-"
+        "expected history."
+    ),
+):
+    all_events, all_diagnostics = _load_profiler_data()
+
+    # Honor an event handed off from Raw 13 before initializing the controls.
+    # The event ID is the canonical key; its zone and date determine the initial
+    # context shown by this page.
+    handoff_event_id = str(
+        st.session_state.get("raw15_selected_event_id", "")
+    )
+    handoff_rows = all_events.loc[
+        all_events[EVENT_ID_COLUMN].astype(str).eq(handoff_event_id)
+    ]
+    handoff_event = (
+        handoff_rows.iloc[0]
+        if not handoff_rows.empty
+        else None
     )
 
-st.caption(
-    "A stress-anomaly event represents one Taxi Zone on one date during one "
-    "daypart. The Zone Profile page summarizes how a place behaves across time; "
-    "this page explains the evidence for one selected event and places it within "
-    "the history of its defining metric."
-)
-
-st.divider()
-st.header("Find and inspect another event")
-st.write(
-    "Start with a Taxi Zone, then narrow its stress-anomaly events by date, "
-    "daypart, day type, or stress family. Selecting an event updates both the "
-    "context view and its observed-versus-expected evidence."
-)
-
-all_events, all_diagnostics = _load_profiler_data()
-
-# Honor an event handed off from Raw 13 before initializing the controls.
-# The event ID is the canonical key; its zone and date determine the initial
-# context shown by this page.
-handoff_event_id = str(
-    st.session_state.get("raw15_selected_event_id", "")
-)
-handoff_rows = all_events.loc[
-    all_events[EVENT_ID_COLUMN].astype(str).eq(handoff_event_id)
-]
-handoff_event = (
-    handoff_rows.iloc[0]
-    if not handoff_rows.empty
-    else None
-)
-
-zone_options = sorted(all_events["zone_label"].dropna().unique().tolist())
-if handoff_event is not None and handoff_event["zone_label"] in zone_options:
-    default_zone_label = handoff_event["zone_label"]
-else:
-    default_zone_label = next(
-        (
-            label
-            for label in zone_options
-            if label.startswith("Brooklyn Navy Yard ·")
-        ),
-        zone_options[0],
-    )
-
-# Set the widget state only when arriving from another page. This avoids
-# overwriting a user's later selections on ordinary Streamlit reruns.
-if handoff_event is not None:
-    st.session_state["raw15_zone"] = default_zone_label
-
-control_1, control_2 = st.columns([1, 1.35])
-with control_1:
-    selected_zone_label = st.selectbox(
-        "Taxi Zone",
-        zone_options,
-        index=zone_options.index(default_zone_label),
-        key="raw15_zone",
-    )
-
-zone_events = all_events.loc[
-    all_events["zone_label"].eq(selected_zone_label)
-].copy()
-zone_min_date = zone_events["date"].min().date()
-zone_max_date = zone_events["date"].max().date()
-if handoff_event is not None and selected_zone_label == default_zone_label:
-    handoff_date = pd.Timestamp(handoff_event["date"]).date()
-    default_start = max(
-        zone_min_date,
-        handoff_date - pd.Timedelta(days=90),
-    )
-    default_end = min(
-        zone_max_date,
-        handoff_date + pd.Timedelta(days=90),
-    )
-elif selected_zone_label == default_zone_label:
-    default_start = max(
-        zone_min_date,
-        (pd.Timestamp("2025-03-02") - pd.DateOffset(months=6)).date(),
-    )
-    default_end = min(
-        zone_max_date,
-        (pd.Timestamp("2025-03-02") + pd.DateOffset(months=6)).date(),
-    )
-else:
-    default_end = zone_max_date
-    default_start = max(zone_min_date, (pd.Timestamp(default_end) - pd.DateOffset(months=12)).date())
-
-with control_2:
-    selected_dates = st.date_input(
-        "Event date range",
-        value=(default_start, default_end),
-        min_value=zone_min_date,
-        max_value=zone_max_date,
-        key=f"raw15_dates_{selected_zone_label}",
-    )
-
-filter_1, filter_2, filter_3 = st.columns(3)
-daypart_order = ["Overnight", "AM Peak", "Midday", "PM Peak", "Evening"]
-with filter_1:
-    selected_dayparts = st.multiselect(
-        "Daypart",
-        daypart_order,
-        default=daypart_order,
-        key="raw15_dayparts",
-    )
-with filter_2:
-    selected_day_types = st.multiselect(
-        "Day type",
-        ["Weekday", "Weekend"],
-        default=["Weekday", "Weekend"],
-        key="raw15_day_types",
-    )
-with filter_3:
-    selected_families = st.multiselect(
-        "Stress family",
-        ["Congestion", "Demand", "Both"],
-        default=["Congestion", "Demand", "Both"],
-        key="raw15_families",
-    )
-
-if isinstance(selected_dates, (tuple, list)):
-    if len(selected_dates) == 2:
-        selected_start, selected_end = map(pd.Timestamp, selected_dates)
-    elif len(selected_dates) == 1:
-        # Streamlit briefly returns a one-item tuple after the first click while
-        # the user is still completing a date range. Treat it as a one-day range
-        # so the intermediate rerun remains valid.
-        selected_start = selected_end = pd.Timestamp(selected_dates[0])
+    zone_options = sorted(all_events["zone_label"].dropna().unique().tolist())
+    if handoff_event is not None and handoff_event["zone_label"] in zone_options:
+        default_zone_label = handoff_event["zone_label"]
     else:
-        selected_start = selected_end = pd.Timestamp(default_end)
-else:
-    selected_start = selected_end = pd.Timestamp(selected_dates)
-
-filtered_events = zone_events.loc[
-    zone_events["date"].between(selected_start, selected_end)
-    & zone_events["daypart"].isin(selected_dayparts)
-    & zone_events["day_type"].isin(selected_day_types)
-    & zone_events["stress_family"].isin(selected_families)
-].copy()
-
-if filtered_events.empty:
-    st.warning("No stress-anomaly events match the current controls.")
-else:
-    filtered_events = filtered_events.sort_values(
-        ["date", "temporal_bucket"], ascending=[False, True]
-    )
-    filtered_events["event_label"] = filtered_events.apply(
-        lambda row: (
-            f"{row['date']:%b %d, %Y} · {row['daypart']} · {row['day_type']} · "
-            f"{row['stress_family']} · {row['driver_mode_label']}"
-        ),
-        axis=1,
-    )
-    label_to_id = dict(
-        zip(filtered_events["event_label"], filtered_events[EVENT_ID_COLUMN])
-    )
-    valid_event_ids = set(filtered_events[EVENT_ID_COLUMN].astype(str))
-    handed_off_event_is_visible = handoff_event_id in valid_event_ids
-    default_event_id = (
-        handoff_event_id
-        if handed_off_event_is_visible
-        else (
-            FROZEN_HERO_EVENT_ID
-            if FROZEN_HERO_EVENT_ID in valid_event_ids
-            else str(filtered_events.iloc[0][EVENT_ID_COLUMN])
+        default_zone_label = next(
+            (
+                label
+                for label in zone_options
+                if label.startswith("Brooklyn Navy Yard ·")
+            ),
+            zone_options[0],
         )
-    )
-    if str(st.session_state.get("raw15_selected_event_id", "")) not in valid_event_ids:
-        st.session_state["raw15_selected_event_id"] = default_event_id
-    selected_event_id = str(st.session_state["raw15_selected_event_id"])
 
-    chart_events = filtered_events.copy()
-    chart_events["is_featured"] = chart_events[EVENT_ID_COLUMN].eq(selected_event_id)
-    st.caption("Select any point to open that stress-anomaly event.")
-    selection_event = st.altair_chart(
-        _event_context_chart(chart_events, interactive=True),
-        width="stretch",
-        key="raw15_event_raster",
-        on_select="rerun",
-        selection_mode="event_pick",
+    # Consume a handed-off event only once. After that, the reader is free to change
+    # Taxi Zones without the persisted selected-event ID snapping the control back.
+    handoff_is_new = (
+        handoff_event is not None
+        and st.session_state.get("raw15_consumed_handoff_event_id")
+        != handoff_event_id
     )
-    selection_payload = getattr(selection_event, "selection", {})
-    selected_points = (
-        selection_payload.get("event_pick", [])
-        if hasattr(selection_payload, "get")
-        else getattr(selection_payload, "event_pick", [])
-    )
-    if selected_points:
-        clicked_event_id = str(selected_points[0].get("event_key", ""))
-        if clicked_event_id in valid_event_ids and clicked_event_id != selected_event_id:
-            st.session_state["raw15_selected_event_id"] = clicked_event_id
-            st.rerun()
+    if handoff_is_new:
+        st.session_state["raw15_zone"] = default_zone_label
+        st.session_state["raw15_consumed_handoff_event_id"] = handoff_event_id
+    elif st.session_state.get("raw15_zone") not in zone_options:
+        st.session_state["raw15_zone"] = default_zone_label
 
-    selected_event_id = str(st.session_state["raw15_selected_event_id"])
-    selected_event = filtered_events.loc[
-        filtered_events[EVENT_ID_COLUMN].eq(selected_event_id)
-    ].iloc[0]
-    st.info(
-        f"The current controls contain **{len(filtered_events):,} stress-anomaly "
-        f"events** in **{selected_event['zone']}**. The outlined point is the "
-        "event selected for diagnosis below."
-    )
-
-    with st.expander("Search for an event instead"):
-        current_label = filtered_events.loc[
-            filtered_events[EVENT_ID_COLUMN].eq(selected_event_id), "event_label"
-        ].iloc[0]
-        fallback_label = st.selectbox(
-            "Search by date, daypart, stress family, or defining modes",
-            list(label_to_id),
-            index=list(label_to_id).index(current_label),
-            key="raw15_event_fallback",
+    control_1, control_2 = st.columns([1, 1.35])
+    with control_1:
+        selected_zone_label = st.selectbox(
+            "Taxi Zone",
+            zone_options,
+            key="raw15_zone",
         )
-        if st.button("Open this event", key="raw15_open_fallback"):
-            st.session_state["raw15_selected_event_id"] = str(
-                label_to_id[fallback_label]
+
+    zone_events = all_events.loc[
+        all_events["zone_label"].eq(selected_zone_label)
+    ].copy()
+    zone_min_date = zone_events["date"].min().date()
+    zone_max_date = zone_events["date"].max().date()
+    if handoff_event is not None and selected_zone_label == default_zone_label:
+        handoff_date = pd.Timestamp(handoff_event["date"]).date()
+        default_start = max(
+            zone_min_date,
+            handoff_date - pd.Timedelta(days=90),
+        )
+        default_end = min(
+            zone_max_date,
+            handoff_date + pd.Timedelta(days=90),
+        )
+    elif selected_zone_label == default_zone_label:
+        default_start = max(
+            zone_min_date,
+            (pd.Timestamp("2025-03-02") - pd.DateOffset(months=6)).date(),
+        )
+        default_end = min(
+            zone_max_date,
+            (pd.Timestamp("2025-03-02") + pd.DateOffset(months=6)).date(),
+        )
+    else:
+        default_end = zone_max_date
+        default_start = max(zone_min_date, (pd.Timestamp(default_end) - pd.DateOffset(months=12)).date())
+
+    with control_2:
+        selected_dates = st.date_input(
+            "Event date range",
+            value=(default_start, default_end),
+            min_value=zone_min_date,
+            max_value=zone_max_date,
+            key=f"raw15_dates_{selected_zone_label}",
+        )
+
+    filter_1, filter_2, filter_3 = st.columns(3)
+    daypart_order = ["Overnight", "AM Peak", "Midday", "PM Peak", "Evening"]
+    with filter_1:
+        selected_dayparts = st.multiselect(
+            "Daypart",
+            daypart_order,
+            default=daypart_order,
+            key="raw15_dayparts",
+        )
+    with filter_2:
+        selected_day_types = st.multiselect(
+            "Day type",
+            ["Weekday", "Weekend"],
+            default=["Weekday", "Weekend"],
+            key="raw15_day_types",
+        )
+    with filter_3:
+        selected_families = st.multiselect(
+            "Stress family",
+            ["Congestion", "Demand", "Both"],
+            default=["Congestion", "Demand", "Both"],
+            key="raw15_families",
+        )
+
+    if isinstance(selected_dates, (tuple, list)):
+        if len(selected_dates) == 2:
+            selected_start, selected_end = map(pd.Timestamp, selected_dates)
+        elif len(selected_dates) == 1:
+            # Streamlit briefly returns a one-item tuple after the first click while
+            # the user is still completing a date range. Treat it as a one-day range
+            # so the intermediate rerun remains valid.
+            selected_start = selected_end = pd.Timestamp(selected_dates[0])
+        else:
+            selected_start = selected_end = pd.Timestamp(default_end)
+    else:
+        selected_start = selected_end = pd.Timestamp(selected_dates)
+
+    filtered_events = zone_events.loc[
+        zone_events["date"].between(selected_start, selected_end)
+        & zone_events["daypart"].isin(selected_dayparts)
+        & zone_events["day_type"].isin(selected_day_types)
+        & zone_events["stress_family"].isin(selected_families)
+    ].copy()
+
+    if filtered_events.empty:
+        st.warning("No stress-anomaly events match the current controls.")
+    else:
+        filtered_events = filtered_events.sort_values(
+            ["date", "temporal_bucket"], ascending=[False, True]
+        )
+        filtered_events["event_label"] = filtered_events.apply(
+            lambda row: (
+                f"{row['date']:%b %d, %Y} · {row['daypart']} · {row['day_type']} · "
+                f"{row['stress_family']} · {row['driver_mode_label']}"
+            ),
+            axis=1,
+        )
+        label_to_id = dict(
+            zip(filtered_events["event_label"], filtered_events[EVENT_ID_COLUMN])
+        )
+        valid_event_ids = set(filtered_events[EVENT_ID_COLUMN].astype(str))
+        handed_off_event_is_visible = handoff_event_id in valid_event_ids
+        default_event_id = (
+            handoff_event_id
+            if handed_off_event_is_visible
+            else (
+                FROZEN_HERO_EVENT_ID
+                if FROZEN_HERO_EVENT_ID in valid_event_ids
+                else str(filtered_events.iloc[0][EVENT_ID_COLUMN])
             )
-            st.rerun()
-
-    selected_defining, selected_context = _event_evidence(
-        selected_event, all_diagnostics
-    )
-    st.subheader(
-        f"{selected_event['zone']} · {selected_event['date']:%B %d, %Y} · "
-        f"{selected_event['daypart']}"
-    )
-    detail_1, detail_2, detail_3, detail_4 = st.columns(4)
-    detail_1.metric("Day type", selected_event["day_type"])
-    detail_2.metric("Stress family", selected_event["stress_family"])
-    detail_3.metric("Defining modes", len(selected_event["driver_modes"]))
-    detail_4.metric("Defining metrics", len(selected_defining))
-
-    st.dataframe(
-        _evidence_table(selected_defining).style.format(
-            {
-                "Observed": "{:,.2f}",
-                "Expected": "{:,.2f}",
-                "Difference": "{:+,.2f}",
-                "Residual scale": "{:,.3f}",
-            }
-        ),
-        hide_index=True,
-        width="stretch",
-    )
-
-    st.subheader("See the selected metric in temporal context")
-    selected_key = re.sub(
-        r"[^A-Za-z0-9_]+", "_", str(selected_event_id)
-    ).strip("_")
-    _render_metric_history(
-        selected_event,
-        selected_defining,
-        key_prefix=f"raw15_event_{selected_key}",
-    )
-
-    with st.expander("See counter-stress and other contextual measurements"):
-        st.caption(
-            "These rows were not used as stress-aligned reasons for selecting this "
-            "event. Some may be unusual in the opposite direction."
         )
+        if str(st.session_state.get("raw15_selected_event_id", "")) not in valid_event_ids:
+            st.session_state["raw15_selected_event_id"] = default_event_id
+        selected_event_id = str(st.session_state["raw15_selected_event_id"])
+
+        chart_events = filtered_events.copy()
+        chart_events["is_featured"] = chart_events[EVENT_ID_COLUMN].eq(selected_event_id)
+        st.caption("Select any point to open that stress-anomaly event.")
+        selection_event = st.altair_chart(
+            _event_context_chart(chart_events, interactive=True),
+            width="stretch",
+            key="raw15_event_raster",
+            on_select="rerun",
+            selection_mode="event_pick",
+        )
+        selection_payload = getattr(selection_event, "selection", {})
+        selected_points = (
+            selection_payload.get("event_pick", [])
+            if hasattr(selection_payload, "get")
+            else getattr(selection_payload, "event_pick", [])
+        )
+        if selected_points:
+            clicked_event_id = str(selected_points[0].get("event_key", ""))
+            if clicked_event_id in valid_event_ids and clicked_event_id != selected_event_id:
+                st.session_state["raw15_selected_event_id"] = clicked_event_id
+                st.rerun()
+
+        selected_event_id = str(st.session_state["raw15_selected_event_id"])
+        selected_event = filtered_events.loc[
+            filtered_events[EVENT_ID_COLUMN].eq(selected_event_id)
+        ].iloc[0]
+        st.caption(
+            f"The current controls contain **{len(filtered_events):,} stress-anomaly "
+            f"events** in **{selected_event['zone']}**. The outlined point is the "
+            "event selected for diagnosis below."
+        )
+
+        with st.expander("Search for an event instead"):
+            current_label = filtered_events.loc[
+                filtered_events[EVENT_ID_COLUMN].eq(selected_event_id), "event_label"
+            ].iloc[0]
+            fallback_label = st.selectbox(
+                "Search by date, daypart, stress family, or defining modes",
+                list(label_to_id),
+                index=list(label_to_id).index(current_label),
+                key="raw15_event_fallback",
+            )
+            if st.button("Open this event", key="raw15_open_fallback"):
+                st.session_state["raw15_selected_event_id"] = str(
+                    label_to_id[fallback_label]
+                )
+                st.rerun()
+
+        selected_defining, selected_context = _event_evidence(
+            selected_event, all_diagnostics
+        )
+        st.subheader(
+            f"{selected_event['zone']} · {selected_event['date']:%B %d, %Y} · "
+            f"{selected_event['daypart']}"
+        )
+        detail_1, detail_2, detail_3, detail_4 = st.columns(4)
+        detail_1.metric("Day type", selected_event["day_type"])
+        detail_2.metric("Stress family", selected_event["stress_family"])
+        detail_3.metric("Defining modes", len(selected_event["driver_modes"]))
+        detail_4.metric("Defining metrics", len(selected_defining))
+
         st.dataframe(
-            _evidence_table(selected_context).style.format(
+            _evidence_table(selected_defining).style.format(
                 {
                     "Observed": "{:,.2f}",
                     "Expected": "{:,.2f}",
@@ -1682,3 +1654,86 @@ else:
             hide_index=True,
             width="stretch",
         )
+
+        st.subheader("See the selected metric in temporal context")
+        selected_key = re.sub(
+            r"[^A-Za-z0-9_]+", "_", str(selected_event_id)
+        ).strip("_")
+        _render_metric_history(
+            selected_event,
+            selected_defining,
+            key_prefix=f"raw15_event_{selected_key}",
+        )
+
+        with st.expander("See counter-stress and other contextual measurements"):
+            st.caption(
+                "These rows were not used as stress-aligned reasons for selecting this "
+                "event. Some may be unusual in the opposite direction."
+            )
+            st.dataframe(
+                _evidence_table(selected_context).style.format(
+                    {
+                        "Observed": "{:,.2f}",
+                        "Expected": "{:,.2f}",
+                        "Difference": "{:+,.2f}",
+                        "Residual scale": "{:,.3f}",
+                    }
+                ),
+                hide_index=True,
+                width="stretch",
+            )
+
+# ---------------------------------------------------------------------
+# Closing synthesis
+# ---------------------------------------------------------------------
+st.divider()
+
+st.markdown("### What this page establishes")
+st.markdown(
+    "A stress-anomaly label is only the start of the explanation. The event case file "
+    "shows which measurements actually supplied the stress-aligned evidence, how far "
+    "their observed values departed from expectation, and whether the unusual reading "
+    "was isolated or part of a longer local pattern. That turns an anomaly from a flag "
+    "into an auditable mobility event."
+)
+
+with st.expander("How this page works", expanded=False):
+    st.markdown(
+        """
+        **1. Treat each event as one place, date, and daypart.** A stress-anomaly event
+        represents one Taxi Zone × date × daypart observation. The page keeps that grain
+        fixed while exposing the evidence used to classify it.
+
+        **2. Separate defining evidence from context.** The primary evidence table
+        contains only **stress-aligned defining metrics**: higher demand, slower speeds,
+        or longer trip durations that clear the **1.28 residual-scale threshold**.
+        Other measurements from the same observation remain available as context but
+        did not supply the stress-aligned reason for selecting the event.
+
+        **3. Keep the original units visible.** Observed and expected values are shown
+        in their natural units alongside the standardized statistical distance, so the
+        reader does not have to interpret a residual score in isolation.
+
+        **4. Explain how the expectation was supported.** **Modeled** uses the preferred
+        same-daypart seasonal expectation. **Fallback** uses a simpler running mean of
+        earlier observations when a series is too sparse, short-lived, or flat for the
+        preferred model. **Unavailable** means no usable expectation could be estimated.
+
+        **5. Put the selected metric back into time.** The temporal chart compares
+        observed and expected values around the event. Its shaded **±2 residual-scale**
+        band is a reference band—not a confidence interval and not the anomaly-selection
+        threshold.
+
+        **6. Distinguish event diagnosis from a zone profile.** A Zone Profile describes
+        how a place behaves across time. This page explains why one specific observation
+        was unusual and lets the same evidence trail be inspected for other retained
+        events.
+        """
+    )
+
+st.caption(
+    "Evidence scope: retained stress-anomaly events and the observed-versus-expected "
+    "metric evidence used to describe them. The case file explains why an observation "
+    "was unusual relative to its reference pattern; it does not by itself identify the "
+    "external cause of that anomaly."
+)

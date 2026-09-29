@@ -6,9 +6,17 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import altair as alt
+import plotly.graph_objects as go
 
 from app.data_access.loaders import APP_ROOT
-from app.utils.project_branding import BRAND_COLORS, inject_app_css
+from app.data_access.spatial_visuals import get_zone_geojson
+from app.utils.project_branding import (
+    BRAND_COLORS,
+    apply_branding,
+    exploration_section,
+    inject_app_css,
+    render_chart_insight,
+)
 
 
 PAGE_CAPTION = "MOBILITY ENVIRONMENT PROFILER"
@@ -45,6 +53,19 @@ METRIC_LABELS = {
     "taxi_avg_trip_speed": "Taxi average speed",
     "taxi_trip_count": "Taxi trips",
 }
+
+
+POLICY_GEOGRAPHY_LABELS = {
+    "cbd": "CBD",
+    "adjacent": "Adjacent",
+    "gateway": "Gateway",
+    "non_cbd": "Non-CBD",
+    "non-cbd": "Non-CBD",
+    "non cbd": "Non-CBD",
+}
+
+MAP_CENTER = {"lat": 40.7128, "lon": -74.0060}
+MAP_ZOOM = 9.15
 
 
 def _require_file(path: Path) -> None:
@@ -349,6 +370,167 @@ def _feature_label(feature_column: str) -> str:
 
 
 @st.cache_data(show_spinner="Building the mobility-environment hero...")
+def _policy_geography_label(value: object) -> str:
+    """Return the reader-facing label for the manually defined geography."""
+    normalized = str(value).strip().lower()
+    return POLICY_GEOGRAPHY_LABELS.get(normalized, str(value))
+
+
+def _categorical_zone_map(
+    frame: pd.DataFrame,
+    *,
+    category_column: str,
+    category_order: list[str],
+    color_lookup: dict[str, str],
+    hover_fields: list[str],
+    hover_template: str,
+    uirevision: str,
+) -> go.Figure:
+    """Map one categorical Taxi Zone classification with a stable legend."""
+    geojson = get_zone_geojson()
+    figure = go.Figure()
+
+    for category in category_order:
+        subset = frame.loc[frame[category_column].eq(category)].copy()
+        if subset.empty:
+            continue
+
+        customdata = subset[hover_fields].astype(object).to_numpy()
+
+        # WHY: one trace per category gives a true categorical legend rather than
+        # implying that the cluster labels live on a continuous numeric scale.
+        figure.add_trace(
+            go.Choroplethmap(
+                geojson=geojson,
+                locations=subset["taxi_zone_id"],
+                featureidkey="properties.taxi_zone_id",
+                z=np.ones(len(subset)),
+                zmin=0,
+                zmax=1,
+                colorscale=[
+                    [0.0, color_lookup[category]],
+                    [1.0, color_lookup[category]],
+                ],
+                marker={"line": {"width": 0.55, "color": "white"}},
+                customdata=customdata,
+                hovertemplate=hover_template,
+                showscale=False,
+                name=category,
+                showlegend=True,
+            )
+        )
+
+    apply_branding(figure)
+    figure.update_layout(
+        title={"text": ""},
+        map={"style": "carto-positron", "center": MAP_CENTER, "zoom": MAP_ZOOM},
+        height=620,
+        margin={"l": 0, "r": 0, "t": 10, "b": 5},
+        hovermode="closest",
+        legend={
+            "orientation": "h",
+            "yanchor": "bottom",
+            "y": 1.01,
+            "xanchor": "left",
+            "x": 0,
+            "title": {"text": ""},
+        },
+        uirevision=uirevision,
+    )
+    return figure
+
+
+def _mobility_environment_map(
+    assignments: pd.DataFrame,
+    *,
+    period: str,
+) -> go.Figure:
+    """Map the unsupervised mobility-environment assignment for one policy period."""
+    period_label = _period_label(period)
+    frame = assignments.loc[
+        assignments["pre_post_cp"].eq(period)
+    ].copy()
+
+    cluster_order = sorted(frame["canonical_cluster_name"].dropna().astype(str).unique())
+    palette = [
+        BRAND_COLORS["dark_teal"],
+        BRAND_COLORS["seafoam"],
+        BRAND_COLORS["terracotta"],
+        BRAND_COLORS["pale_peach"],
+        "#667085",
+    ]
+    color_lookup = {
+        cluster: palette[index % len(palette)]
+        for index, cluster in enumerate(cluster_order)
+    }
+
+    frame["_period_label"] = period_label
+    return _categorical_zone_map(
+        frame,
+        category_column="canonical_cluster_name",
+        category_order=cluster_order,
+        color_lookup=color_lookup,
+        hover_fields=[
+            "zone",
+            "borough",
+            "canonical_cluster_name",
+            "_period_label",
+        ],
+        hover_template=(
+            "<b>%{customdata[0]}</b> · %{customdata[1]}<br>"
+            "Mobility environment: %{customdata[2]}<br>"
+            "Period: %{customdata[3]}<extra></extra>"
+        ),
+        uirevision=f"raw16-mobility-environments-{period}",
+    )
+
+
+def _policy_geography_map(assignments: pd.DataFrame) -> go.Figure:
+    """Map the manually defined policy-geography classification."""
+    frame = (
+        assignments.sort_values(["taxi_zone_id", "pre_post_cp"])
+        .drop_duplicates("taxi_zone_id", keep="first")
+        .copy()
+    )
+    frame["policy_geography"] = frame["cbd_spatial_category"].map(
+        _policy_geography_label
+    )
+
+    category_order = [
+        category
+        for category in ["CBD", "Adjacent", "Gateway", "Non-CBD"]
+        if category in set(frame["policy_geography"])
+    ]
+    # Preserve any unexpected but valid contract label instead of silently dropping it.
+    category_order += sorted(
+        set(frame["policy_geography"].dropna().astype(str)) - set(category_order)
+    )
+
+    policy_palette = [
+        BRAND_COLORS["terracotta"],
+        BRAND_COLORS["pale_peach"],
+        BRAND_COLORS["seafoam"],
+        BRAND_COLORS["dark_teal"],
+    ]
+    color_lookup = {
+        category: policy_palette[index % len(policy_palette)]
+        for index, category in enumerate(category_order)
+    }
+
+    return _categorical_zone_map(
+        frame,
+        category_column="policy_geography",
+        category_order=category_order,
+        color_lookup=color_lookup,
+        hover_fields=["zone", "borough", "policy_geography"],
+        hover_template=(
+            "<b>%{customdata[0]}</b> · %{customdata[1]}<br>"
+            "Policy geography: %{customdata[2]}<extra></extra>"
+        ),
+        uirevision="raw16-policy-geography",
+    )
+
+
 def _load_hero_data() -> dict[str, object]:
     for path in [ASSIGNMENTS_PATH, PROFILES_PATH, SCALED_MATRIX_PATH]:
         _require_file(path)
@@ -367,6 +549,15 @@ def _load_hero_data() -> dict[str, object]:
     if hero_member.empty:
         raise ValueError("The frozen Broad Channel Post-CP hero member is unavailable.")
     hero_member = hero_member.iloc[0]
+
+    hero_pre_rows = assignments.loc[
+        assignments["taxi_zone_id"].eq(HERO_ZONE_ID)
+        & assignments["pre_post_cp"].eq("pre_cp"),
+        "canonical_cluster_name",
+    ]
+    if hero_pre_rows.empty:
+        raise ValueError("Broad Channel's Pre-CP mobility environment is unavailable.")
+    hero_pre_cluster = str(hero_pre_rows.iloc[0])
 
     merged = assignments.merge(
         scaled[GRAIN_COLUMNS + features],
@@ -433,6 +624,7 @@ def _load_hero_data() -> dict[str, object]:
     return {
         "members": hero_members,
         "member": hero_member,
+        "pre_cluster": hero_pre_cluster,
         "archetype": archetype,
         "metric_support": metric_support,
         "entrants": entrants,
@@ -448,7 +640,7 @@ def _archetype_chart(archetype: pd.DataFrame) -> alt.Chart:
         .encode(
             x=alt.X(
                 "cluster_signal_zscore:Q",
-                title="Cluster mean relative to the citywide feature norm",
+                title="Environment mean relative to the citywide feature norm",
                 axis=alt.Axis(format=".1f"),
             ),
             y=alt.Y("metric_label:N", title=None, sort="x"),
@@ -490,7 +682,7 @@ def _member_distance_chart(
         .encode(
             x=alt.X(
                 "assigned_distance:Q",
-                title="Distance from assigned cluster centroid",
+                title="Distance from assigned environment centroid",
                 scale=alt.Scale(zero=True),
             ),
             y=alt.Y(
@@ -540,7 +732,7 @@ def _support_chart(
         .encode(
             x=alt.X(
                 "assignment_support:Q",
-                title="Relative-fit contribution — left favors competitor; right favors selected cluster",
+                title="Relative-fit contribution — left favors alternative; right favors selected environment",
                 axis=alt.Axis(format=".1f"),
             ),
             y=alt.Y(
@@ -608,7 +800,7 @@ def _all_cluster_distance_chart(distances: pd.DataFrame) -> alt.Chart:
                 "relationship:N",
                 title=None,
                 scale=alt.Scale(
-                    domain=["Selected cluster", "Closest competitor", "Other cluster"],
+                    domain=["Selected environment", "Closest alternative", "Other environment"],
                     range=[
                         BRAND_COLORS["dark_teal"],
                         BRAND_COLORS["terracotta"],
@@ -829,11 +1021,11 @@ def _feature_support_for_member(
                 "cluster_name": cluster_names.get(int(label), f"Cluster {label}"),
                 "distance": float(np.sqrt(((values - centroid.to_numpy(dtype=float)) ** 2).sum())),
                 "relationship": (
-                    "Selected cluster"
+                    "Selected environment"
                     if int(label) == assigned_label
-                    else "Closest competitor"
+                    else "Closest alternative"
                     if int(label) == alternative_label
-                    else "Other cluster"
+                    else "Other environment"
                 ),
             }
         )
@@ -915,7 +1107,7 @@ def _transition_chart(transition_support: pd.DataFrame) -> alt.Chart:
         .encode(
             x=alt.X(
                 "relative_fit_shift:Q",
-                title="Change in relative squared-distance fit — left old cluster; right new cluster",
+                title="Change in relative squared-distance fit — left old environment; right new environment",
             ),
             y=alt.Y(
                 "metric_label:N",
@@ -1044,7 +1236,7 @@ def _validate_production_contract(
             failures.append(f"found {invalid_alternatives} rows without a valid alternative centroid")
 
     if failures:
-        raise ValueError("Cluster production contract failed: " + "; ".join(failures) + ".")
+        raise ValueError("Mobility-environment validation failed: " + "; ".join(failures) + ".")
 
     return {
         "assignment_rows": len(assignments),
@@ -1201,8 +1393,11 @@ inject_app_css()
 st.caption(PAGE_CAPTION)
 st.title(PAGE_TITLE)
 st.write(
-    "Start with a mobility environment as a group, then test one Taxi Zone against "
-    "the cluster it joined, its closest alternative, and its own Pre/Post history."
+    "Neighborhoods can differ in more than one mobility measure at a time. This page "
+    "groups Taxi Zones by their complete mobility pattern—demand, speed, duration, and "
+    "time-of-week shape—then shows what defines each environment, how typical an "
+    "individual zone is, and whether that zone's environment changed after congestion "
+    "pricing began."
 )
 
 try:
@@ -1221,12 +1416,86 @@ archetype = hero["archetype"]
 strongest = hero["strongest"]
 explorer_members = explorer["members"]
 
-st.header("Long trips and fast movement—not one geography")
+st.header("How do we group NYC Taxi Zones?")
 st.write(
-    "The Post-CP Long-Trip Fast-Mobility environment combines unusually long FHVHV "
-    "trips, limited fixed-route activity, and comparatively fast surface movement. "
-    "Its geographically mixed membership helps test whether the clustering captured "
-    "mobility behavior rather than simply recreating borough boundaries."
+    "Two recurring geography systems appear throughout the Showcase. **Mobility "
+    "environments** are learned from the data: Taxi Zones with similar 110-feature "
+    "mobility profiles are grouped together even when they are far apart geographically. "
+    "**Policy geography** is manually defined from each zone's relationship to the "
+    "congestion-pricing geography. The maps below make both systems visible before we "
+    "use them as filters elsewhere."
+)
+
+environment_tab, policy_tab = st.tabs(
+    ["Mobility environments", "Policy geography"]
+)
+
+with environment_tab:
+    map_period_label = st.radio(
+        "Mobility-environment period",
+        options=["Pre-CP", "Post-CP"],
+        index=1,
+        horizontal=True,
+        key="raw16_orientation_environment_period",
+        help=(
+            "Mobility environments are period-specific because a Taxi Zone's complete "
+            "mobility profile can move closer to a different learned cluster over time."
+        ),
+    )
+    map_period = "pre_cp" if map_period_label == "Pre-CP" else "post_cp"
+
+    st.plotly_chart(
+        _mobility_environment_map(
+            explorer["assignments"],
+            period=map_period,
+        ),
+        width="stretch",
+        config={"displayModeBar": False},
+        key=f"raw16_environment_map_{map_period}",
+    )
+    st.caption(
+        "Colors identify the learned mobility environment assigned to each physical "
+        "Taxi Zone. The categories are behavioral clusters, not contiguous geographic "
+        "regions; use the period control to see whether assignments changed."
+    )
+
+with policy_tab:
+    st.plotly_chart(
+        _policy_geography_map(explorer["assignments"]),
+        width="stretch",
+        config={"displayModeBar": False},
+        key="raw16_policy_geography_map",
+    )
+    st.caption(
+        "Policy geography is a fixed, manually defined spatial classification used "
+        "throughout the Showcase: CBD, adjacent, gateway, and non-CBD."
+    )
+
+render_chart_insight(
+    "These two maps group the same Taxi Zones for different reasons: **mobility "
+    "environments ask which places behave alike**, while **policy geography asks where "
+    "a place sits relative to the congestion-pricing geography**. Keeping those ideas "
+    "separate makes the recurring filters elsewhere in the Showcase easier to interpret."
+)
+
+st.header("What defines a mobility environment?")
+st.write(
+    "Now look inside one of the learned groups. The fixed example is the Post-CP "
+    "**Long-Trip Fast-Mobility Zones** environment. Each bar shows one headline "
+    "mobility measure relative to the citywide feature norm: right of zero is above "
+    "the norm and left is below. These ten averages make the environment readable, "
+    "while the actual cluster assignment uses the full 110-feature mobility pattern."
+)
+
+st.altair_chart(_archetype_chart(archetype), width="stretch")
+hero_low = archetype.iloc[0]
+hero_high = archetype.iloc[-1]
+render_chart_insight(
+    f"This environment is distinguished most by **low {hero_low['metric_label']}** "
+    f"({float(hero_low['cluster_signal_zscore']):+.1f} relative to the city norm) and "
+    f"**high {hero_high['metric_label']}** "
+    f"({float(hero_high['cluster_signal_zscore']):+.1f}). Membership is determined by "
+    "the complete 110-feature mobility pattern—not by geography or either metric alone."
 )
 
 hero_1, hero_2, hero_3, hero_4 = st.columns(4)
@@ -1243,24 +1512,12 @@ hero_4.metric(
     help=f"{strongest['metric_label']}; standardized units from the city norm.",
 )
 
-st.subheader("What defines this environment")
-st.altair_chart(_archetype_chart(archetype), width="stretch")
-hero_low = archetype.iloc[0]
-hero_high = archetype.iloc[-1]
-st.info(
-    f"This environment is distinguished most by **low {hero_low['metric_label']}** "
-    f"({float(hero_low['cluster_signal_zscore']):+.1f} relative to the city norm) and "
-    f"**high {hero_high['metric_label']}** "
-    f"({float(hero_high['cluster_signal_zscore']):+.1f}). The cluster is defined by "
-    "the complete 110-feature pattern—not by geography or either metric alone."
-)
-
 st.markdown("#### A useful boundary example: Broad Channel")
 boundary_1, boundary_2, boundary_3 = st.columns(3)
 boundary_1.metric(
     "Boundary example period",
     "Post-CP",
-    help="Broad Channel belonged to Transit-Rich Outer Boroughs Pre-CP.",
+    help=f"Broad Channel belonged to {hero['pre_cluster']} Pre-CP.",
 )
 boundary_2.metric(
     "Selected-centroid distance", f"{float(hero_member['assigned_distance']):.3f}"
@@ -1270,304 +1527,357 @@ boundary_3.metric(
     f"{float(hero_member['nearest_alternative_distance']):.3f}",
     help=str(hero_member["nearest_alternative_cluster_name"]),
 )
-st.info(
-    f"Broad Channel changed from **Transit-Rich Outer Boroughs Pre-CP** to "
+render_chart_insight(
+    f"Broad Channel changed from **{hero['pre_cluster']} Pre-CP** to "
     f"**{HERO_CLUSTER} Post-CP**, but the Post-CP winner leads its closest competitor "
     f"by only **{float(hero_member['assignment_margin']):.3f} distance units**. It is "
     "therefore a boundary assignment worth investigating—not a textbook example."
 )
 
-st.divider()
-st.header("Investigate an environment and Taxi Zone")
-cluster_options = sorted(explorer_members["canonical_cluster_name"].dropna().unique())
-control_1, control_2 = st.columns([2, 1])
-selected_cluster = control_1.selectbox(
-    "Mobility environment",
-    options=cluster_options,
-    index=cluster_options.index(HERO_CLUSTER) if HERO_CLUSTER in cluster_options else 0,
-    key="raw16_phase6_cluster",
-)
-selected_period = control_2.segmented_control(
-    "Policy period",
-    options=["Pre-CP", "Post-CP"],
-    default="Post-CP",
-    key="raw16_phase6_period",
-) or "Post-CP"
+with exploration_section(
+    key="raw16_exploration_area",
+    title="Investigate an environment and Taxi Zone",
+    description=(
+        "Choose a mobility environment and policy period, then inspect one Taxi "
+        "Zone's typicality, nearest alternatives, feature-level fit, and Pre/Post "
+        "environment transition."
+    ),
+):
+    cluster_options = sorted(explorer_members["canonical_cluster_name"].dropna().unique())
+    control_1, control_2 = st.columns([2, 1])
+    selected_cluster = control_1.selectbox(
+        "Mobility environment",
+        options=cluster_options,
+        index=cluster_options.index(HERO_CLUSTER) if HERO_CLUSTER in cluster_options else 0,
+        key="raw16_phase6_cluster",
+    )
+    selected_period = control_2.segmented_control(
+        "Policy period",
+        options=["Pre-CP", "Post-CP"],
+        default="Post-CP",
+        key="raw16_phase6_period",
+    ) or "Post-CP"
 
-scope_members = explorer_members.loc[
-    explorer_members["canonical_cluster_name"].eq(selected_cluster)
-    & explorer_members["pre_post_cp"].eq(selected_period)
-].copy()
-zone_choices = scope_members.sort_values(["zone", "borough"]).assign(
-    zone_choice=lambda frame: frame["zone"] + " · " + frame["borough"]
-)
-default_zone_index = 0
-if selected_cluster == HERO_CLUSTER and selected_period == "Post-CP":
-    broad_channel_matches = zone_choices.index[
-        zone_choices["taxi_zone_id"].eq(HERO_ZONE_ID)
-    ].tolist()
-    if broad_channel_matches:
-        default_zone_index = zone_choices.index.get_loc(broad_channel_matches[0])
-selected_zone_choice = st.selectbox(
-    "Taxi Zone to explain",
-    options=zone_choices["zone_choice"].tolist(),
-    index=default_zone_index,
-    key=f"raw16_phase6_zone_{selected_cluster}_{selected_period}",
-)
-selected_member = zone_choices.loc[
-    zone_choices["zone_choice"].eq(selected_zone_choice)
-].iloc[0]
-selected_zone_name = str(selected_member["zone"])
-member_support, member_exact, member_distances = _feature_support_for_member(
-    explorer["assignments"],
-    explorer["scaled"],
-    explorer["features"],
-    selected_member,
-)
-scope_profile = explorer["profiles"].loc[
-    explorer["profiles"]["canonical_cluster_name"].eq(selected_cluster)
-].copy()
-scope_profile["direction"] = np.where(
-    scope_profile["cluster_signal_zscore"].ge(0),
-    "Above city norm",
-    "Below city norm",
-)
-scope_profile = scope_profile.sort_values("cluster_signal_zscore")
+    scope_members = explorer_members.loc[
+        explorer_members["canonical_cluster_name"].eq(selected_cluster)
+        & explorer_members["pre_post_cp"].eq(selected_period)
+    ].copy()
+    scope_members["period_distance_percentile"] = scope_members[
+        "assigned_distance"
+    ].rank(method="average", pct=True)
 
-overview_tab, diagnosis_tab, transition_tab = st.tabs(
-    ["Cluster overview", "Why this Taxi Zone?", "Pre/Post transition"]
-)
-
-with overview_tab:
-    overview_1, overview_2, overview_3, overview_4 = st.columns(4)
-    overview_1.metric("Members in period", f"{len(scope_members):,}")
-    overview_2.metric(
-        "Typical centroid distance", f"{scope_members['assigned_distance'].median():.3f}"
+    zone_choices = scope_members.sort_values(["zone", "borough"]).assign(
+        zone_choice=lambda frame: frame["zone"] + " · " + frame["borough"]
     )
-    overview_3.metric(
-        "Boundary members", f"{int(scope_members['distance_ratio'].ge(0.90).sum()):,}"
+    default_zone_index = 0
+    if selected_cluster == HERO_CLUSTER and selected_period == "Post-CP":
+        broad_channel_matches = zone_choices.index[
+            zone_choices["taxi_zone_id"].eq(HERO_ZONE_ID)
+        ].tolist()
+        if broad_channel_matches:
+            default_zone_index = zone_choices.index.get_loc(broad_channel_matches[0])
+    selected_zone_choice = st.selectbox(
+        "Taxi Zone to explain",
+        options=zone_choices["zone_choice"].tolist(),
+        index=default_zone_index,
+        key=f"raw16_phase6_zone_{selected_cluster}_{selected_period}",
     )
-    overview_4.metric(
-        "Selected member percentile",
-        f"{float(selected_member['member_percentile_within_cluster']) * 100:.0f}th",
-        help="Percentile of distance from the selected cluster centroid; higher is less typical.",
-    )
-
-    st.subheader("Environment signature")
-    st.altair_chart(_archetype_chart(scope_profile), width="stretch")
-    overview_low = scope_profile.iloc[0]
-    overview_high = scope_profile.iloc[-1]
-    st.info(
-        f"**{selected_cluster}** is most below the city norm on "
-        f"**{overview_low['metric_label']}** and most above it on "
-        f"**{overview_high['metric_label']}**. These ten headline averages describe "
-        "the environment; the actual assignment also uses their time-of-week shapes."
-    )
-
-    st.subheader("Which members are most—and least—typical?")
-    st.caption(
-        f"Terracotta highlights **{selected_zone_name}**; teal marks the other "
-        f"{selected_period} members of **{selected_cluster}**."
-    )
-    st.altair_chart(
-        _member_distance_chart(
-            scope_members,
-            selected_zone_id=int(selected_member["taxi_zone_id"]),
-            selected_zone_name=selected_zone_name,
-        ),
-        width="stretch",
-    )
-    closest_member = scope_members.loc[scope_members["assigned_distance"].idxmin()]
-    farthest_member = scope_members.loc[scope_members["assigned_distance"].idxmax()]
-    st.info(
-        f"**{closest_member['zone']}** is the most representative member in this "
-        f"period; **{farthest_member['zone']}** is the most distant. "
-        f"**{selected_zone_name}** sits at the "
-        f"**{float(selected_member['member_percentile_within_cluster']) * 100:.0f}th "
-        "distance percentile**. Distance from the centroid measures typicality; the "
-        "winning margin measures how strongly this cluster beat its alternatives."
-    )
-
-with diagnosis_tab:
-    ranked_distances = member_distances.sort_values("distance").reset_index(drop=True)
-    winner = ranked_distances.iloc[0]
-    runner_up = ranked_distances.iloc[1]
-    third_place = ranked_distances.iloc[2]
-    diagnosis_1, diagnosis_2, diagnosis_3, diagnosis_4 = st.columns(4)
-    diagnosis_1.metric("Selected distance", f"{float(winner['distance']):.3f}")
-    diagnosis_2.metric("Competitor distance", f"{float(runner_up['distance']):.3f}")
-    diagnosis_3.metric(
-        "Distance advantage",
-        f"{float(runner_up['distance'] - winner['distance']):.3f}",
-    )
-    diagnosis_4.metric(
-        "Distance ratio",
-        f"{float(winner['distance'] / runner_up['distance']):.3f}",
-        help="Values near 1 indicate a close boundary assignment.",
-    )
-    st.caption(
-        f"Selected: **{winner['cluster_name']}** · Closest competitor: "
-        f"**{runner_up['cluster_name']}**"
-    )
-
-    st.subheader("Why this cluster—and why not the others?")
-    st.altair_chart(_all_cluster_distance_chart(member_distances), width="stretch")
-    st.info(
-        f"**{winner['cluster_name']}** wins because its centroid is closest at "
-        f"**{float(winner['distance']):.3f}**. **{runner_up['cluster_name']}** is the "
-        f"nearest alternative at **{float(runner_up['distance']):.3f}**; the third "
-        f"choice, **{third_place['cluster_name']}**, is farther at "
-        f"**{float(third_place['distance']):.3f}**. K-Means simply chooses the "
-        "smallest complete-profile distance."
-    )
-
-    st.subheader("Where the zone sits relative to both centroids")
-    _render_centroid_key(
-        zone_name=selected_zone_name,
-        assigned_cluster=selected_cluster,
-        alternative_cluster=str(selected_member["nearest_alternative_cluster_name"]),
-    )
-    st.altair_chart(
-        _centroid_contrast_chart(
-            member_exact,
-            zone_name=selected_zone_name,
-            assigned_cluster=selected_cluster,
-            alternative_cluster=str(selected_member["nearest_alternative_cluster_name"]),
-        ),
-        width="stretch",
-    )
-    strongest_for = member_exact.iloc[0]
-    strongest_against = member_exact.iloc[-1]
-    counter_copy = (
-        f"The clearest counterargument is **{_feature_label(str(strongest_against['feature_column']))}**, "
-        f"which is closer to **{selected_member['nearest_alternative_cluster_name']}**."
-        if float(strongest_against["assignment_support"]) < 0
-        else "Even the weakest displayed feature is closer to the selected centroid."
-    )
-    st.info(
-        f"The clearest reason to choose **{selected_cluster}** is "
-        f"**{_feature_label(str(strongest_for['feature_column']))}**: "
-        f"{selected_zone_name} is **{float(strongest_for['assigned_absolute_gap']):.3f}** "
-        f"standardized units from the selected centroid versus "
-        f"**{float(strongest_for['alternative_absolute_gap']):.3f}** from the "
-        f"competitor. {counter_copy}"
-    )
-
-    with st.expander("How all 110 feature differences add up"):
-        _render_support_key(
-            assigned_cluster=selected_cluster,
-            alternative_cluster=str(selected_member["nearest_alternative_cluster_name"]),
-            zone_name=selected_zone_name,
-        )
-        st.altair_chart(
-            _support_chart(
-                member_support,
-                assigned_cluster=selected_cluster,
-                alternative_cluster=str(selected_member["nearest_alternative_cluster_name"]),
-                zone_name=selected_zone_name,
-            ),
-            width="stretch",
-        )
-        best_group = member_support.loc[member_support["assignment_support"].idxmax()]
-        opposing_group = member_support.loc[member_support["assignment_support"].idxmin()]
-        st.info(
-            f"**{best_group['metric_label']}** provides the strongest grouped support "
-            f"for **{selected_cluster}**. **{opposing_group['metric_label']}** is the "
-            "strongest grouped counterweight or, when still positive, the weakest "
-            "supporting family."
-        )
-
-    with st.expander("Inspect all 110 individual feature contributions"):
-        exact_display = member_exact.copy()
-        exact_display["feature"] = exact_display["feature_column"].map(_feature_label)
-        exact_display["absolute_support"] = exact_display["assignment_support"].abs()
-        st.dataframe(
-            exact_display.sort_values("absolute_support", ascending=False)[
-                ["feature", "assignment_support", "favors"]
-            ].style.format({"assignment_support": "{:+,.3f}"}),
-            hide_index=True,
-            width="stretch",
-            height=460,
-        )
-
-with transition_tab:
-    zone_periods, transition_support = _transition_diagnostics(
+    selected_member = zone_choices.loc[
+        zone_choices["zone_choice"].eq(selected_zone_choice)
+    ].iloc[0]
+    selected_zone_name = str(selected_member["zone"])
+    member_support, member_exact, member_distances = _feature_support_for_member(
         explorer["assignments"],
         explorer["scaled"],
         explorer["features"],
-        explorer_members,
-        int(selected_member["taxi_zone_id"]),
+        selected_member,
     )
-    if len(zone_periods) < 2:
-        st.info("A complete Pre/Post pair is not available for this Taxi Zone.")
-    else:
-        pre_row = zone_periods.loc[zone_periods["pre_post_cp"].eq("Pre-CP")].iloc[0]
-        post_row = zone_periods.loc[zone_periods["pre_post_cp"].eq("Post-CP")].iloc[0]
-        changed = str(pre_row["canonical_cluster_name"]) != str(
-            post_row["canonical_cluster_name"]
+    scope_profile = explorer["profiles"].loc[
+        explorer["profiles"]["canonical_cluster_name"].eq(selected_cluster)
+    ].copy()
+    scope_profile["direction"] = np.where(
+        scope_profile["cluster_signal_zscore"].ge(0),
+        "Above city norm",
+        "Below city norm",
+    )
+    scope_profile = scope_profile.sort_values("cluster_signal_zscore")
+
+    overview_tab, diagnosis_tab, transition_tab = st.tabs(
+        ["Environment overview", "Why this Taxi Zone?", "Pre/Post transition"]
+    )
+
+    with overview_tab:
+        overview_1, overview_2, overview_3, overview_4 = st.columns(4)
+        overview_1.metric("Members in period", f"{len(scope_members):,}")
+        overview_2.metric(
+            "Typical centroid distance", f"{scope_members['assigned_distance'].median():.3f}"
         )
-        transition_1, transition_2, transition_3, transition_4 = st.columns(4)
-        transition_1.metric(
-            f"Pre-CP · {pre_row['canonical_cluster_name']}",
-            f"{float(pre_row['assigned_distance']):.3f}",
-            help="Distance to the Pre-CP selected centroid.",
+        overview_3.metric(
+            "Boundary members", f"{int(scope_members['distance_ratio'].ge(0.90).sum()):,}"
         )
-        transition_2.metric(
-            f"Post-CP · {post_row['canonical_cluster_name']}",
-            f"{float(post_row['assigned_distance']):.3f}",
-            help="Distance to the Post-CP selected centroid.",
-        )
-        transition_3.metric(
-            "Pre-CP winning margin", f"{float(pre_row['assignment_margin']):.3f}"
-        )
-        transition_4.metric(
-            "Post-CP winning margin", f"{float(post_row['assignment_margin']):.3f}"
+        overview_4.metric(
+            "Selected member percentile",
+            f"{float(selected_member['period_distance_percentile']) * 100:.0f}th",
+            help="Percentile of centroid distance among members of this environment in the selected period; higher is less typical.",
         )
 
-        if changed and not transition_support.empty:
-            st.subheader("What moved the zone toward its Post-CP cluster?")
-            st.caption(
-                f"Left favors the old cluster, {pre_row['canonical_cluster_name']}; "
-                f"right favors the new cluster, {post_row['canonical_cluster_name']}."
+        st.subheader("Environment signature")
+        st.altair_chart(_archetype_chart(scope_profile), width="stretch")
+        overview_low = scope_profile.iloc[0]
+        overview_high = scope_profile.iloc[-1]
+        render_chart_insight(
+            f"**{selected_cluster}** is most below the city norm on "
+            f"**{overview_low['metric_label']}** and most above it on "
+            f"**{overview_high['metric_label']}**. These ten headline averages describe "
+            "the environment; the actual assignment also uses their time-of-week shapes."
+        )
+
+        st.subheader("Which members are most—and least—typical?")
+        st.caption(
+            f"Terracotta highlights **{selected_zone_name}**; teal marks the other "
+            f"{selected_period} members of **{selected_cluster}**."
+        )
+        st.altair_chart(
+            _member_distance_chart(
+                scope_members,
+                selected_zone_id=int(selected_member["taxi_zone_id"]),
+                selected_zone_name=selected_zone_name,
+            ),
+            width="stretch",
+        )
+        closest_member = scope_members.loc[scope_members["assigned_distance"].idxmin()]
+        farthest_member = scope_members.loc[scope_members["assigned_distance"].idxmax()]
+        render_chart_insight(
+            f"**{closest_member['zone']}** is the most representative member in this "
+            f"period; **{farthest_member['zone']}** is the most distant. "
+            f"**{selected_zone_name}** sits at the "
+            f"**{float(selected_member['period_distance_percentile']) * 100:.0f}th "
+            "distance percentile within this period**. Distance from the centroid measures typicality; the "
+            "winning margin measures how strongly this environment beat its alternatives."
+        )
+
+    with diagnosis_tab:
+        ranked_distances = member_distances.sort_values("distance").reset_index(drop=True)
+        winner = ranked_distances.iloc[0]
+        runner_up = ranked_distances.iloc[1]
+        third_place = ranked_distances.iloc[2]
+        diagnosis_1, diagnosis_2, diagnosis_3, diagnosis_4 = st.columns(4)
+        diagnosis_1.metric("Selected distance", f"{float(winner['distance']):.3f}")
+        diagnosis_2.metric("Competitor distance", f"{float(runner_up['distance']):.3f}")
+        diagnosis_3.metric(
+            "Distance advantage",
+            f"{float(runner_up['distance'] - winner['distance']):.3f}",
+        )
+        diagnosis_4.metric(
+            "Distance ratio",
+            f"{float(winner['distance'] / runner_up['distance']):.3f}",
+            help="Values near 1 indicate a close boundary assignment.",
+        )
+        st.caption(
+            f"Selected: **{winner['cluster_name']}** · Closest competitor: "
+            f"**{runner_up['cluster_name']}**"
+        )
+
+        st.subheader("Why this environment—and why not the others?")
+        st.altair_chart(_all_cluster_distance_chart(member_distances), width="stretch")
+        render_chart_insight(
+            f"**{winner['cluster_name']}** wins because its centroid is closest at "
+            f"**{float(winner['distance']):.3f}**. **{runner_up['cluster_name']}** is the "
+            f"nearest alternative at **{float(runner_up['distance']):.3f}**; the third "
+            f"choice, **{third_place['cluster_name']}**, is farther at "
+            f"**{float(third_place['distance']):.3f}**. K-Means simply chooses the "
+            "smallest complete-profile distance to an environment centroid."
+        )
+
+        st.subheader("Where the zone sits relative to both centroids")
+        _render_centroid_key(
+            zone_name=selected_zone_name,
+            assigned_cluster=selected_cluster,
+            alternative_cluster=str(selected_member["nearest_alternative_cluster_name"]),
+        )
+        st.altair_chart(
+            _centroid_contrast_chart(
+                member_exact,
+                zone_name=selected_zone_name,
+                assigned_cluster=selected_cluster,
+                alternative_cluster=str(selected_member["nearest_alternative_cluster_name"]),
+            ),
+            width="stretch",
+        )
+        strongest_for = member_exact.iloc[0]
+        strongest_against = member_exact.iloc[-1]
+        counter_copy = (
+            f"The clearest counterargument is **{_feature_label(str(strongest_against['feature_column']))}**, "
+            f"which is closer to **{selected_member['nearest_alternative_cluster_name']}**."
+            if float(strongest_against["assignment_support"]) < 0
+            else "Even the weakest displayed feature is closer to the selected centroid."
+        )
+        render_chart_insight(
+            f"The clearest reason to choose **{selected_cluster}** is "
+            f"**{_feature_label(str(strongest_for['feature_column']))}**: "
+            f"{selected_zone_name} is **{float(strongest_for['assigned_absolute_gap']):.3f}** "
+            f"standardized units from the selected centroid versus "
+            f"**{float(strongest_for['alternative_absolute_gap']):.3f}** from the "
+            f"alternative. {counter_copy}"
+        )
+
+        with st.expander("How all 110 feature differences add up"):
+            _render_support_key(
+                assigned_cluster=selected_cluster,
+                alternative_cluster=str(selected_member["nearest_alternative_cluster_name"]),
+                zone_name=selected_zone_name,
             )
-            st.altair_chart(_transition_chart(transition_support), width="stretch")
-            transition_leader = transition_support.loc[
-                transition_support["relative_fit_shift"].idxmax()
-            ]
-            transition_resistor = transition_support.loc[
-                transition_support["relative_fit_shift"].idxmin()
-            ]
-            st.info(
-                f"**{selected_zone_name} changed environments**. The largest movement "
-                f"toward **{post_row['canonical_cluster_name']}** came from "
-                f"**{transition_leader['metric_label']}**. "
-                f"**{transition_resistor['metric_label']}** moved most in the opposite "
-                "direction or supplied the least support for the transition."
+            st.altair_chart(
+                _support_chart(
+                    member_support,
+                    assigned_cluster=selected_cluster,
+                    alternative_cluster=str(selected_member["nearest_alternative_cluster_name"]),
+                    zone_name=selected_zone_name,
+                ),
+                width="stretch",
             )
+            best_group = member_support.loc[member_support["assignment_support"].idxmax()]
+            opposing_group = member_support.loc[member_support["assignment_support"].idxmin()]
+            render_chart_insight(
+                f"**{best_group['metric_label']}** provides the strongest grouped support "
+                f"for **{selected_cluster}**. **{opposing_group['metric_label']}** is the "
+                "strongest grouped counterweight or, when still positive, the weakest "
+                "supporting family."
+            )
+
+        with st.expander("Inspect all 110 individual feature contributions"):
+            exact_display = member_exact.copy()
+            exact_display["feature"] = exact_display["feature_column"].map(_feature_label)
+            exact_display["absolute_support"] = exact_display["assignment_support"].abs()
+            st.dataframe(
+                exact_display.sort_values("absolute_support", ascending=False)[
+                    ["feature", "assignment_support", "favors"]
+                ].style.format({"assignment_support": "{:+,.3f}"}),
+                hide_index=True,
+                width="stretch",
+                height=460,
+            )
+
+    with transition_tab:
+        zone_periods, transition_support = _transition_diagnostics(
+            explorer["assignments"],
+            explorer["scaled"],
+            explorer["features"],
+            explorer_members,
+            int(selected_member["taxi_zone_id"]),
+        )
+        if len(zone_periods) < 2:
+            st.info("A complete Pre/Post pair is not available for this Taxi Zone.")
         else:
-            st.info(
-                f"**{selected_zone_name} remained in {post_row['canonical_cluster_name']}** "
-                "across both periods. Its winning margin changed from "
-                f"**{float(pre_row['assignment_margin']):.3f}** Pre-CP to "
-                f"**{float(post_row['assignment_margin']):.3f}** Post-CP, indicating "
-                "whether the stable assignment became more or less decisive."
+            pre_row = zone_periods.loc[zone_periods["pre_post_cp"].eq("Pre-CP")].iloc[0]
+            post_row = zone_periods.loc[zone_periods["pre_post_cp"].eq("Post-CP")].iloc[0]
+            changed = str(pre_row["canonical_cluster_name"]) != str(
+                post_row["canonical_cluster_name"]
+            )
+            transition_1, transition_2, transition_3, transition_4 = st.columns(4)
+            transition_1.metric(
+                f"Pre-CP · {pre_row['canonical_cluster_name']}",
+                f"{float(pre_row['assigned_distance']):.3f}",
+                help="Distance to the Pre-CP selected centroid.",
+            )
+            transition_2.metric(
+                f"Post-CP · {post_row['canonical_cluster_name']}",
+                f"{float(post_row['assigned_distance']):.3f}",
+                help="Distance to the Post-CP selected centroid.",
+            )
+            transition_3.metric(
+                "Pre-CP winning margin", f"{float(pre_row['assignment_margin']):.3f}"
+            )
+            transition_4.metric(
+                "Post-CP winning margin", f"{float(post_row['assignment_margin']):.3f}"
             )
 
-with st.expander("How to read cluster fit"):
+            if changed and not transition_support.empty:
+                st.subheader("What moved the zone toward its Post-CP cluster?")
+                st.caption(
+                    f"Left favors the old cluster, {pre_row['canonical_cluster_name']}; "
+                    f"right favors the new cluster, {post_row['canonical_cluster_name']}."
+                )
+                st.altair_chart(_transition_chart(transition_support), width="stretch")
+                transition_leader = transition_support.loc[
+                    transition_support["relative_fit_shift"].idxmax()
+                ]
+                transition_resistor = transition_support.loc[
+                    transition_support["relative_fit_shift"].idxmin()
+                ]
+                render_chart_insight(
+                    f"**{selected_zone_name} changed environments**. The largest movement "
+                    f"toward **{post_row['canonical_cluster_name']}** came from "
+                    f"**{transition_leader['metric_label']}**. "
+                    f"**{transition_resistor['metric_label']}** moved most in the opposite "
+                    "direction or supplied the least support for the transition."
+                )
+            else:
+                render_chart_insight(
+                    f"**{selected_zone_name} remained in {post_row['canonical_cluster_name']}** "
+                    "across both periods. Its winning margin changed from "
+                    f"**{float(pre_row['assignment_margin']):.3f}** Pre-CP to "
+                    f"**{float(post_row['assignment_margin']):.3f}** Post-CP, indicating "
+                    "whether the stable assignment became more or less decisive."
+                )
+
+
+st.markdown("### What this page establishes")
+st.markdown(
+    "The Showcase uses two complementary ways to group place. **Policy geography** "
+    "describes where a Taxi Zone sits relative to the congestion-pricing geography; "
+    "**mobility environments** describe which zones have similar multivariate mobility "
+    "patterns, regardless of where they sit on the map. Within the learned environments, "
+    "some zones are highly typical while others are genuine boundary cases, and the same "
+    "zone can move toward a different environment as its overall mobility profile changes."
+)
+
+with st.expander("How this page works", expanded=False):
     st.markdown(
-        "- The selected solution is **K-Means with five clusters**, fitted once across "
-        "the shared Pre/Post matrix.\n"
-        "- Ten mobility metrics each contribute one period mean and ten temporal-shape "
-        "features: **10 × (1 + 10) = 110 standardized inputs**.\n"
-        "- The closest centroid determines membership; the names were assigned after "
-        "clustering.\n"
-        "- Centroid distance measures overall fit. Distance percentile measures how "
-        "typical a member is; winning margin measures how decisively it beat alternatives.\n"
-        "- Feature contributions explain statistical fit, not causation."
+        """
+        **1. Keep the two geography systems conceptually separate.** **Policy geography**
+        is a manually defined spatial classification—CBD, adjacent, gateway, and non-CBD.
+        **Mobility environments** are learned from mobility behavior and can group
+        geographically distant Taxi Zones together.
+
+        **3. Represent each Taxi Zone-period with its full mobility pattern.** Ten
+        mobility metrics each contribute one period mean and ten time-of-week shape
+        features: **10 × (1 + 10) = 110 standardized inputs**.
+
+        **2. Group similar profiles with K-Means.** The selected solution contains
+        **five clusters**, fitted once across the shared Pre/Post matrix. The closest
+        cluster centroid determines membership; the reader-facing environment names
+        were assigned after clustering to describe their dominant mobility signatures.
+
+        **4. Separate an environment's signature from an individual member's fit.**
+        The headline profile summarizes the environment average. **Centroid distance**
+        measures how far an individual Taxi Zone-period sits from that average; a lower
+        distance means a more typical member.
+
+        **5. Measure how decisive an assignment is.** The **winning margin** compares
+        the selected centroid with the nearest alternative. A small margin—or a distance
+        ratio near 1—marks a boundary case where another environment is almost as close.
+
+        **6. Explain assignments with the same features used by the model.** Feature
+        contributions show which parts of the 110-feature profile pull a zone toward
+        its selected environment rather than its alternatives. They explain statistical
+        fit, not why the underlying mobility pattern occurred.
+
+        **7. Compare the same Taxi Zone across policy periods.** Pre/Post transitions
+        show whether the zone's nearest mobility environment changed and which features
+        most supported that shift.
+        """
     )
     st.caption(
-        f"Production contract verified: {production_contract['assignment_rows']:,} "
-        f"Taxi Zone-period rows, {production_contract['features']} standardized "
-        f"features, {production_contract['clusters']} clusters, zero reconstructed "
+        f"Validation check: {production_contract['assignment_rows']:,} Taxi Zone-period "
+        f"rows, {production_contract['features']} standardized features, "
+        f"{production_contract['clusters']} environments, zero reconstructed "
         "assignment mismatches, and zero nearest-centroid ties."
     )
+
+st.caption(
+    "Evidence scope: descriptive clustering of Taxi Zone mobility profiles before and "
+    "after the January 2025 congestion-pricing launch. Environment membership and "
+    "feature contributions summarize similarity in the observed mobility data; they do "
+    "not establish that congestion pricing caused a zone to enter or leave an environment."
+)
