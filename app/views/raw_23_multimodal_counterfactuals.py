@@ -1912,473 +1912,479 @@ st.caption(
 
 st.divider()
 
-with exploration_section(
-    key="raw23_exploration_area",
-    title="2. Explore the multimodal counterfactuals",
-    description=(
-        "Choose a geography level, place, horizon, and time slice. The weekly "
-        "storyline, focus fingerprint, peer comparison, drill-down comparison, "
-        "and written interpretation all update together."
-    ),
-):
-    control_1, control_2, control_3 = st.columns(
-        [
-            1.25,
-            0.65,
-            1.1,
-        ]
-    )
 
-    with control_1:
-        selected_grouping = st.selectbox(
-            "Geography level",
-            options=list(
-                GROUPINGS
-            ),
-            index=0,
-            key="raw23_grouping",
-        )
+@st.fragment
+def _render_interactive_explorer() -> None:
+    """Render Raw 23's explorer without rerunning the static overview."""
 
-    with control_2:
-        selected_horizon = st.selectbox(
-            "Horizon",
-            options=HORIZONS,
-            index=0,
-            format_func=lambda value: f"h={value}",
-            key="raw23_horizon",
-        )
-
-    with control_3:
-        selected_period = st.selectbox(
-            "Period",
-            options=list(
-                PERIODS
-            ),
-            index=0,
-            key="raw23_period",
-        )
-
-    control_4, control_5 = st.columns(
-        2
-    )
-
-    with control_4:
-        selected_day_type = st.selectbox(
-            "Day type",
-            options=[
-                "All days",
-                "Weekdays",
-                "Weekends",
-            ],
-            index=0,
-            key="raw23_day_type",
-        )
-
-    with control_5:
-        selected_daypart = st.selectbox(
-            "Daypart",
-            options=[
-                "All dayparts",
-                "Overnight",
-                "AM peak",
-                "Midday",
-                "PM peak",
-                "Evening",
-            ],
-            index=0,
-            key="raw23_daypart",
-        )
-
-    selected_profiles = get_counterfactual_profiles(
-        grouping_name=selected_grouping,
-        horizon=selected_horizon,
-        period=selected_period,
-        day_type=selected_day_type,
-        daypart=selected_daypart,
-    )
-
-    if selected_profiles.empty:
-        st.info(
-            "No profiles are available for this selection."
-        )
-
-    else:
-        label_column = (
-            get_profile_label_column(
-                selected_grouping
-            )
-        )
-
-        # WHY: "Unknown" is useful upstream for completeness/QA, but it is not
-        # a meaningful reader-facing geography choice.
-        selected_profiles = selected_profiles.loc[
-            selected_profiles[
-                label_column
+    with exploration_section(
+        key="raw23_exploration_area",
+        title="2. Explore the multimodal counterfactuals",
+        description=(
+            "Choose a geography level, place, horizon, and time slice. The weekly "
+            "storyline, focus fingerprint, peer comparison, drill-down comparison, "
+            "and written interpretation all update together."
+        ),
+    ):
+        control_1, control_2, control_3 = st.columns(
+            [
+                1.25,
+                0.65,
+                1.1,
             ]
-            .astype(str)
-            .str.strip()
-            .str.lower()
-            .ne("unknown")
-        ].copy()
+        )
 
-        if selected_profiles.empty:
-            st.info(
-                "No reader-facing geography profiles are available for this selection."
+        with control_1:
+            selected_grouping = st.selectbox(
+                "Geography level",
+                options=list(
+                    GROUPINGS
+                ),
+                index=0,
+                key="raw23_grouping",
             )
-            st.stop()
 
-        group_id_column = GROUPINGS[
-            selected_grouping
-        ]["group_id"]
-
-        complete = get_complete_profiles(
-            selected_profiles
-        )
-
-        default_value = selected_profiles.iloc[0][
-            group_id_column
-        ]
-
-        if not complete.empty:
-            strongest = complete.sort_values(
-                "multimodal_rms",
-                ascending=False,
-            ).iloc[0]
-
-            default_value = strongest[
-                group_id_column
-            ]
-
-        option_values = (
-            selected_profiles[
-                group_id_column
-            ]
-            .dropna()
-            .drop_duplicates()
-            .tolist()
-        )
-
-        previous_grouping = st.session_state.get(
-            "raw23_previous_geography_level"
-        )
-
-        if previous_grouping != selected_grouping:
-            # WHY: geography IDs mean different things across grouping levels.
-            # Reset once when the level changes; within a level, the stable
-            # semantic geography value survives ordinary filter reruns.
-            st.session_state[
-                "raw23_focus_profile"
-            ] = default_value
-
-            st.session_state[
-                "raw23_previous_geography_level"
-            ] = selected_grouping
-
-        elif (
-            "raw23_focus_profile"
-            not in st.session_state
-            or st.session_state[
-                "raw23_focus_profile"
-            ]
-            not in option_values
-        ):
-            # WHY: a temporal filter can remove a previously selected place.
-            st.session_state[
-                "raw23_focus_profile"
-            ] = default_value
-
-        selected_value = st.selectbox(
-            "Focus profile",
-            options=option_values,
-            format_func=lambda value: get_profile_label(
-                selected_grouping,
-                selected_profiles.loc[
-                    selected_profiles[
-                        group_id_column
-                    ].eq(
-                        value
-                    ),
-                    label_column,
-                ].iloc[0],
-            ),
-            key="raw23_focus_profile",
-        )
-
-        selected_profile = selected_profiles.loc[
-            selected_profiles[
-                group_id_column
-            ].eq(
-                selected_value
+        with control_2:
+            selected_horizon = st.selectbox(
+                "Horizon",
+                options=HORIZONS,
+                index=0,
+                format_func=lambda value: f"h={value}",
+                key="raw23_horizon",
             )
-        ].iloc[0]
 
-        selected_label = get_profile_label(
-            selected_grouping,
-            selected_profile[
-                label_column
-            ],
-        )
-
-        st.markdown(
-            "##### Focus fingerprint"
-        )
-
-        focus_scale = nice_scale_limit(
-            pd.DataFrame(
-                [
-                    selected_profile[
-                        METRIC_ORDER
-                    ]
-                ]
+        with control_3:
+            selected_period = st.selectbox(
+                "Period",
+                options=list(
+                    PERIODS
+                ),
+                index=0,
+                key="raw23_period",
             )
+
+        control_4, control_5 = st.columns(
+            2
         )
 
-        render_profile_card(
-            selected_profile,
-            title=selected_label,
-            scale_limit=focus_scale,
-            svg_assets=svg_assets,
-        )
+        with control_4:
+            selected_day_type = st.selectbox(
+                "Day type",
+                options=[
+                    "All days",
+                    "Weekdays",
+                    "Weekends",
+                ],
+                index=0,
+                key="raw23_day_type",
+            )
 
-        render_profile_card_insight(
-            selected_profile,
-            label=selected_label,
-        )
+        with control_5:
+            selected_daypart = st.selectbox(
+                "Daypart",
+                options=[
+                    "All dayparts",
+                    "Overnight",
+                    "AM peak",
+                    "Midday",
+                    "PM peak",
+                    "Evening",
+                ],
+                index=0,
+                key="raw23_daypart",
+            )
 
-
-        st.markdown(
-            "##### How did this multimodal pattern unfold?"
-        )
-
-        st.markdown(
-            """
-Now explore the **same weekly view introduced in the frozen example above**
-using your current geography, period, day-type, daypart, and horizon selections.
-            """
-        )
-
-        storyline_weekly = build_weekly_multimodal_braid(
+        selected_profiles = get_counterfactual_profiles(
             grouping_name=selected_grouping,
-            group_value=selected_value,
+            horizon=selected_horizon,
+            period=selected_period,
             day_type=selected_day_type,
             daypart=selected_daypart,
         )
 
-        storyline_weekly = filter_weekly_storyline_period(
-            storyline_weekly,
-            selected_period,
-        )
-
-        if storyline_weekly.empty:
+        if selected_profiles.empty:
             st.info(
-                "No weekly counterfactual observations are available "
-                "for this selection."
+                "No profiles are available for this selection."
             )
+
         else:
-            storyline_figure = build_multimodal_braid_figure(
-                storyline_weekly,
-                geography_label=selected_label,
-                selected_horizon=selected_horizon,
-                period_label=selected_period,
-            )
-
-            st.plotly_chart(
-                storyline_figure,
-                width="stretch",
-                config={
-                    "displayModeBar": False,
-                    "responsive": True,
-                },
-                key="raw23_multimodal_counterfactual_storyline",
-            )
-
-            st.caption(
-                f"{selected_period} · h={selected_horizon}. "
-                "Above zero = estimated no-CP higher than observed; below zero "
-                "= observed higher than estimated no-CP."
-            )
-
-
-            storyline_takeaway = multimodal_braid_insight(
-                storyline_weekly,
-                selected_horizon=selected_horizon,
-            )
-
-            if storyline_takeaway:
-                render_chart_insight(
-                    storyline_takeaway
+            label_column = (
+                get_profile_label_column(
+                    selected_grouping
                 )
-
-            st.caption(
-                "These are model-based counterfactual comparisons, not direct "
-                "proof that congestion pricing caused the full observed difference."
             )
 
-        if selected_grouping == "Taxi Zone":
-            peer_tab_label = (
-                "Nearby Taxi Zones"
-            )
-            child_tab_label = (
-                "Other Taxi Zones in the same borough"
+            # WHY: "Unknown" is useful upstream for completeness/QA, but it is not
+            # a meaningful reader-facing geography choice.
+            selected_profiles = selected_profiles.loc[
+                selected_profiles[
+                    label_column
+                ]
+                .astype(str)
+                .str.strip()
+                .str.lower()
+                .ne("unknown")
+            ].copy()
+
+            if selected_profiles.empty:
+                st.info(
+                    "No reader-facing geography profiles are available for this selection."
+                )
+                st.stop()
+
+            group_id_column = GROUPINGS[
+                selected_grouping
+            ]["group_id"]
+
+            complete = get_complete_profiles(
+                selected_profiles
             )
 
-        else:
-            peer_tab_label = (
-                f"Compare {selected_grouping.lower()} peers"
-            )
-            child_tab_label = (
-                f"Taxi Zones inside {selected_label}"
-            )
-
-        peer_tab, child_tab = st.tabs(
-            [
-                peer_tab_label,
-                child_tab_label,
+            default_value = selected_profiles.iloc[0][
+                group_id_column
             ]
-        )
 
-        with peer_tab:
-            peers = get_same_level_peers(
+            if not complete.empty:
+                strongest = complete.sort_values(
+                    "multimodal_rms",
+                    ascending=False,
+                ).iloc[0]
+
+                default_value = strongest[
+                    group_id_column
+                ]
+
+            option_values = (
+                selected_profiles[
+                    group_id_column
+                ]
+                .dropna()
+                .drop_duplicates()
+                .tolist()
+            )
+
+            previous_grouping = st.session_state.get(
+                "raw23_previous_geography_level"
+            )
+
+            if previous_grouping != selected_grouping:
+                # WHY: geography IDs mean different things across grouping levels.
+                # Reset once when the level changes; within a level, the stable
+                # semantic geography value survives ordinary filter reruns.
+                st.session_state[
+                    "raw23_focus_profile"
+                ] = default_value
+
+                st.session_state[
+                    "raw23_previous_geography_level"
+                ] = selected_grouping
+
+            elif (
+                "raw23_focus_profile"
+                not in st.session_state
+                or st.session_state[
+                    "raw23_focus_profile"
+                ]
+                not in option_values
+            ):
+                # WHY: a temporal filter can remove a previously selected place.
+                st.session_state[
+                    "raw23_focus_profile"
+                ] = default_value
+
+            selected_value = st.selectbox(
+                "Focus profile",
+                options=option_values,
+                format_func=lambda value: get_profile_label(
+                    selected_grouping,
+                    selected_profiles.loc[
+                        selected_profiles[
+                            group_id_column
+                        ].eq(
+                            value
+                        ),
+                        label_column,
+                    ].iloc[0],
+                ),
+                key="raw23_focus_profile",
+            )
+
+            selected_profile = selected_profiles.loc[
+                selected_profiles[
+                    group_id_column
+                ].eq(
+                    selected_value
+                )
+            ].iloc[0]
+
+            selected_label = get_profile_label(
+                selected_grouping,
+                selected_profile[
+                    label_column
+                ],
+            )
+
+            st.markdown(
+                "##### Focus fingerprint"
+            )
+
+            focus_scale = nice_scale_limit(
+                pd.DataFrame(
+                    [
+                        selected_profile[
+                            METRIC_ORDER
+                        ]
+                    ]
+                )
+            )
+
+            render_profile_card(
+                selected_profile,
+                title=selected_label,
+                scale_limit=focus_scale,
+                svg_assets=svg_assets,
+            )
+
+            render_profile_card_insight(
+                selected_profile,
+                label=selected_label,
+            )
+
+
+            st.markdown(
+                "##### How did this multimodal pattern unfold?"
+            )
+
+            st.markdown(
+                """
+    Now explore the **same weekly view introduced in the frozen example above**
+    using your current geography, period, day-type, daypart, and horizon selections.
+                """
+            )
+
+            storyline_weekly = build_weekly_multimodal_braid(
                 grouping_name=selected_grouping,
-                selected_value=selected_value,
-                horizon=selected_horizon,
-                period=selected_period,
+                group_value=selected_value,
                 day_type=selected_day_type,
                 daypart=selected_daypart,
             )
 
-            if selected_grouping == "Taxi Zone":
-                st.markdown(
-                    '<div class="raw23-tab-intro">'
-                    'These are Taxi Zones connected to the selected zone in the '
-                    'project’s transportation-aware Taxi Zone network.'
-                    '</div>',
-                    unsafe_allow_html=True,
+            storyline_weekly = filter_weekly_storyline_period(
+                storyline_weekly,
+                selected_period,
+            )
+
+            if storyline_weekly.empty:
+                st.info(
+                    "No weekly counterfactual observations are available "
+                    "for this selection."
                 )
             else:
-                st.markdown(
-                    '<div class="raw23-tab-intro">'
-                    'These are comparable profiles at the same geographic level.'
-                    '</div>',
-                    unsafe_allow_html=True,
+                storyline_figure = build_multimodal_braid_figure(
+                    storyline_weekly,
+                    geography_label=selected_label,
+                    selected_horizon=selected_horizon,
+                    period_label=selected_period,
                 )
 
-            peer_display = (
-                get_strongest_profiles(
-                    peers,
-                    count=4,
+                st.plotly_chart(
+                    storyline_figure,
+                    width="stretch",
+                    config={
+                        "displayModeBar": False,
+                        "responsive": True,
+                    },
+                    key="raw23_multimodal_counterfactual_storyline",
                 )
-                if len(
-                    get_complete_profiles(
+
+                st.caption(
+                    f"{selected_period} · h={selected_horizon}. "
+                    "Above zero = estimated no-CP higher than observed; below zero "
+                    "= observed higher than estimated no-CP."
+                )
+
+
+                storyline_takeaway = multimodal_braid_insight(
+                    storyline_weekly,
+                    selected_horizon=selected_horizon,
+                )
+
+                if storyline_takeaway:
+                    render_chart_insight(
+                        storyline_takeaway
+                    )
+
+                st.caption(
+                    "These are model-based counterfactual comparisons, not direct "
+                    "proof that congestion pricing caused the full observed difference."
+                )
+
+            if selected_grouping == "Taxi Zone":
+                peer_tab_label = (
+                    "Nearby Taxi Zones"
+                )
+                child_tab_label = (
+                    "Other Taxi Zones in the same borough"
+                )
+
+            else:
+                peer_tab_label = (
+                    f"Compare {selected_grouping.lower()} peers"
+                )
+                child_tab_label = (
+                    f"Taxi Zones inside {selected_label}"
+                )
+
+            peer_tab, child_tab = st.tabs(
+                [
+                    peer_tab_label,
+                    child_tab_label,
+                ]
+            )
+
+            with peer_tab:
+                peers = get_same_level_peers(
+                    grouping_name=selected_grouping,
+                    selected_value=selected_value,
+                    horizon=selected_horizon,
+                    period=selected_period,
+                    day_type=selected_day_type,
+                    daypart=selected_daypart,
+                )
+
+                if selected_grouping == "Taxi Zone":
+                    st.markdown(
+                        '<div class="raw23-tab-intro">'
+                        'These are Taxi Zones connected to the selected zone in the '
+                        'project’s transportation-aware Taxi Zone network.'
+                        '</div>',
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.markdown(
+                        '<div class="raw23-tab-intro">'
+                        'These are comparable profiles at the same geographic level.'
+                        '</div>',
+                        unsafe_allow_html=True,
+                    )
+
+                peer_display = (
+                    get_strongest_profiles(
+                        peers,
+                        count=4,
+                    )
+                    if len(
+                        get_complete_profiles(
+                            peers
+                        )
+                    ) > 4
+                    else get_complete_profiles(
                         peers
                     )
-                ) > 4
-                else get_complete_profiles(
-                    peers
-                )
-            )
-
-            if peer_display.empty:
-                st.info(
-                    "No complete peer profiles are available for this selection."
-                )
-            else:
-                render_card_grid(
-                    peer_display,
-                    grouping_name=selected_grouping,
-                    svg_assets=svg_assets,
                 )
 
-
-        with child_tab:
-            if selected_grouping == "Taxi Zone":
-                children = (
-                    get_same_borough_taxi_zone_profiles(
-                        selected_zone_id=int(
-                            selected_value
-                        ),
-                        horizon=selected_horizon,
-                        period=selected_period,
-                        day_type=selected_day_type,
-                        daypart=selected_daypart,
+                if peer_display.empty:
+                    st.info(
+                        "No complete peer profiles are available for this selection."
                     )
-                )
-
-                st.markdown(
-                    '<div class="raw23-tab-intro">'
-                    'This second view broadens the comparison from immediate '
-                    'network neighbors to other Taxi Zones in the same borough.'
-                    '</div>',
-                    unsafe_allow_html=True,
-                )
-
-            else:
-                children = (
-                    get_child_taxi_zone_profiles(
-                        parent_grouping=selected_grouping,
-                        selected_value=selected_value,
-                        horizon=selected_horizon,
-                        period=selected_period,
-                        day_type=selected_day_type,
-                        daypart=selected_daypart,
+                else:
+                    render_card_grid(
+                        peer_display,
+                        grouping_name=selected_grouping,
+                        svg_assets=svg_assets,
                     )
+
+
+            with child_tab:
+                if selected_grouping == "Taxi Zone":
+                    children = (
+                        get_same_borough_taxi_zone_profiles(
+                            selected_zone_id=int(
+                                selected_value
+                            ),
+                            horizon=selected_horizon,
+                            period=selected_period,
+                            day_type=selected_day_type,
+                            daypart=selected_daypart,
+                        )
+                    )
+
+                    st.markdown(
+                        '<div class="raw23-tab-intro">'
+                        'This second view broadens the comparison from immediate '
+                        'network neighbors to other Taxi Zones in the same borough.'
+                        '</div>',
+                        unsafe_allow_html=True,
+                    )
+
+                else:
+                    children = (
+                        get_child_taxi_zone_profiles(
+                            parent_grouping=selected_grouping,
+                            selected_value=selected_value,
+                            horizon=selected_horizon,
+                            period=selected_period,
+                            day_type=selected_day_type,
+                            daypart=selected_daypart,
+                        )
+                    )
+
+                    st.markdown(
+                        '<div class="raw23-tab-intro">'
+                        'This view drills inside the selected geography and surfaces '
+                        'the Taxi Zones with the largest complete multimodal profiles.'
+                        '</div>',
+                        unsafe_allow_html=True,
+                    )
+
+                child_display = get_strongest_profiles(
+                    children,
+                    count=4,
                 )
 
-                st.markdown(
-                    '<div class="raw23-tab-intro">'
-                    'This view drills inside the selected geography and surfaces '
-                    'the Taxi Zones with the largest complete multimodal profiles.'
-                    '</div>',
-                    unsafe_allow_html=True,
-                )
+                if child_display.empty:
+                    st.info(
+                        "No complete Taxi-Zone profiles are available inside this selection."
+                    )
 
-            child_display = get_strongest_profiles(
-                children,
-                count=4,
-            )
-
-            if child_display.empty:
-                st.info(
-                    "No complete Taxi-Zone profiles are available inside this selection."
-                )
-
-            else:
-                render_card_grid(
-                    child_display,
-                    grouping_name="Taxi Zone",
-                    svg_assets=svg_assets,
-                )
+                else:
+                    render_card_grid(
+                        child_display,
+                        grouping_name="Taxi Zone",
+                        svg_assets=svg_assets,
+                    )
 
 
 
-        with st.expander(
-            "What this selection means",
-            expanded=False,
-        ):
-            st.markdown(
-                profile_editorial_sentence(
-                    selected_profile,
-                    label=selected_label,
-                )
-            )
-
-            st.markdown(
-                "**Across the current grouping:**"
-            )
-
-            for insight in slice_editorial_insights(
-                selected_profiles,
-                grouping_name=selected_grouping,
+            with st.expander(
+                "What this selection means",
+                expanded=False,
             ):
                 st.markdown(
-                    f"- {insight}"
+                    profile_editorial_sentence(
+                        selected_profile,
+                        label=selected_label,
+                    )
                 )
 
-            st.caption(
-                "These statements update with the selected geography, horizon, "
-                "period, day type, and daypart."
-            )
+                st.markdown(
+                    "**Across the current grouping:**"
+                )
 
+                for insight in slice_editorial_insights(
+                    selected_profiles,
+                    grouping_name=selected_grouping,
+                ):
+                    st.markdown(
+                        f"- {insight}"
+                    )
+
+                st.caption(
+                    "These statements update with the selected geography, horizon, "
+                    "period, day type, and daypart."
+                )
+
+_render_interactive_explorer()
 
 # ---------------------------------------------------------------------
 # Closing synthesis

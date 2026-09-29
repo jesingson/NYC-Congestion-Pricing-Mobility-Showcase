@@ -80,6 +80,11 @@ STRESS_ANOMALY_OBSERVATION_UNIVERSE_PATH = (
     / "stress_anomaly_observation_universe.parquet"
 )
 
+STRESS_ANOMALY_RAW14_DENOMINATOR_PATH = (
+    STRESS_ANOMALY_RUNTIME_DIR
+    / "raw14_observation_denominator.parquet"
+)
+
 STRESS_ANOMALY_METRIC_EVIDENCE_PATH = (
     STRESS_ANOMALY_RUNTIME_DIR
     / "stress_anomaly_metric_evidence.parquet"
@@ -355,6 +360,59 @@ def load_stress_anomaly_observation_universe() -> pd.DataFrame:
 
     return frame
 
+@st.cache_data(show_spinner=False)
+def load_stress_anomaly_raw14_denominator() -> pd.DataFrame:
+    """
+    Load Raw 14's compact additive observation denominator.
+
+    WHY:
+    The 1.56M-row canonical observation universe is validated offline. Raw 14
+    only needs additive counts across its supported temporal and geographic
+    filters, so the app should not materialize every observation row.
+    """
+    _require_file(
+        STRESS_ANOMALY_RAW14_DENOMINATOR_PATH
+    )
+
+    frame = pd.read_parquet(
+        STRESS_ANOMALY_RAW14_DENOMINATOR_PATH
+    )
+
+    required_columns = {
+        "date",
+        "temporal_bucket",
+        "period_group",
+        "borough",
+        "geography_group",
+        "environment_group",
+        "eligible_observations",
+    }
+
+    missing = sorted(
+        required_columns.difference(
+            frame.columns
+        )
+    )
+
+    if missing:
+        raise ValueError(
+            "Raw 14 denominator runtime is missing required fields: "
+            + ", ".join(missing)
+        )
+
+    frame = frame.copy()
+
+    frame["date"] = pd.to_datetime(
+        frame["date"],
+        errors="coerce",
+    )
+
+    frame["eligible_observations"] = pd.to_numeric(
+        frame["eligible_observations"],
+        errors="raise",
+    ).astype("int32")
+
+    return frame
 
 @st.cache_data(show_spinner=False)
 def load_stress_anomaly_metric_evidence(

@@ -52,6 +52,11 @@ EVENT_OUTPUT_PATH = OUTPUT_DIR / "stress_anomaly_events.parquet"
 OBSERVATION_UNIVERSE_OUTPUT_PATH = (
     OUTPUT_DIR / "stress_anomaly_observation_universe.parquet"
 )
+
+RAW14_DENOMINATOR_OUTPUT_PATH = (
+    OUTPUT_DIR / "raw14_observation_denominator.parquet"
+)
+
 EVIDENCE_OUTPUT_PATH = OUTPUT_DIR / "stress_anomaly_metric_evidence.parquet"
 QA_OUTPUT_PATH = OUTPUT_DIR / "stress_anomaly_runtime_qa.parquet"
 
@@ -310,7 +315,7 @@ def signature_label(signature: tuple[str, ...]) -> str:
 
 def build_zone_geography() -> pd.DataFrame:
     """Build one stable Taxi Zone -> borough/policy-geography lookup."""
-    progress("[1/8] Building canonical Taxi Zone geography lookup...")
+    progress("[1/9] Building canonical Taxi Zone geography lookup...")
 
     source = load_analysis_panel(
         columns=[
@@ -371,7 +376,7 @@ def build_zone_geography() -> pd.DataFrame:
 
 def build_environment_assignments() -> pd.DataFrame:
     """Build the canonical Taxi Zone × policy-period environment lookup."""
-    progress("[2/8] Loading mobility-environment assignments...")
+    progress("[2/9] Loading mobility-environment assignments...")
 
     assignments = (
         load_mobility_regime_cluster_assignments()[
@@ -446,7 +451,7 @@ def build_observation_universe_runtime(
     runtime must preserve the complete source grain without hard-coding today's
     observed count of 1,559,590 rows as a permanent contract.
     """
-    progress("[3/8] Building full observation-universe runtime...")
+    progress("[3/9] Building full observation-universe runtime...")
 
     required_columns = [
         "taxi_zone_id",
@@ -594,6 +599,94 @@ def build_observation_universe_runtime(
     return output, source_universe_rows
 
 # =============================================================================
+# Raw 14 compact denominator
+# =============================================================================
+
+def build_raw14_denominator_runtime(
+    observation_universe: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Collapse Raw 14's canonical observation universe to additive denominator cells.
+
+    WHY:
+    Raw 14 needs eligible-observation counts across date, temporal bucket,
+    policy period, borough, policy geography, and mobility environment. It does
+    not need all 1.56M individual Taxi Zone × date × daypart rows at runtime.
+    """
+    progress("[4/9] Building compact Raw 14 denominator runtime...")
+
+    group_columns = [
+        "date",
+        "temporal_bucket",
+        "period_group",
+        "borough",
+        "geography_group",
+        "environment_group",
+    ]
+
+    missing = sorted(
+        set(group_columns).difference(
+            observation_universe.columns
+        )
+    )
+
+    if missing:
+        raise ValueError(
+            "Observation universe is missing Raw 14 denominator fields: "
+            + ", ".join(missing)
+        )
+
+    denominator = (
+        observation_universe.groupby(
+            group_columns,
+            observed=True,
+            dropna=False,
+        )
+        .size()
+        .rename("eligible_observations")
+        .reset_index()
+    )
+
+    denominator["eligible_observations"] = (
+        denominator["eligible_observations"]
+        .astype("int32")
+    )
+
+    reconstructed_rows = int(
+        denominator["eligible_observations"].sum()
+    )
+
+    source_rows = int(
+        len(observation_universe)
+    )
+
+    if reconstructed_rows != source_rows:
+        raise ValueError(
+            "Raw 14 denominator aggregate does not reconstruct the "
+            "canonical observation universe. "
+            f"Expected {source_rows:,}; got {reconstructed_rows:,}."
+        )
+
+    duplicate_cells = int(
+        denominator.duplicated(
+            group_columns
+        ).sum()
+    )
+
+    if duplicate_cells:
+        raise ValueError(
+            "Raw 14 denominator runtime contains duplicate aggregate cells: "
+            f"{duplicate_cells:,}."
+        )
+
+    progress(
+        f"      {source_rows:,} observations -> "
+        f"{len(denominator):,} denominator cells."
+    )
+
+    return denominator
+
+# =============================================================================
 # Selected event runtime
 # =============================================================================
 
@@ -602,7 +695,7 @@ def build_event_runtime(
     assignments: pd.DataFrame,
 ) -> pd.DataFrame:
     """Build one enriched row per selected stress-anomaly event."""
-    progress("[4/8] Building selected-event runtime...")
+    progress("[5/9] Building selected-event runtime...")
 
     events = load_selected_anomaly_events().copy()
 
@@ -920,7 +1013,7 @@ def build_metric_evidence_runtime(
     All event/metric reconciliation happens here once. Raw 15 should only
     retrieve the ten evidence rows belonging to the currently selected event.
     """
-    progress("[5/8] Building compact metric-evidence runtime...")
+    progress("[6/9] Building compact metric-evidence runtime...")
 
     diagnostics = pd.read_parquet(
         ANOMALY_METRIC_DIAGNOSTICS_PATH
@@ -1199,7 +1292,7 @@ def validate_frequency_contract(
     This is the non-negotiable semantic QA gate for the shared runtime.
     """
     progress(
-        "[6/8] Validating full observation universe against "
+        "[7/9] Validating full observation universe against "
         "Page 13 All-3 frequency..."
     )
 
@@ -1321,6 +1414,7 @@ def validate_frequency_contract(
 def build_qa(
     events: pd.DataFrame,
     observation_universe: pd.DataFrame,
+    raw14_denominator: pd.DataFrame,
     evidence: pd.DataFrame,
     *,
     source_universe_rows: int,
@@ -1329,6 +1423,20 @@ def build_qa(
 ) -> pd.DataFrame:
     """Create one compact deployment QA artifact."""
     runtime_universe_rows = len(observation_universe)
+    raw14_denominator_rows = len(raw14_denominator)
+    raw14_reconstructed_rows = int(
+        raw14_denominator["eligible_observations"].sum()
+    )
+    raw14_row_count_match = (
+        raw14_reconstructed_rows == runtime_universe_rows
+    )
+
+    if not raw14_row_count_match:
+        raise ValueError(
+            "Raw 14 denominator QA failed: "
+            f"runtime universe={runtime_universe_rows:,}; "
+            f"reconstructed={raw14_reconstructed_rows:,}."
+        )
 
     selected_rows_in_universe = int(
         observation_universe[SELECTED_FLAG].sum()
@@ -1380,6 +1488,18 @@ def build_qa(
             {
                 "check": "observation_universe_row_count_match",
                 "value": row_count_match,
+            },
+            {
+                "check": "raw14_denominator_rows",
+                "value": raw14_denominator_rows,
+            },
+            {
+                "check": "raw14_denominator_observation_sum",
+                "value": raw14_reconstructed_rows,
+            },
+            {
+                "check": "raw14_denominator_row_count_match",
+                "value": raw14_row_count_match,
             },
             {
                 "check": "selected_event_rows",
@@ -1521,6 +1641,10 @@ def main() -> None:
         assignments,
     )
 
+    raw14_denominator = build_raw14_denominator_runtime(
+        observation_universe
+    )
+
     events = build_event_runtime(
         zone_geo,
         assignments,
@@ -1536,7 +1660,7 @@ def main() -> None:
         )
     )
 
-    progress("[7/8] Writing compact shared runtime artifacts...")
+    progress("[8/9] Writing compact shared runtime artifacts...")
 
     write_parquet(
         events,
@@ -1550,6 +1674,12 @@ def main() -> None:
     )
 
     write_parquet(
+        raw14_denominator,
+        RAW14_DENOMINATOR_OUTPUT_PATH,
+        row_group_size=25_000,
+    )
+
+    write_parquet(
         evidence,
         EVIDENCE_OUTPUT_PATH,
     )
@@ -1557,6 +1687,7 @@ def main() -> None:
     qa = build_qa(
         events,
         observation_universe,
+        raw14_denominator,
         evidence,
         source_universe_rows=source_universe_rows,
         frequency_max_diff=frequency_max_diff,
@@ -1569,7 +1700,7 @@ def main() -> None:
         row_group_size=1_000,
     )
 
-    progress("[8/8] Final artifact summary")
+    progress("[9/9] Final artifact summary")
 
     print()
 
@@ -1581,6 +1712,12 @@ def main() -> None:
     print(
         f"Observations : {len(observation_universe):,} rows · "
         f"{size_mb(OBSERVATION_UNIVERSE_OUTPUT_PATH):.2f} MiB"
+    )
+
+    print(
+        f"Raw 14 denom : {len(raw14_denominator):,} rows · "
+        f"{size_mb(RAW14_DENOMINATOR_OUTPUT_PATH):.2f} MiB · "
+        f"{int(raw14_denominator['eligible_observations'].sum()):,} observations"
     )
 
     print(

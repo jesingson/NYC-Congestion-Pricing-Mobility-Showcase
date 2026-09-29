@@ -3394,6 +3394,10 @@ with exploration_section(
     saved_labels = ["Custom"] + [view["label"] for view in SAVED_VIEWS]
     saved_lookup = {view["label"]: view for view in SAVED_VIEWS}
 
+    def _mark_raw24_custom() -> None:
+        """Switch to Custom when a reader manually changes a primary control."""
+        st.session_state["raw24_saved_view"] = "Custom"
+
     saved_label = st.selectbox(
         "Saved view",
         options=saved_labels,
@@ -3410,7 +3414,7 @@ with exploration_section(
     st.session_state.setdefault("raw24_horizon", HERO_PROFILES[0][1])
     st.session_state.setdefault("raw24_dimension", "Temporal")
 
-    control_1, control_2, control_3 = st.columns([1.7, 0.8, 1.2])
+    control_1, control_2 = st.columns([1.7, 0.8])
 
     with control_1:
         selected_metric = st.selectbox(
@@ -3418,6 +3422,7 @@ with exploration_section(
             options=METRIC_ORDER,
             format_func=metric_label,
             key="raw24_metric",
+            on_change=_mark_raw24_custom,
         )
 
     with control_2:
@@ -3426,24 +3431,16 @@ with exploration_section(
             options=HORIZON_ORDER,
             format_func=lambda value: f"h={value}",
             key="raw24_horizon",
+            on_change=_mark_raw24_custom,
         )
 
     available_dimensions = EVIDENCE_DIMENSIONS.copy()
     if selected_metric not in SPEED_METRICS:
         available_dimensions.remove("Weighting")
 
-    with control_3:
-        current_dimension = st.session_state.get("raw24_dimension", "Temporal")
-        if current_dimension not in available_dimensions:
-            current_dimension = "Temporal"
-            st.session_state["raw24_dimension"] = current_dimension
-
-        selected_dimension = st.selectbox(
-            "Evidence",
-            options=available_dimensions,
-            index=available_dimensions.index(current_dimension),
-            key="raw24_dimension",
-        )
+    current_dimension = st.session_state.get("raw24_dimension", "Temporal")
+    if current_dimension not in available_dimensions:
+        st.session_state["raw24_dimension"] = "Temporal"
 
     primary_profile = (selected_metric, selected_horizon)
 
@@ -3508,8 +3505,14 @@ with exploration_section(
 
     st.markdown("#### Inspect the selected evidence")
 
-    selected_row = selected_matrix_row(selected_metric, selected_horizon)
+    selected_dimension = st.selectbox(
+        "Evidence dimension",
+        options=available_dimensions,
+        key="raw24_dimension",
+        on_change=_mark_raw24_custom,
+    )
 
+    selected_row = selected_matrix_row(selected_metric, selected_horizon)
     st.markdown(
         f"#### {metric_label(selected_metric)} · h={selected_horizon} "
         f"{status_badge_html(selected_row['evidence_status'])}",
