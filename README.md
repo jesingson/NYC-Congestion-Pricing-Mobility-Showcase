@@ -56,7 +56,7 @@ The application contains **27 analytical views** organized around six complement
 | **Mobility Types & Drivers** | Recurring mobility environments, Mobility Day Types, and the modes driving changes in citywide mobility |
 | **Stress & Anomalies** | When unusual mobility conditions occurred, where they concentrated, which modes were involved, and how weather relates to stress episodes |
 | **Forecasting & Reliability** | Forecast accuracy, geographic reliability, and where the selected forecasting system wins or misses relative to a simple Last-week baseline |
-| **No-CP Counterfactual Mobility** | Observed versus estimated no-CP mobility, geographic and multimodal differences, robustness checks, and gap calibration |
+| **Counterfactual Mobility** | Observed mobility versus an estimated alternative without congestion pricing, including geographic and multimodal differences, robustness checks, and gap calibration |
 
 ### How did citywide mobility move across modes and time?
 
@@ -76,7 +76,7 @@ The stress views connect unusual conditions across Taxi, FHVHV, Subway, and Bus 
 
 Forecast error and improvement over a simple Last-week baseline answer different questions. The reliability views expose both, making it possible to distinguish places that are relatively predictable from places where forecasting still adds value despite difficult conditions.
 
-### How sensitive is the no-CP story to analytical choices?
+### How sensitive is the estimated alternative without congestion pricing to analytical choices?
 
 ![Counterfactual robustness profiles](app/images/showcase_counterfactual_robustness_profiles.png)
 
@@ -90,7 +90,7 @@ The Showcase is not limited to citywide averages. Many views can be explored at 
 
 ![Taxi Zone forecast accuracy quilt](app/images/showcase_taxi_zone_accuracy_quilt.png)
 
-The Accuracy Quilt, for example, compares forecast performance inside a single Taxi Zone across mobility measures and forecast horizons. Other views let you profile a zone, compare it with other places, inspect stress geography, evaluate forecast reliability, and examine its estimated no-CP trajectory.
+The Accuracy Quilt, for example, compares forecast performance inside a single Taxi Zone across mobility measures and forecast horizons. Other views let you profile a zone, compare it with other places, inspect stress geography, evaluate forecast reliability, and examine its estimated trajectory without congestion pricing.
 
 ---
 
@@ -117,7 +117,7 @@ What might mobility have looked like without congestion pricing?
 
 Forecasting is therefore not a separate side exercise. A forecasting system that has first been evaluated against mobility that actually occurred provides the foundation for the harder Chapter 5 question: estimating an unobserved no-congestion-pricing path.
 
-![Observed and estimated no-CP FHVHV speed paths](app/images/kf_counterfactual_fhvhv_speed_boroughs.png)
+![Observed and estimated mobility without congestion pricing for FHVHV speeds](app/images/kf_counterfactual_fhvhv_speed_boroughs.png)
 
 ---
 
@@ -230,7 +230,7 @@ The Showcase deliberately separates three different kinds of evidence.
 
 **Forecasting views evaluate prediction.** The forecasting system is tested against held-out observations it did not use for fitting. Performance varies across mobility measures, places, times, and forecast horizons.
 
-**Counterfactual views are model-estimated.** The no-CP trajectory is an estimated alternative path produced by the forecasting and counterfactual system. The difference between observed mobility and that path should not be read as a direct causal measurement.
+**Counterfactual views are model-estimated.** The alternative trajectory without congestion pricing is produced by the forecasting and counterfactual system. The difference between observed mobility and that estimated path should not be read as a direct causal measurement.
 
 Robustness labels such as **Stable**, **Mixed**, and **Sensitive** describe how consistently a result behaves across the analytical checks used in this project. They are not probabilities, significance tests, or guarantees of causal certainty.
 
