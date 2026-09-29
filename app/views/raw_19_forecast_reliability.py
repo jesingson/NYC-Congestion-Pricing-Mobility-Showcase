@@ -12,6 +12,11 @@ from plotly.subplots import make_subplots
 
 from app.data_access.mobility_environments import load_canonical_cluster_assignments
 from app.data_access.spatial_visuals import get_zone_geojson
+from app.data_access.forecasting import (
+    load_forecast_records,
+    load_forecast_temporal_zone_summary,
+)
+
 from app.utils.project_branding import (
     BRAND_COLORS,
     apply_branding,
@@ -40,7 +45,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 FORECAST_DIR = PROJECT_ROOT / "data" / "processed" / "4.7.1.final_tables"
 
 ZONE_SUMMARY_PATH = FORECAST_DIR / "showcase_forecast_zone_summary.parquet"
-RECORD_SURFACE_PATH = FORECAST_DIR / "showcase_forecast_record_surface.parquet"
 
 FINAL_HOLDOUT_START_DATE = pd.Timestamp("2026-01-05")
 FINAL_HOLDOUT_END_DATE = pd.Timestamp("2026-03-31")
@@ -159,6 +163,20 @@ ZONE_EVIDENCE_COLUMNS = [
     "actual",
     "champion_prediction",
     "benchmark_prediction",
+]
+
+TEMPORAL_ZONE_COLUMNS = [
+    "metric",
+    "horizon",
+    "taxi_zone_id",
+    "zone",
+    "borough",
+    "day_type",
+    "daypart",
+    "forecast_rows",
+    "observed_abs_sum",
+    "absolute_error_sum",
+    "benchmark_absolute_error_sum",
 ]
 
 DAYPART_PLOT_HOUR = {
@@ -394,37 +412,51 @@ BIVARIATE_SKILL_LABELS = {
 
 @st.cache_data(show_spinner="Loading forecast reliability evidence...")
 def load_page_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Load final-holdout reliability summaries and compact temporal evidence."""
-    for path in [ZONE_SUMMARY_PATH, RECORD_SURFACE_PATH]:
-        require_file(path)
+    """
+    Load final-holdout reliability summaries and compact temporal evidence.
+
+    WHY:
+    The main reliability explorer only needs additive statistics at
+    Metric × Horizon × Taxi Zone × Day type × Daypart grain. Those statistics
+    already exist in the compact temporal-zone handoff, so Raw 19 does not need
+    to scan and regroup the full row-level final-holdout runtime on startup.
+    """
+    require_file(ZONE_SUMMARY_PATH)
 
     zones = pd.read_parquet(ZONE_SUMMARY_PATH)
-    require_columns(zones, ZONE_REQUIRED_COLUMNS, "showcase_forecast_zone_summary")
 
-    try:
-        records = pd.read_parquet(
-            RECORD_SURFACE_PATH,
-            columns=RECORD_COLUMNS,
-            filters=[("reader_facing_zone", "==", True)],
-        )
-    except Exception:
-        records = pd.read_parquet(RECORD_SURFACE_PATH, columns=RECORD_COLUMNS)
-        records = records.loc[records["reader_facing_zone"].fillna(False)].copy()
+    require_columns(
+        zones,
+        ZONE_REQUIRED_COLUMNS,
+        "showcase_forecast_zone_summary",
+    )
 
-    require_columns(records, RECORD_COLUMNS, "showcase_forecast_record_surface")
+    temporal_base = load_forecast_temporal_zone_summary(
+        columns=TEMPORAL_ZONE_COLUMNS,
+        required_columns=TEMPORAL_ZONE_COLUMNS,
+        metrics=METRIC_ORDER,
+        horizons=HORIZONS,
+    )
 
-    zones["horizon"] = pd.to_numeric(zones["horizon"], errors="coerce").astype("Int64")
+    zones["horizon"] = pd.to_numeric(
+        zones["horizon"],
+        errors="coerce",
+    ).astype("Int64")
+
     zones["taxi_zone_id"] = pd.to_numeric(
-        zones["taxi_zone_id"], errors="coerce"
+        zones["taxi_zone_id"],
+        errors="coerce",
     ).astype("Int64")
 
-    records["horizon"] = pd.to_numeric(
-        records["horizon"], errors="coerce"
+    temporal_base["horizon"] = pd.to_numeric(
+        temporal_base["horizon"],
+        errors="coerce",
     ).astype("Int64")
-    records["taxi_zone_id"] = pd.to_numeric(
-        records["taxi_zone_id"], errors="coerce"
+
+    temporal_base["taxi_zone_id"] = pd.to_numeric(
+        temporal_base["taxi_zone_id"],
+        errors="coerce",
     ).astype("Int64")
-    records["target_date"] = pd.to_datetime(records["target_date"], errors="coerce")
 
     zones = zones.loc[
         zones["reader_facing_zone"].fillna(False)
@@ -432,49 +464,13 @@ def load_page_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         & zones["horizon"].isin(HORIZONS)
     ].copy()
 
-    records = records.loc[
-        records["metric"].isin(METRIC_ORDER)
-        & records["horizon"].isin(HORIZONS)
-        & records["target_date"].between(
-            FINAL_HOLDOUT_START_DATE,
-            FINAL_HOLDOUT_END_DATE,
-            inclusive="both",
-        )
-        & records["actual"].notna()
-        & records["champion_prediction"].notna()
-        & records["benchmark_prediction"].notna()
+    temporal_base = temporal_base.loc[
+        temporal_base["metric"].isin(METRIC_ORDER)
+        & temporal_base["horizon"].isin(HORIZONS)
     ].copy()
 
-    records["day_type"] = _day_type(records["target_temporal_bucket"])
-    records["daypart"] = _daypart(records["target_temporal_bucket"])
-    records["observed_abs"] = records["actual"].abs()
-
-    # Keep only sufficient statistics at Day type × Daypart grain. This makes
-    # interactive temporal filtering cheap while preserving exact Relative MAE
-    # and Last-week-baseline comparisons for every zone.
-    temporal_base = (
-        records.groupby(
-            [
-                "metric",
-                "horizon",
-                "taxi_zone_id",
-                "zone",
-                "borough",
-                "day_type",
-                "daypart",
-            ],
-            observed=True,
-            as_index=False,
-        )
-        .agg(
-            forecast_rows=("actual", "size"),
-            observed_abs_sum=("observed_abs", "sum"),
-            absolute_error_sum=("absolute_error", "sum"),
-            benchmark_absolute_error_sum=("benchmark_absolute_error", "sum"),
-        )
-    )
-
     assignments = load_canonical_cluster_assignments().copy()
+
     require_columns(
         assignments,
         [
@@ -488,17 +484,26 @@ def load_page_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
 
     context = assignments.loc[
         assignments["pre_post_cp"].astype(str).eq("post_cp"),
-        ["taxi_zone_id", "cbd_spatial_category", "canonical_cluster_name"],
+        [
+            "taxi_zone_id",
+            "cbd_spatial_category",
+            "canonical_cluster_name",
+        ],
     ].drop_duplicates("taxi_zone_id")
 
     context["taxi_zone_id"] = pd.to_numeric(
-        context["taxi_zone_id"], errors="coerce"
+        context["taxi_zone_id"],
+        errors="coerce",
     ).astype("Int64")
+
     context["policy_geography"] = _policy_geography(
         context["cbd_spatial_category"]
     )
+
     context = context.rename(
-        columns={"canonical_cluster_name": "mobility_environment"}
+        columns={
+            "canonical_cluster_name": "mobility_environment",
+        }
     )
 
     return zones, temporal_base, context
@@ -510,47 +515,33 @@ def load_zone_evidence(
     horizon: int,
     taxi_zone_id: int,
 ) -> pd.DataFrame:
-    """Load only the selected zone's held-out rows for the profile proof chart."""
-    filters = [
-        ("metric", "==", metric),
-        ("horizon", "==", int(horizon)),
-        ("taxi_zone_id", "==", int(taxi_zone_id)),
-    ]
-
-    try:
-        frame = pd.read_parquet(
-            RECORD_SURFACE_PATH,
-            columns=ZONE_EVIDENCE_COLUMNS,
-            filters=filters,
-        )
-    except Exception:
-        # Some local parquet engines do not push every filter down. The fallback
-        # keeps the exact same contract while still reading only needed columns.
-        frame = pd.read_parquet(
-            RECORD_SURFACE_PATH,
-            columns=ZONE_EVIDENCE_COLUMNS,
-        )
-        frame = frame.loc[
-            frame["metric"].eq(metric)
-            & pd.to_numeric(frame["horizon"], errors="coerce").eq(int(horizon))
-            & pd.to_numeric(frame["taxi_zone_id"], errors="coerce").eq(
-                int(taxi_zone_id)
-            )
-        ].copy()
+    """Load exact held-out rows for the selected Taxi Zone proof chart."""
+    frame = load_forecast_records(
+        columns=ZONE_EVIDENCE_COLUMNS,
+        required_columns=ZONE_EVIDENCE_COLUMNS,
+        metrics=metric,
+        horizons=int(horizon),
+        taxi_zone_ids=int(taxi_zone_id),
+        reader_facing_only=True,
+        final_holdout_only=True,
+    )
 
     if frame.empty:
         return frame
 
-    frame["target_date"] = pd.to_datetime(frame["target_date"], errors="coerce")
-    frame = frame.loc[
-        frame["target_date"].between(
-            FINAL_HOLDOUT_START_DATE,
-            FINAL_HOLDOUT_END_DATE,
-            inclusive="both",
-        )
-    ].copy()
-    frame["day_type"] = _day_type(frame["target_temporal_bucket"])
-    frame["daypart"] = _daypart(frame["target_temporal_bucket"])
+    frame["target_date"] = pd.to_datetime(
+        frame["target_date"],
+        errors="coerce",
+    )
+
+    frame["day_type"] = _day_type(
+        frame["target_temporal_bucket"]
+    )
+
+    frame["daypart"] = _daypart(
+        frame["target_temporal_bucket"]
+    )
+
     return frame
 
 
@@ -1753,21 +1744,35 @@ def activity_takeaway(
             "observed-level/error relationship."
         )
     else:
-        strength = (
-            "weak"
-            if abs(rho) < 0.20
-            else "modest"
-            if abs(rho) < 0.40
-            else "moderate"
-            if abs(rho) < 0.60
-            else "strong"
-        )
-        direction = "higher" if rho > 0 else "lower"
-        relationship_sentence = (
-            f"The relationship between typical observed magnitude and forecast "
-            f"error is **{strength}** (Spearman ρ={rho:+.2f}); higher-magnitude "
-            f"zones tend to have **{direction} Relative MAE** in this selection."
-        )
+        magnitude = abs(rho)
+
+        if magnitude < 0.10:
+            relationship_sentence = (
+                "There is **little or no relationship** between typical observed "
+                f"magnitude and forecast error in this selection "
+                f"(Spearman ρ={rho:+.2f})."
+            )
+        else:
+            strength = (
+                "weak"
+                if magnitude < 0.30
+                else "moderate"
+                if magnitude < 0.50
+                else "strong"
+            )
+
+            direction = (
+                "higher"
+                if rho > 0
+                else "lower"
+            )
+
+            relationship_sentence = (
+                f"The relationship between typical observed magnitude and forecast "
+                f"error is **{strength}** (Spearman ρ={rho:+.2f}); "
+                f"higher-magnitude zones tend to have **{direction} Relative MAE** "
+                "in this selection."
+            )
 
     activity_q1 = float(visible["observed_abs_mean"].quantile(1 / 3))
     activity_q2 = float(visible["observed_abs_mean"].quantile(2 / 3))
@@ -2347,8 +2352,7 @@ st.markdown(
 
 _set_default_state()
 
-for source_path in [ZONE_SUMMARY_PATH, RECORD_SURFACE_PATH]:
-    require_file(source_path)
+require_file(ZONE_SUMMARY_PATH)
 
 st.caption(PAGE_CAPTION)
 st.title(PAGE_TITLE)
@@ -2735,14 +2739,11 @@ with exploration_section(
             reliable_default["taxi_zone_id"]
         )
 
+    # Resolve the selected zone here because the linked scatter needs to know which
+    # point to outline before it renders. The reader-facing selector itself appears
+    # later with the Zone Profile.
     selected_zone_id = int(
-        st.selectbox(
-            "Zone profile",
-            options=zone_ids,
-            key="raw19_zone_selector",
-            format_func=lambda value: zone_label_by_id.get(int(value), str(value)),
-            on_change=_mark_story_custom,
-        )
+        st.session_state["raw19_zone_selector"]
     )
 
     scope_label_parts = [
@@ -2905,6 +2906,21 @@ with exploration_section(
     # ------------------------------------------------------------------
     # Selected-zone profile
     # ------------------------------------------------------------------
+
+    st.subheader("Explore one neighborhood in detail")
+
+    selected_zone_id = int(
+        st.selectbox(
+            "Taxi Zone",
+            options=zone_ids,
+            key="raw19_zone_selector",
+            format_func=lambda value: zone_label_by_id.get(
+                int(value),
+                str(value),
+            ),
+            on_change=_mark_story_custom,
+        )
+    )
 
     selected_row = city_scope.loc[
         city_scope["taxi_zone_id"].eq(selected_zone_id)

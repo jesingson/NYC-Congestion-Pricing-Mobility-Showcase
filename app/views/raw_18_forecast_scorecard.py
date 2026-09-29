@@ -12,6 +12,10 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
+from app.data_access.forecasting import (
+    load_forecast_history,
+    load_forecast_records,
+)
 from app.data_access.anomalies import load_selected_anomaly_events
 from app.data_access.mobility_environments import load_canonical_cluster_assignments
 from app.utils.project_branding import (
@@ -60,8 +64,6 @@ PAGE_TITLE = "How did the forecasts perform?"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 FORECAST_DIR = PROJECT_ROOT / "data" / "processed" / "4.7.1.final_tables"
 
-RECORD_SURFACE_PATH = FORECAST_DIR / "showcase_forecast_record_surface.parquet"
-HISTORY_SURFACE_PATH = FORECAST_DIR / "showcase_forecast_history_surface.parquet"
 JOB_SUMMARY_PATH = FORECAST_DIR / "showcase_forecast_job_summary.parquet"
 ZONE_SUMMARY_PATH = FORECAST_DIR / "showcase_forecast_zone_summary.parquet"
 
@@ -236,49 +238,15 @@ def strip_plotly_title_artifacts(
 
 @st.cache_data(show_spinner="Loading the Manhattan forecast hero...")
 def load_hero_records() -> pd.DataFrame:
-    """
-    Read only the row-level fields needed for the Manhattan Subway hero.
-
-    Predicate pushdown keeps this pass light even though the frozen record
-    surface contains more than 1.4 million forecast rows.
-    """
-    filters = [
-        ("reader_facing_zone", "==", True),
-        ("metric", "==", HERO_METRIC),
-        ("borough", "==", HERO_BOROUGH),
-    ]
-
-    try:
-        frame = pd.read_parquet(
-            RECORD_SURFACE_PATH,
-            columns=RECORD_COLUMNS,
-            filters=filters,
-        )
-    except Exception:
-        frame = pd.read_parquet(
-            RECORD_SURFACE_PATH,
-            columns=RECORD_COLUMNS,
-        )
-        frame = frame.loc[
-            frame["reader_facing_zone"].fillna(False)
-            & frame["metric"].eq(HERO_METRIC)
-            & frame["borough"].eq(HERO_BOROUGH)
-        ].copy()
-
-    require_columns(
-        frame,
-        RECORD_COLUMNS,
-        "showcase_forecast_record_surface",
+    """Load the exact final-holdout records used by the Manhattan hero."""
+    frame = load_forecast_records(
+        columns=RECORD_COLUMNS,
+        required_columns=RECORD_COLUMNS,
+        metrics=HERO_METRIC,
+        boroughs=HERO_BOROUGH,
+        reader_facing_only=True,
+        final_holdout_only=True,
     )
-
-    frame["target_date"] = pd.to_datetime(
-        frame["target_date"],
-        errors="coerce",
-    )
-    frame["horizon"] = pd.to_numeric(
-        frame["horizon"],
-        errors="coerce",
-    ).astype("Int64")
 
     return frame.loc[
         frame["horizon"].isin(HORIZONS)
@@ -1111,29 +1079,12 @@ def load_seaport_quilt_records() -> pd.DataFrame:
     This preserves honest h=1 / h=2 / h=5 comparisons without manufacturing
     blank Subway values for a zone that may not have Subway support.
     """
-    try:
-        frame = pd.read_parquet(
-            RECORD_SURFACE_PATH,
-            columns=SEAPORT_COLUMNS,
-            filters=[
-                ("reader_facing_zone", "==", True),
-                ("zone", "==", SEAPORT_ZONE_NAME),
-            ],
-        )
-    except Exception:
-        frame = pd.read_parquet(
-            RECORD_SURFACE_PATH,
-            columns=SEAPORT_COLUMNS,
-        )
-        frame = frame.loc[
-            frame["reader_facing_zone"].fillna(False)
-            & frame["zone"].eq(SEAPORT_ZONE_NAME)
-        ].copy()
-
-    require_columns(
-        frame,
-        SEAPORT_COLUMNS,
-        "Seaport forecast Quilt source",
+    frame = load_forecast_records(
+        columns=SEAPORT_COLUMNS,
+        required_columns=SEAPORT_COLUMNS,
+        zones=SEAPORT_ZONE_NAME,
+        reader_facing_only=True,
+        final_holdout_only=True,
     )
 
     frame["target_date"] = pd.to_datetime(
@@ -2344,71 +2295,47 @@ def load_explorer_zone_context() -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner="Loading the selected forecast history...")
-def load_explorer_metric_records(metric: str) -> pd.DataFrame:
+def load_explorer_metric_records(
+    metric: str,
+) -> pd.DataFrame:
     """
-    Read the selected metric from the longitudinal Showcase history.
+    Load the selected longitudinal target and any activity-weight series.
 
-    Aggregate speed views also need the matching trip-count series as weights.
-    Predicate pushdown keeps the development read focused even though the new
-    history surface spans ordinary validation plus the final holdout.
+    The compact runtime is stored wide by horizon, but the shared data-access
+    loader restores Raw 18's original long-form forecasting contract.
     """
     source_metrics = [metric]
 
     if metric in SPEED_WEIGHT_METRIC:
         source_metrics.append(
-            SPEED_WEIGHT_METRIC[metric]
+            SPEED_WEIGHT_METRIC[
+                metric
+            ]
         )
 
-    try:
-        frame = pd.read_parquet(
-            HISTORY_SURFACE_PATH,
-            columns=EXPLORER_RECORD_COLUMNS,
-            filters=[
-                ("reader_facing_zone", "==", True),
-                ("metric", "in", source_metrics),
-            ],
-        )
-    except Exception:
-        frame = pd.read_parquet(
-            HISTORY_SURFACE_PATH,
-            columns=EXPLORER_RECORD_COLUMNS,
-        )
-        frame = frame.loc[
-            frame["reader_facing_zone"].fillna(False)
-            & frame["metric"].isin(source_metrics)
-        ].copy()
-
-    require_columns(
-        frame,
-        EXPLORER_RECORD_COLUMNS,
-        "showcase_forecast_history_surface",
+    frame = load_forecast_history(
+        columns=EXPLORER_RECORD_COLUMNS,
+        required_columns=EXPLORER_RECORD_COLUMNS,
+        metrics=source_metrics,
+        horizons=HORIZONS,
+        reader_facing_only=True,
     )
-
-    frame["target_date"] = pd.to_datetime(
-        frame["target_date"],
-        errors="coerce",
-    )
-    frame["horizon"] = pd.to_numeric(
-        frame["horizon"],
-        errors="coerce",
-    ).astype("Int64")
-    frame["taxi_zone_id"] = pd.to_numeric(
-        frame["taxi_zone_id"],
-        errors="coerce",
-    ).astype("Int64")
 
     allowed_periods = {
         "ordinary_validation",
         "final_holdout",
     }
+
     observed_periods = set(
         frame["evaluation_period"]
         .dropna()
         .astype(str)
         .unique()
     )
+
     unexpected_periods = sorted(
-        observed_periods - allowed_periods
+        observed_periods
+        - allowed_periods
     )
 
     if unexpected_periods:
@@ -2418,10 +2345,7 @@ def load_explorer_metric_records(metric: str) -> pd.DataFrame:
         )
         st.stop()
 
-    return frame.loc[
-        frame["horizon"].isin(HORIZONS)
-        & frame["target_date"].notna()
-    ].copy()
+    return frame
 
 
 def geography_options(
@@ -3266,71 +3190,31 @@ def hero_error_figure(
 
 
 
-@st.cache_data(show_spinner="Loading the selected geography for Quilt views...")
+@st.cache_data(
+    show_spinner="Loading the selected geography for Quilt views..."
+)
 def load_personalized_quilt_records(
     zone_ids: tuple[int, ...],
 ) -> pd.DataFrame:
     """
-    Load all five targets for the selected geography from forecast history.
+    Load all five targets for the selected geography from compact history.
 
-    This keeps the personalized Forecast Quilt and Accuracy Quilt on the same
-    evidence window as the main explorer instead of silently dropping back to
-    the January-March final holdout.
+    The returned shape intentionally matches the original longitudinal Chapter
+    4 handoff so the existing Quilt calculations remain unchanged.
     """
     if not zone_ids:
         return pd.DataFrame(
             columns=EXPLORER_RECORD_COLUMNS
         )
 
-    try:
-        frame = pd.read_parquet(
-            HISTORY_SURFACE_PATH,
-            columns=EXPLORER_RECORD_COLUMNS,
-            filters=[
-                ("reader_facing_zone", "==", True),
-                ("taxi_zone_id", "in", list(zone_ids)),
-                ("metric", "in", METRIC_ORDER),
-            ],
-        )
-    except Exception:
-        frame = pd.read_parquet(
-            HISTORY_SURFACE_PATH,
-            columns=EXPLORER_RECORD_COLUMNS,
-        )
-        frame["taxi_zone_id"] = pd.to_numeric(
-            frame["taxi_zone_id"],
-            errors="coerce",
-        ).astype("Int64")
-
-        frame = frame.loc[
-            frame["reader_facing_zone"].fillna(False)
-            & frame["taxi_zone_id"].isin(zone_ids)
-            & frame["metric"].isin(METRIC_ORDER)
-        ].copy()
-
-    require_columns(
-        frame,
-        EXPLORER_RECORD_COLUMNS,
-        "showcase_forecast_history_surface",
+    return load_forecast_history(
+        columns=EXPLORER_RECORD_COLUMNS,
+        required_columns=EXPLORER_RECORD_COLUMNS,
+        metrics=METRIC_ORDER,
+        horizons=HORIZONS,
+        taxi_zone_ids=zone_ids,
+        reader_facing_only=True,
     )
-
-    frame["target_date"] = pd.to_datetime(
-        frame["target_date"],
-        errors="coerce",
-    )
-    frame["horizon"] = pd.to_numeric(
-        frame["horizon"],
-        errors="coerce",
-    ).astype("Int64")
-    frame["taxi_zone_id"] = pd.to_numeric(
-        frame["taxi_zone_id"],
-        errors="coerce",
-    ).astype("Int64")
-
-    return frame.loc[
-        frame["horizon"].isin(HORIZONS)
-        & frame["target_date"].notna()
-    ].copy()
 
 
 def build_personalized_quilt_series(
@@ -5005,8 +4889,6 @@ def apply_preset_to_state() -> None:
 inject_app_css()
 
 for source_path in [
-    RECORD_SURFACE_PATH,
-    HISTORY_SURFACE_PATH,
     JOB_SUMMARY_PATH,
     ZONE_SUMMARY_PATH,
 ]:

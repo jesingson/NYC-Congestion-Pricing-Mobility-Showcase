@@ -13,14 +13,17 @@ from app.data_access.loaders import (
 )
 from app.data_access.weather_relationships import (
     ALL_TEMPORAL_BUCKETS_LABEL,
+    BOROUGHS,
     MOBILITY_LABELS,
     MOBILITY_METRICS,
     TEMPORAL_BUCKET_LABELS,
     TEMPORAL_BUCKETS,
     WEATHER_LABELS,
     WEATHER_METRICS,
+    build_borough_relationship_summary,
     build_weather_relationship_pair_data,
     calculate_relationship_statistics,
+    load_borough_lookup,
     load_relationship_date_bounds,
     load_zone_lookup,
 )
@@ -282,6 +285,7 @@ def _build_scatter_figure(
     figure = apply_branding(figure)
 
     figure.update_layout(
+        title={"text": ""},
         height=520,
         margin={
             "l": 55,
@@ -448,6 +452,7 @@ def _build_time_figure(
     figure = apply_branding(figure)
 
     figure.update_layout(
+        title_text="",
         height=470,
         margin={
             "l": 55,
@@ -506,18 +511,10 @@ def _dynamic_interpretation(
     temporal_label: str,
     geography_label: str,
 ) -> tuple[str, str]:
-    all_row = _extract_period_row(
-        statistics,
-        "all",
-    )
-    pre_row = _extract_period_row(
-        statistics,
-        "pre_cp",
-    )
-    post_row = _extract_period_row(
-        statistics,
-        "post_cp",
-    )
+    """Turn the relationship statistics into a reader-facing mobility takeaway."""
+    all_row = _extract_period_row(statistics, "all")
+    pre_row = _extract_period_row(statistics, "pre_cp")
+    post_row = _extract_period_row(statistics, "post_cp")
 
     if all_row is None:
         return (
@@ -529,20 +526,64 @@ def _dynamic_interpretation(
     all_pearson = all_row["pearson_correlation"]
     observation_count = int(all_row["observation_count"])
 
-    strength = _relationship_strength(all_spearman)
-    direction = _relationship_direction(all_spearman)
-    support = _support_label(observation_count)
-
     if pd.isna(all_spearman):
         return (
             "Relationship unavailable",
             "There are not enough matched observations to estimate this relationship.",
         )
 
-    if direction == "near-zero":
-        headline = "Little consistent relationship"
+    strength = _relationship_strength(all_spearman)
+    direction = _relationship_direction(all_spearman)
+    geography_phrase = "citywide" if geography_label == "Citywide" else geography_label
+
+    # Lead with what the relationship means in ordinary mobility terms; the
+    # coefficient then provides the statistical evidence for that statement.
+    if direction == "negative":
+        if weather_label == "Temperature":
+            headline = f"Colder conditions tended to coincide with higher {mobility_label.lower()}"
+            direction_note = (
+                f"Across {geography_phrase} {temporal_label.lower()} observations, "
+                f"colder conditions generally appeared alongside higher "
+                f"{mobility_label.lower()}, while warmer conditions appeared alongside "
+                f"lower {mobility_label.lower()}."
+            )
+        else:
+            headline = (
+                f"Higher {weather_label.lower()} tended to coincide with lower "
+                f"{mobility_label.lower()}"
+            )
+            direction_note = (
+                f"Across {geography_phrase} {temporal_label.lower()} observations, "
+                f"higher {weather_label.lower()} generally appeared alongside lower "
+                f"{mobility_label.lower()}, and lower {weather_label.lower()} alongside "
+                f"higher {mobility_label.lower()}."
+            )
+    elif direction == "positive":
+        headline = (
+            f"Higher {weather_label.lower()} tended to coincide with higher "
+            f"{mobility_label.lower()}"
+        )
+        direction_note = (
+            f"Across {geography_phrase} {temporal_label.lower()} observations, "
+            f"{weather_label.lower()} and {mobility_label.lower()} generally moved "
+            "in the same direction."
+        )
     else:
-        headline = f"{strength} {direction} relationship"
+        headline = (
+            f"{weather_label} showed little consistent relationship with "
+            f"{mobility_label.lower()}"
+        )
+        direction_note = (
+            f"Across {geography_phrase} {temporal_label.lower()} observations, "
+            f"there was little consistent tendency for {weather_label.lower()} and "
+            f"{mobility_label.lower()} to move together."
+        )
+
+    evidence_note = (
+        f" The Spearman correlation was **{_format_correlation(all_spearman)}** "
+        f"across **{observation_count:,} matched observations**, which is a "
+        f"{strength.lower()} relationship by the page's descriptive scale."
+    )
 
     agreement_note = ""
     if not pd.isna(all_pearson):
@@ -550,71 +591,52 @@ def _dynamic_interpretation(
             np.sign(all_spearman) == np.sign(all_pearson)
             and abs(all_spearman - all_pearson) <= 0.10
         ):
-            agreement_note = (
-                " Pearson and Spearman tell a similar story."
-            )
+            agreement_note = " Pearson and Spearman point to the same overall pattern."
         elif np.sign(all_spearman) != np.sign(all_pearson):
             agreement_note = (
-                " Pearson and Spearman disagree on direction, suggesting "
-                "the pattern is not consistently linear."
+                " Pearson points in the opposite direction, so the relationship is "
+                "not consistently linear."
             )
         else:
             agreement_note = (
-                " Pearson and Spearman differ somewhat, suggesting the "
-                "relationship may not be purely linear."
+                " Pearson differs somewhat from Spearman, suggesting the relationship "
+                "is not purely linear."
             )
 
     period_note = ""
     if pre_row is not None and post_row is not None:
         pre_value = pre_row["spearman_correlation"]
         post_value = post_row["spearman_correlation"]
-
         if not pd.isna(pre_value) and not pd.isna(post_value):
             shift = post_value - pre_value
-
             if np.sign(pre_value) != np.sign(post_value) and (
                 abs(pre_value) >= 0.05 or abs(post_value) >= 0.05
             ):
                 period_note = (
-                    " The relationship changed direction after congestion "
-                    f"pricing ({_format_correlation(pre_value)} before versus "
-                    f"{_format_correlation(post_value)} after), so it should "
-                    "be treated as unstable rather than persistent."
+                    " The direction changed across the congestion-pricing launch "
+                    f"(**{_format_correlation(pre_value)} before** versus "
+                    f"**{_format_correlation(post_value)} after**), so this is not a "
+                    "stable relationship across the full study."
                 )
             elif abs(shift) < 0.05:
                 period_note = (
-                    " The relationship was broadly similar before and after "
-                    "congestion pricing."
+                    " The relationship was broadly similar on both sides of the "
+                    "congestion-pricing launch."
                 )
             elif abs(post_value) > abs(pre_value):
                 period_note = (
-                    " The relationship was stronger after congestion pricing "
-                    f"({_format_correlation(pre_value)} before versus "
-                    f"{_format_correlation(post_value)} after)."
+                    " The pattern became more pronounced after the congestion-pricing "
+                    f"launch (**{_format_correlation(pre_value)} before** versus "
+                    f"**{_format_correlation(post_value)} after**)."
                 )
             else:
                 period_note = (
-                    " The relationship was weaker after congestion pricing "
-                    f"({_format_correlation(pre_value)} before versus "
-                    f"{_format_correlation(post_value)} after)."
+                    " The pattern remained visible after the congestion-pricing launch, "
+                    f"but was less pronounced (**{_format_correlation(pre_value)} before** "
+                    f"versus **{_format_correlation(post_value)} after**)."
                 )
 
-    geography_phrase = (
-        "citywide"
-        if geography_label == "Citywide"
-        else geography_label
-    )
-
-    body = (
-        f"Across {geography_phrase} {temporal_label.lower()} observations, "
-        f"{weather_label.lower()} and {mobility_label.lower()} had a "
-        f"Spearman correlation of {_format_correlation(all_spearman)} across "
-        f"{observation_count:,} matched observations. {support}."
-        f"{agreement_note}{period_note}"
-    )
-
-    return headline, body
-
+    return headline, direction_note + evidence_note + agreement_note + period_note
 
 def _time_series_takeaway(
     pair_data: pd.DataFrame,
@@ -623,7 +645,7 @@ def _time_series_takeaway(
     weather_label: str,
     mobility_label: str,
 ) -> str:
-    """Summarize the paired chronology without implying causality."""
+    """Explain what the chronology adds to the relationship view."""
     valid = pair_data.dropna(subset=["date", "weather_value", "mobility_value"])
     all_row = _extract_period_row(statistics, "all")
     if valid.empty or all_row is None:
@@ -631,18 +653,23 @@ def _time_series_takeaway(
 
     strongest_weather = valid.loc[valid["weather_value"].idxmax()]
     correlation = float(all_row["spearman_correlation"])
-    correlation_text = (
-        f"Spearman **{correlation:+.3f}**"
-        if pd.notna(correlation)
-        else "an unavailable Spearman estimate"
-    )
+    if pd.isna(correlation):
+        relationship_text = "does not have a reliable Spearman estimate"
+    elif abs(correlation) < 0.10:
+        relationship_text = "shows little consistent tendency to move with it"
+    elif correlation > 0:
+        relationship_text = "generally rises when it rises"
+    else:
+        relationship_text = "generally moves in the opposite direction"
 
     return (
-        f"Across **{len(valid):,} matched observations**, {weather_label} and "
-        f"{mobility_label} have {correlation_text}. The highest observed "
-        f"{weather_label.lower()} occurs on **{pd.Timestamp(strongest_weather['date']):%b %d, %Y}**; "
-        f"the corresponding {mobility_label.lower()} value is "
-        f"**{float(strongest_weather['mobility_value']):,.1f}**."
+        f"**The time series shows whether the relationship recurs across the study, "
+        f"rather than coming from a few isolated points.** Across **{len(valid):,} "
+        f"matched observations**, {mobility_label.lower()} {relationship_text} "
+        f"({('Spearman **' + format(correlation, '+.3f') + '**') if pd.notna(correlation) else 'Spearman unavailable'}). "
+        f"For context, the highest observed {weather_label.lower()} occurred on "
+        f"**{pd.Timestamp(strongest_weather['date']):%b %d, %Y}**, when "
+        f"{mobility_label.lower()} was **{float(strongest_weather['mobility_value']):,.1f}**."
     )
 
 
@@ -653,6 +680,7 @@ def _initialize_state(
     defaults = {
         "raw09_saved_view": SAVED_VIEWS[0].label,
         "raw09_geography": "Citywide",
+        "raw09_borough": BOROUGHS[0],
         "raw09_zone_id": None,
         "raw09_mobility_metric": SAVED_VIEWS[0].mobility_metric,
         "raw09_weather_metric": SAVED_VIEWS[0].weather_metric,
@@ -676,6 +704,7 @@ def _apply_saved_view(
     maximum_date: pd.Timestamp,
 ) -> None:
     st.session_state["raw09_geography"] = saved_view.geography
+    st.session_state["raw09_borough"] = BOROUGHS[0]
     st.session_state["raw09_zone_id"] = None
     st.session_state["raw09_mobility_metric"] = saved_view.mobility_metric
     st.session_state["raw09_weather_metric"] = saved_view.weather_metric
@@ -767,6 +796,7 @@ def _render_relationship_cards(
 
 minimum_date, maximum_date = load_relationship_date_bounds()
 zone_lookup = load_zone_lookup()
+borough_lookup = load_borough_lookup()
 
 _initialize_state(
     minimum_date,
@@ -790,7 +820,6 @@ hero_pair = build_weather_relationship_pair_data(
     mobility_metric="avg_bus_speed",
     weather_metric="temperature",
     temporal_bucket="weekday_evening",
-    taxi_zone_id=None,
     start_date=minimum_date,
     end_date=maximum_date,
 )
@@ -800,18 +829,9 @@ hero_statistics = calculate_relationship_statistics(
     minimum_observations=30,
 )
 
-hero_all = _extract_period_row(
-    hero_statistics,
-    "all",
-)
-hero_pre = _extract_period_row(
-    hero_statistics,
-    "pre_cp",
-)
-hero_post = _extract_period_row(
-    hero_statistics,
-    "post_cp",
-)
+hero_all = _extract_period_row(hero_statistics, "all")
+hero_pre = _extract_period_row(hero_statistics, "pre_cp")
+hero_post = _extract_period_row(hero_statistics, "post_cp")
 
 hero_spearman = (
     hero_all["spearman_correlation"]
@@ -843,12 +863,10 @@ hero_card_1.metric(
     "Full-period Spearman",
     _format_correlation(hero_spearman),
 )
-
 hero_card_2.metric(
     "Before congestion pricing",
     _format_correlation(hero_pre_value),
 )
-
 hero_card_3.metric(
     "After congestion pricing",
     _format_correlation(hero_post_value),
@@ -865,9 +883,7 @@ st.plotly_chart(
     hero_figure,
     width="stretch",
     key="raw09_hero_scatter",
-    config={
-        "displayModeBar": False,
-    },
+    config={"displayModeBar": False},
 )
 
 hero_headline, hero_body = _dynamic_interpretation(
@@ -878,6 +894,262 @@ hero_headline, hero_body = _dynamic_interpretation(
     geography_label="Citywide",
 )
 render_chart_insight(f"**{hero_headline}.** {hero_body}")
+
+st.header("But that relationship was not the same across NYC")
+
+st.write(
+    "The citywide example is useful for seeing the relationship, but it can hide "
+    "meaningful geographic variation. Temperature produced the clearest recurring "
+    "weather–mobility relationships in the broader borough scan, and weekend-overnight "
+    "bus speed provides one of the clearest contrasts."
+)
+
+borough_summary = build_borough_relationship_summary(
+    mobility_metric="avg_bus_speed",
+    weather_metric="temperature",
+    temporal_bucket="weekend_overnight",
+    start_date=minimum_date,
+    end_date=maximum_date,
+    minimum_observations=30,
+)
+borough_summary = (
+    borough_summary.loc[
+        borough_summary["supported"]
+        & borough_summary["spearman_correlation"].notna()
+    ]
+    .copy()
+    .sort_values("spearman_correlation", ascending=False)
+)
+
+borough_figure = go.Figure(
+    go.Bar(
+        x=borough_summary["spearman_correlation"],
+        y=borough_summary["borough"],
+        orientation="h",
+        marker_color=BRAND_COLORS["dark_teal"],
+        customdata=borough_summary[["observation_count"]].to_numpy(),
+        hovertemplate=(
+            "<b>%{y}</b><br>Spearman: %{x:+.3f}<br>"
+            "Matched observations: %{customdata[0]:,.0f}<extra></extra>"
+        ),
+    )
+)
+borough_figure.add_vline(
+    x=0,
+    line_width=1.5,
+    line_color=NEUTRAL_GRAY,
+)
+borough_figure = apply_branding(borough_figure)
+borough_figure.update_layout(
+    title={"text": ""},
+    height=430,
+    margin={"l": 25, "r": 35, "t": 20, "b": 55},
+    showlegend=False,
+    xaxis={
+        "title": "Spearman correlation · Temperature × Bus Average Speed",
+        "range": [-0.8, 0.1],
+        "showgrid": True,
+        "gridcolor": "rgba(102,116,122,0.15)",
+        "zeroline": False,
+    },
+    yaxis={"title": None},
+)
+
+st.plotly_chart(
+    borough_figure,
+    width="stretch",
+    key="raw09_borough_temperature_comparison",
+    config={"displayModeBar": False},
+)
+
+if not borough_summary.empty:
+    strongest = borough_summary.loc[
+        borough_summary["spearman_correlation"].idxmin()
+    ]
+    weakest = borough_summary.loc[
+        borough_summary["spearman_correlation"].idxmax()
+    ]
+    spread = float(
+        weakest["spearman_correlation"]
+        - strongest["spearman_correlation"]
+    )
+
+    render_chart_insight(
+        f"**The same weather relationship looked very different across boroughs.** "
+        f"During weekend overnights, temperature and bus speed had a Spearman "
+        f"correlation of **{float(strongest['spearman_correlation']):+.3f} in "
+        f"{strongest['borough']}**, compared with "
+        f"**{float(weakest['spearman_correlation']):+.3f} in "
+        f"{weakest['borough']}** — a borough spread of **{spread:.3f}**. "
+        "This is an association, not evidence that temperature caused bus speeds to change."
+    )
+
+st.caption(
+    "Full study period · Weekend overnight · Spearman correlation. Negative values "
+    "mean higher temperatures tended to coincide with lower bus speeds, and lower "
+    "temperatures with higher bus speeds. Association does not establish causation."
+)
+
+# ---------------------------------------------------------------------
+# From observed relationship to possible explanations
+# ---------------------------------------------------------------------
+
+st.header("What might be behind the bus-speed pattern?")
+
+st.write(
+    "The relationship is clear, but the reason is not. One possibility is "
+    "passenger behavior: colder weather could mean fewer people waiting for or "
+    "boarding buses, shortening dwell times at stops and allowing buses to move "
+    "faster. Road conditions, traffic volumes, seasonal travel patterns, and "
+    "other factors could also contribute."
+)
+
+st.info(
+    "These are hypotheses, not conclusions from this analysis. The mobility "
+    "panel measures average bus speed, but it does not give us bus passenger "
+    "counts that would let us test the boarding-and-dwell-time explanation directly."
+)
+
+st.write(
+    "That raises a useful next question: **was temperature associated only with "
+    "how quickly transportation moved, or also with how much people traveled?**"
+)
+
+
+# ---------------------------------------------------------------------
+# Temperature and travel demand
+# ---------------------------------------------------------------------
+
+st.header("Temperature was related to travel demand, too")
+
+st.write(
+    "Subway ridership provides a different view of the weather relationship. "
+    "Instead of measuring how quickly vehicles moved, it measures how much the "
+    "system was used. During weekday evenings, the relationship between "
+    "temperature and subway ridership again varied across boroughs."
+)
+
+demand_summary = build_borough_relationship_summary(
+    mobility_metric="subway_ridership",
+    weather_metric="temperature",
+    temporal_bucket="weekday_evening",
+    start_date=minimum_date,
+    end_date=maximum_date,
+    minimum_observations=30,
+)
+
+demand_summary = (
+    demand_summary.loc[
+        demand_summary["supported"]
+        & demand_summary["spearman_correlation"].notna()
+    ]
+    .copy()
+    .sort_values(
+        "spearman_correlation",
+        ascending=True,
+    )
+)
+
+demand_figure = go.Figure(
+    go.Bar(
+        x=demand_summary["spearman_correlation"],
+        y=demand_summary["borough"],
+        orientation="h",
+        marker_color=BRAND_COLORS["terracotta"],
+        customdata=demand_summary[
+            ["observation_count"]
+        ].to_numpy(),
+        hovertemplate=(
+            "<b>%{y}</b><br>"
+            "Spearman: %{x:+.3f}<br>"
+            "Matched observations: %{customdata[0]:,.0f}"
+            "<extra></extra>"
+        ),
+    )
+)
+
+demand_figure.add_vline(
+    x=0,
+    line_width=1.5,
+    line_color=NEUTRAL_GRAY,
+)
+
+demand_figure = apply_branding(demand_figure)
+
+# WHY: apply_branding() can leave Plotly with a title object whose text
+# resolves to JavaScript "undefined". An explicit empty string prevents
+# that phantom title from rendering.
+demand_figure.update_layout(
+    height=430,
+    margin={
+        "l": 25,
+        "r": 35,
+        "t": 20,
+        "b": 55,
+    },
+    showlegend=False,
+    title={
+        "text": "",
+    },
+    xaxis={
+        "title": (
+            "Spearman correlation · "
+            "Temperature × Subway Ridership"
+        ),
+        "showgrid": True,
+        "gridcolor": "rgba(102,116,122,0.15)",
+        "zeroline": False,
+    },
+    yaxis={
+        "title": None,
+    },
+)
+
+st.plotly_chart(
+    demand_figure,
+    width="stretch",
+    key="raw09_borough_temperature_demand",
+    config={
+        "displayModeBar": False,
+    },
+)
+
+
+# ---------------------------------------------------------------------
+# Explain the demand result from the actual displayed values
+# ---------------------------------------------------------------------
+
+if not demand_summary.empty:
+    strongest_demand = demand_summary.loc[
+        demand_summary["spearman_correlation"].idxmax()
+    ]
+
+    weakest_demand = demand_summary.loc[
+        demand_summary["spearman_correlation"].idxmin()
+    ]
+
+    demand_spread = float(
+        strongest_demand["spearman_correlation"]
+        - weakest_demand["spearman_correlation"]
+    )
+
+    render_chart_insight(
+        "**Temperature was associated with demand as well as speed.** "
+        "During weekday evenings, the temperature–subway-ridership "
+        f"relationship ranged from "
+        f"**{float(weakest_demand['spearman_correlation']):+.3f} in "
+        f"{weakest_demand['borough']}** to "
+        f"**{float(strongest_demand['spearman_correlation']):+.3f} in "
+        f"{strongest_demand['borough']}**, a borough spread of "
+        f"**{demand_spread:.3f}**. The positive correlations mean warmer "
+        "evenings generally coincided with higher subway ridership."
+    )
+
+st.caption(
+    "Full study period · Weekend overnight · Spearman correlation. Negative values "
+    "mean higher temperatures tended to coincide with lower bus speeds, and lower "
+    "temperatures with higher bus speeds."
+)
 
 saved_view_labels = [
     saved_view.label
@@ -947,7 +1219,7 @@ with exploration_section(
     with control_row_1[0]:
         geography = st.selectbox(
             "Geography",
-            options=["Citywide", "Taxi Zone"],
+            options=["Citywide", "Borough", "Taxi Zone"],
             key="raw09_geography",
             on_change=_mark_custom,
         )
@@ -971,24 +1243,29 @@ with exploration_section(
         )
 
     selected_zone_id: int | None = None
-    selected_zone_label = "Citywide"
+    selected_borough: str | None = None
+    selected_geography_label = "Citywide"
 
-    if geography == "Taxi Zone":
+    if geography == "Borough":
+        borough_options = borough_lookup["borough"].astype(str).tolist()
+        if st.session_state.get("raw09_borough") not in borough_options:
+            st.session_state["raw09_borough"] = borough_options[0]
+        selected_borough = st.selectbox(
+            "Borough",
+            options=borough_options,
+            key="raw09_borough",
+            on_change=_mark_custom,
+        )
+        selected_geography_label = selected_borough
+
+    elif geography == "Taxi Zone":
         zone_options = zone_lookup["taxi_zone_id"].astype(int).tolist()
-
         zone_label_map = {
-            int(row.taxi_zone_id): (
-                f"{row.zone} · {row.borough}"
-            )
+            int(row.taxi_zone_id): f"{row.zone} · {row.borough}"
             for row in zone_lookup.itertuples()
         }
-
-        if (
-            st.session_state.get("raw09_zone_id")
-            not in zone_options
-        ):
+        if st.session_state.get("raw09_zone_id") not in zone_options:
             st.session_state["raw09_zone_id"] = zone_options[0]
-
         selected_zone_id = st.selectbox(
             "Taxi Zone",
             options=zone_options,
@@ -996,10 +1273,7 @@ with exploration_section(
             key="raw09_zone_id",
             on_change=_mark_custom,
         )
-
-        selected_zone_label = zone_label_map[
-            selected_zone_id
-        ]
+        selected_geography_label = zone_label_map[selected_zone_id]
 
     control_row_2 = st.columns(
         [1.5, 1.2, 1.2, 1]
@@ -1050,6 +1324,7 @@ with exploration_section(
         weather_metric=weather_metric,
         temporal_bucket=temporal_bucket,
         taxi_zone_id=selected_zone_id,
+        borough=selected_borough,
         start_date=start_date,
         end_date=end_date,
     )
@@ -1078,8 +1353,8 @@ with exploration_section(
     ):
         st.warning(
             "There are not enough matched observations to estimate this "
-            "relationship reliably. Broaden the date range, choose Citywide, "
-            "or select another time-of-week view."
+            "relationship reliably. Broaden the date range, use a larger "
+            "geography, or select another time-of-week view."
         )
         st.stop()
 
@@ -1147,7 +1422,7 @@ with exploration_section(
             weather_label=weather_label,
             mobility_label=mobility_label,
             temporal_label=temporal_label,
-            geography_label=selected_zone_label,
+            geography_label=selected_geography_label,
         )
 
         render_chart_insight(f"**{insight_headline}.** {insight_body}")
@@ -1234,10 +1509,11 @@ with exploration_section(
 
 st.markdown("### What this page establishes")
 st.markdown(
-    "Weather and mobility can move together, but the strength and direction of that "
-    "relationship depend on the weather measure, mobility measure, geography, and time "
-    "of week being compared. A visible association is therefore useful context for "
-    "understanding mobility variation, not a standalone explanation for it."
+    "Temperature produced the clearest recurring relationships in the broader weather "
+    "scan, and the Borough comparison shows why citywide averages are not the whole "
+    "story. More broadly, the strength and direction of weather–mobility relationships "
+    "depend on the measure, geography, and time of week being compared. These patterns "
+    "provide context for mobility variation; they do not establish that weather caused it."
 )
 
 with st.expander("How this page works", expanded=False):
@@ -1276,4 +1552,3 @@ st.caption(
     "selected dates and time-of-week context. Correlations describe association, not "
     "causation; they do not establish that weather caused the observed mobility changes."
 )
-

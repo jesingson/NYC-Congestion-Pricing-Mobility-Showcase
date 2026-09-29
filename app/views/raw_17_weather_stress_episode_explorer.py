@@ -13,7 +13,6 @@ import streamlit as st
 
 from app.data_access.anomalies import load_selected_anomaly_events
 from app.data_access.loaders import CONGESTION_PRICING_START_DATE
-from app.data_access.weather_relationships import MOBILITY_PANEL_PATH, WEATHER_PANEL_PATH
 from app.utils.project_branding import (
     BRAND_COLORS,
     apply_branding,
@@ -27,6 +26,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 HANDOFF_PATH = (
     PROJECT_ROOT
     / "data/processed/3.4.2.final_tables/weather_stress_analytical_handoff.parquet"
+)
+WEATHER_STRESS_RUNTIME_PATH = (
+    PROJECT_ROOT
+    / "data/processed/app_tables/weather_stress_runtime.parquet"
 )
 MIN_ZONE_EXPOSED_CONTEXTS = 25
 MIN_ZONE_EXPOSED_DATES = 10
@@ -151,143 +154,45 @@ WEATHER_METRIC_LABELS = {
 
 @st.cache_data(show_spinner="Loading weather and stress-anomaly observations...")
 def load_weather_stress_surface() -> pd.DataFrame:
-    """Enrich the 3.4.2 handoff with weather eligibility and readable geography."""
-    # Read the complete compact handoff so approved cluster, policy-geography,
-    # and stress-family fields remain available to the investigation controls.
-    frame = pd.read_parquet(HANDOFF_PATH)
+    """Load the pre-enriched compact Raw 17 production surface.
+
+    The build step preserves the page's original canonical-zone bridge, weather
+    join, and anomaly-family enrichment. Streamlit therefore no longer opens
+    either large Chapter 1 source panel at runtime.
+    """
+    if not WEATHER_STRESS_RUNTIME_PATH.exists():
+        raise FileNotFoundError(
+            "Raw 17 runtime table is missing. Run "
+            "scripts/build_weather_stress_runtime.py first: "
+            f"{WEATHER_STRESS_RUNTIME_PATH}"
+        )
+
+    frame = pd.read_parquet(WEATHER_STRESS_RUNTIME_PATH)
     required_columns = {
         "comparison_event_id", "taxi_zone_id", "date", "temporal_bucket",
-        "selected_finalist_flag", "weather_available_flag",
+        "selected_finalist_flag", "all_stress_anomaly_flag",
+        "zone", "borough", "policy_geography_label", "canonical_cluster_name",
+        "calendar_month", "policy_period", "weekday_weekend",
+        *{spec["metric"] for spec in CONDITIONS.values()},
     }
-    missing_columns = required_columns.difference(frame.columns)
+    missing_columns = sorted(required_columns.difference(frame.columns))
     if missing_columns:
         raise ValueError(
-            "The weather/stress handoff is missing required columns: "
-            f"{sorted(missing_columns)}"
+            "The compact Raw 17 runtime surface is missing required columns: "
+            f"{missing_columns}"
         )
+
     frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
-    frame["selected_finalist_flag"] = (
-        frame["selected_finalist_flag"].fillna(False).astype(bool)
-    )
-    # Preserve an immutable copy of the complete stress-anomaly outcome. Every
-    # interactive stress-family view is derived from this field so changing a
-    # filter can never overwrite the source outcome used by a later rerun.
-    frame["all_stress_anomaly_flag"] = frame["selected_finalist_flag"]
-    frame = frame.loc[frame["weather_available_flag"].fillna(False).astype(bool)].copy()
-
-    # The 1.3.1 mobility panel preserves the authoritative raw-to-canonical
-    # Taxi Zone bridge as well as reader-facing zone and borough names.
-    zone_bridge = pd.read_parquet(
-        MOBILITY_PANEL_PATH,
-        columns=["taxi_zone_id", "canonical_location_id", "zone", "borough"],
-    ).drop_duplicates("taxi_zone_id")
-    zone_bridge["taxi_zone_id"] = pd.to_numeric(
-        zone_bridge["taxi_zone_id"], errors="coerce"
-    ).astype("Int64")
-    zone_bridge["canonical_location_id"] = pd.to_numeric(
-        zone_bridge["canonical_location_id"], errors="coerce"
-    ).astype("Int64")
-
     frame["taxi_zone_id"] = pd.to_numeric(
         frame["taxi_zone_id"], errors="coerce"
     ).astype("Int64")
-    existing_zone = "zone" in frame.columns
-    existing_borough = "borough" in frame.columns
-    existing_canonical_id = "canonical_location_id" in frame.columns
-    frame = frame.merge(
-        zone_bridge,
-        on="taxi_zone_id",
-        how="left",
-        suffixes=("", "_bridge"),
-        validate="many_to_one",
+    frame["selected_finalist_flag"] = (
+        frame["selected_finalist_flag"].fillna(False).astype(bool)
     )
-    if existing_zone:
-        frame["zone"] = frame["zone"].fillna(frame["zone_bridge"])
-        frame = frame.drop(columns="zone_bridge")
-    if existing_borough:
-        frame["borough"] = frame["borough"].fillna(frame["borough_bridge"])
-        frame = frame.drop(columns="borough_bridge")
-    if existing_canonical_id:
-        frame["canonical_location_id"] = frame["canonical_location_id"].fillna(
-            frame["canonical_location_id_bridge"]
-        )
-        frame = frame.drop(columns="canonical_location_id_bridge")
-
-    # Actual weather measures distinguish a condition that is absent from a
-    # condition that cannot be evaluated because its source measure is missing.
-    weather_metrics = sorted({spec["metric"] for spec in CONDITIONS.values()})
-    weather = pd.read_parquet(
-        WEATHER_PANEL_PATH,
-        columns=["taxi_zone_id", "date", "temporal_bucket", *weather_metrics],
-    ).rename(columns={"taxi_zone_id": "canonical_location_id"})
-    weather["date"] = pd.to_datetime(weather["date"], errors="coerce")
-    weather["canonical_location_id"] = pd.to_numeric(
-        weather["canonical_location_id"], errors="coerce"
-    ).astype("Int64")
-
-    row_count = len(frame)
-    frame = frame.merge(
-        weather,
-        on=["canonical_location_id", "date", "temporal_bucket"],
-        how="left",
-        validate="many_to_one",
+    frame["all_stress_anomaly_flag"] = (
+        frame["all_stress_anomaly_flag"].fillna(False).astype(bool)
     )
-    if len(frame) != row_count:
-        raise ValueError("The canonical weather join changed the event-context grain.")
-
-    # Pull the established Showcase anomaly-family and modality contracts from
-    # the canonical selected-event export. This avoids reconstructing them from
-    # weather-handoff fields that may be absent or encoded differently.
-    selected_events = load_selected_anomaly_events()
-    anomaly_detail_columns = [
-        column
-        for column in [
-            "has_congestion_oriented",
-            "has_positive_demand_shock",
-            "stress_family_exclusive",
-            "event_modality_driver_list",
-            "event_metric_driver_list",
-        ]
-        if column in selected_events.columns
-    ]
-    if anomaly_detail_columns:
-        event_details = selected_events[
-            ["comparison_event_id", *anomaly_detail_columns]
-        ].drop_duplicates("comparison_event_id")
-        frame = frame.merge(
-            event_details,
-            on="comparison_event_id",
-            how="left",
-            suffixes=("", "_event"),
-            validate="one_to_one",
-        )
-        for column in anomaly_detail_columns:
-            event_column = f"{column}_event"
-            if event_column in frame.columns:
-                frame[column] = frame[event_column].combine_first(frame[column])
-                frame = frame.drop(columns=event_column)
-
-    frame["calendar_month"] = frame["date"].dt.month
-    frame["policy_period"] = np.where(
-        frame["date"].lt(CP_START_DATE),
-        "Pre-CP",
-        "Post-CP",
-    )
-    frame["weekday_weekend"] = np.where(
-        frame["date"].dt.dayofweek.ge(5), "Weekend", "Weekday"
-    )
-    frame["zone"] = frame["zone"].fillna("Unknown")
-    frame["borough"] = frame["borough"].fillna("Unknown")
-    frame["policy_geography_label"] = frame.get(
-        "policy_geography_label",
-        pd.Series(index=frame.index, dtype="object"),
-    ).fillna("Unknown")
-    frame["canonical_cluster_name"] = frame.get(
-        "canonical_cluster_name",
-        pd.Series(index=frame.index, dtype="object"),
-    ).fillna("Unassigned")
     return frame
-
 
 def stress_type_flag(frame: pd.DataFrame, stress_type: str) -> pd.Series:
     """Identify the requested stress-anomaly family without removing denominator rows."""
@@ -842,31 +747,160 @@ def comparison_chart(summary: dict[str, float], title: str) -> go.Figure:
     return apply_branding(figure)
 
 
-def stability_message(summary: dict[str, float]) -> str:
-    """Explain what changes after comparing similar contexts."""
-    overall = summary["overall_difference"]
-    adjusted = summary["adjusted_difference"]
-    if np.sign(overall) != np.sign(adjusted):
-        return (
-            "The direction reverses after comparing like-for-like observations, so "
-            "the unadjusted pattern is not dependable."
+def adjustment_comparison_chart(
+    summary: dict[str, float],
+    condition_label: str,
+) -> go.Figure:
+    """Show how a weather/stress gap changes after like-for-like adjustment."""
+    stages = ["At first glance", "After comparing similar observations"]
+    present_values = [summary["overall_present"], summary["adjusted_present"]]
+    absent_values = [summary["overall_absent"], summary["adjusted_absent"]]
+    present_name = condition_label
+    absent_name = f"Without {condition_label.lower()}"
+
+    figure = go.Figure()
+    figure.add_trace(
+        go.Bar(
+            x=stages,
+            y=present_values,
+            name=present_name,
+            marker_color=BRAND_COLORS["dark_teal"],
+            text=[f"{value:.1f}%" for value in present_values],
+            textposition="outside",
+            cliponaxis=False,
+            hovertemplate=(
+                f"<b>%{{x}}</b><br>{present_name}: %{{y:.1f}}%"
+                "<extra></extra>"
+            ),
         )
-    if abs(adjusted) < 0.5 * abs(overall):
-        return (
-            "The gap becomes much smaller after the like-for-like comparison, so "
-            "timing and geography explain much of the initial pattern."
-        )
-    return (
-        "The gap remains similar after the like-for-like comparison, so it is not "
-        "explained by when or where the condition occurred."
     )
+    figure.add_trace(
+        go.Bar(
+            x=stages,
+            y=absent_values,
+            name=absent_name,
+            marker_color=BRAND_COLORS["seafoam"],
+            text=[f"{value:.1f}%" for value in absent_values],
+            textposition="outside",
+            cliponaxis=False,
+            hovertemplate=(
+                f"<b>%{{x}}</b><br>{absent_name}: %{{y:.1f}}%"
+                "<extra></extra>"
+            ),
+        )
+    )
+    figure.update_layout(
+        title={"text": ""},
+        barmode="group",
+        xaxis_title="",
+        yaxis_title="Stress-anomaly incidence (%)",
+        height=430,
+        margin=dict(t=55, r=30, b=55, l=60),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="left",
+            x=0,
+        ),
+    )
+    figure.update_yaxes(ticksuffix="%", rangemode="tozero")
+    return apply_branding(figure)
+
+
+def stability_message(
+    summary: dict[str, float],
+    condition_label: str,
+    stress_label: str = "stress anomalies",
+) -> str:
+    """Turn the raw-versus-adjusted comparison into a layperson takeaway."""
+    overall = float(summary["overall_difference"])
+    adjusted = float(summary["adjusted_difference"])
+    condition = condition_label.lower()
+    stress = stress_label.lower()
+
+    if np.sign(overall) != np.sign(adjusted) and abs(overall) >= 0.1 and abs(adjusted) >= 0.1:
+        return (
+            f"**The first impression is misleading.** {condition_label} initially "
+            f"appeared to coincide with {'more' if overall > 0 else 'less'} {stress}, "
+            "but the relationship points the other way once we compare similar times "
+            "and places. That suggests the raw pattern was strongly shaped by when and "
+            f"where {condition} occurred."
+        )
+
+    if abs(adjusted) < 0.5:
+        return (
+            f"**Most of the apparent relationship disappears in the fairer comparison.** "
+            f"Once we compare similar times and places, {condition} and {stress} are "
+            "separated by less than half a percentage point. The original difference "
+            "was therefore mostly tied to the circumstances in which the weather occurred."
+        )
+
+    if abs(overall) >= 0.5 and abs(adjusted) < 0.5 * abs(overall):
+        return (
+            f"**{condition_label} still coincides with "
+            f"{'more' if adjusted > 0 else 'less'} {stress}, but much less strongly than "
+            "it first appeared.** Comparing similar times and places removes more than "
+            "half of the original difference, suggesting that timing and geography "
+            "accounted for much of the initial pattern."
+        )
+
+    if abs(adjusted) <= 1.25 * abs(overall):
+        return (
+            f"**The relationship largely survives the fairer comparison.** {condition_label} "
+            f"remains associated with {'more' if adjusted > 0 else 'less'} {stress} even "
+            "when we compare similar times and places, so the pattern is not simply a "
+            "by-product of broad timing or geography differences."
+        )
+
+    return (
+        f"**The relationship becomes clearer after comparing similar observations.** "
+        f"{condition_label} is associated with {'more' if adjusted > 0 else 'less'} "
+        f"{stress}, and the separation is larger after broad timing and geography "
+        "differences are reduced."
+    )
+
+
+def explain_comparison_groups(*, policy_geography_fixed: bool = False) -> None:
+    """Explain the adjusted comparison without interrupting the main story."""
+    geography_text = (
+        "Because this view is already filtered to one policy-geography segment, "
+        "policy geography does not need to be used again to form the groups."
+        if policy_geography_fixed
+        else (
+            "Policy geography is included too, so observations are compared within "
+            "the same broad congestion-pricing geography."
+        )
+    )
+
+    with st.expander("How are similar observations found?"):
+        st.write(
+            "Each eligible Taxi Zone × temporal-bucket × date observation is placed "
+            "into a comparison group with observations from the same **calendar month, "
+            "congestion-pricing period, and temporal bucket**. " + geography_text
+        )
+        st.write(
+            "A group is used only when it contains observations **both with and without** "
+            "the selected weather condition. We calculate the stress-anomaly rate for "
+            "each side inside that group, then combine the qualifying groups. Larger "
+            "groups receive more weight based on their total number of observations. "
+            "The result is the ‘after similar observations’ comparison shown above."
+        )
+        st.caption(
+            "This makes the two sides more comparable on broad timing and geography, "
+            "but it is not one-to-one matching and does not turn the result into a "
+            "causal estimate."
+        )
 
 
 inject_app_css()
 
-for required_path in [HANDOFF_PATH, MOBILITY_PANEL_PATH, WEATHER_PANEL_PATH]:
+for required_path in [WEATHER_STRESS_RUNTIME_PATH]:
     if not required_path.exists():
-        st.error(f"Required weather/stress input not found: {required_path}")
+        st.error(
+            "Required compact weather/stress runtime input not found: "
+            f"{required_path}. Run scripts/build_weather_stress_runtime.py first."
+        )
         st.stop()
 
 weather_stress_df = load_weather_stress_surface()
@@ -879,40 +913,69 @@ st.caption("WEATHER RELATIONSHIPS")
 st.title("Do recurring weather conditions coincide with more stress anomalies?")
 st.write(
     "Weather and mobility stress can occur at the same time without weather necessarily "
-    "being the reason for the anomaly. This page compares stress-anomaly incidence when "
-    "a recurring weather condition is present with otherwise similar observations where "
-    "it is absent, helping separate simple co-occurrence from differences that persist "
-    "after broad timing and geography are held more comparable."
+    "being the reason for the anomaly. This page first shows the simple observed gap, "
+    "then asks whether that gap remains when we compare observations from similar times "
+    "and places."
 )
 
 hero = condition_comparison(weather_stress_df, HERO_LABEL)
 
-st.header("Does the cold-weather difference persist in like-for-like contexts?")
+st.header("Does the cold-weather difference survive a fairer comparison?")
 st.write(
-    "The fixed opening comparison uses **unusually cold** observations and pairs them "
-    "with observations from the same calendar month, policy period, temporal bucket, "
-    "and policy-geography group. The bars show the percentage of eligible observations "
-    "that were retained as stress anomalies in each group."
+    "The opening example uses **unusually cold** observations. The first pair of bars "
+    "shows the raw difference in stress-anomaly incidence. The second compares cold and "
+    "non-cold observations within the same **calendar month, policy period, temporal "
+    "bucket, and policy-geography group**. If the gap changes substantially, some of the "
+    "original pattern was tied to when and where cold weather occurred rather than cold "
+    "weather alone."
 )
 st.caption(CONDITIONS[HERO_LABEL]["definition"])
 
 st.plotly_chart(
-    comparison_chart(hero, "Stress anomalies in similar observations with and without cold weather"),
+    adjustment_comparison_chart(hero, HERO_LABEL),
     use_container_width=True,
-)
-hero_direction = "more" if hero["adjusted_difference"] >= 0 else "less"
-render_chart_insight(
-    f"Stress anomalies were **{abs(hero['adjusted_difference']):.1f} percentage "
-    f"points {hero_direction} common** during unusually cold weather "
-    f"(**{hero['adjusted_present']:.1f}%**) than in otherwise similar observations "
-    f"without it (**{hero['adjusted_absent']:.1f}%**)."
+    key="raw17_hero_adjustment_chart",
 )
 
+raw_direction = "more" if hero["overall_difference"] >= 0 else "less"
+adjusted_direction = "more" if hero["adjusted_difference"] >= 0 else "less"
+
 hero_cards = st.columns(4)
-hero_cards[0].metric("During cold weather", f"{hero['adjusted_present']:.1f}%")
-hero_cards[1].metric("Without cold weather", f"{hero['adjusted_absent']:.1f}%")
-hero_cards[2].metric("Difference", f"{hero['adjusted_difference']:+.1f} pp")
+hero_cards[0].metric(
+    "At first glance",
+    f"{hero['overall_difference']:+.1f} pp",
+    help="Raw cold-weather stress incidence minus non-cold stress incidence.",
+)
+hero_cards[1].metric(
+    "After similar observations",
+    f"{hero['adjusted_difference']:+.1f} pp",
+    delta=f"{hero['adjusted_difference'] - hero['overall_difference']:+.1f} pp vs raw",
+    help=(
+        "Difference after comparing observations within the same calendar month, "
+        "policy period, temporal bucket, and policy-geography group."
+    ),
+)
+hero_cards[2].metric(
+    "Comparison groups",
+    f"{hero['contributing_strata']:,}",
+    help="Matched context groups containing both cold and non-cold observations.",
+)
 hero_cards[3].metric("Cold-weather dates", f"{hero['present_dates']:,}")
+
+render_chart_insight(
+    f"**The raw gap was {abs(hero['overall_difference']):.1f} percentage points "
+    f"{raw_direction} common during unusually cold weather.** After comparing similar "
+    f"times and places, the gap was **{abs(hero['adjusted_difference']):.1f} points "
+    f"{adjusted_direction} common**. {stability_message(hero, HERO_LABEL)}"
+)
+
+st.caption(
+    "Comparing similar observations reduces broad calendar, policy-period, time-of-week, "
+    "and policy-geography differences. It is still descriptive: it does not isolate a "
+    "causal effect of cold weather."
+)
+
+explain_comparison_groups()
 
 # ---------------------------------------------------------------------
 # Condition comparison
@@ -1076,21 +1139,57 @@ with exploration_section(
         )
         st.stop()
 
-    selected_cards = st.columns(3)
-    selected_cards[0].metric("During condition", f"{selected['adjusted_present']:.1f}%")
-    selected_cards[1].metric("Without condition", f"{selected['adjusted_absent']:.1f}%")
-    selected_cards[2].metric("Difference", f"{selected['adjusted_difference']:+.1f} pp")
+    st.markdown("### Does the pattern still hold when we compare similar observations?")
+    st.write(
+        "The first pair of bars shows the simple difference within the active scope. "
+        "The second pair asks whether that pattern remains among observations from the same calendar month, policy "
+        "period, temporal bucket, and — unless already fixed by the geography filter — "
+        "policy-geography group."
+    )
+
+    explain_comparison_groups(
+        policy_geography_fixed=(
+            selected_geography_dimension == "Policy geography"
+            and selected_geography_segment != "All segments"
+        )
+    )
 
     st.plotly_chart(
-        comparison_chart(selected, f"{selected_label}: comparison within the active scope"),
+        adjustment_comparison_chart(selected, selected_label),
         use_container_width=True,
+        key="raw17_selected_adjustment_chart",
     )
-    selected_direction = "more" if selected["adjusted_difference"] >= 0 else "less"
+
+    selected_cards = st.columns(3)
+    selected_cards[0].metric(
+        "At-first-glance difference",
+        f"{selected['overall_difference']:+.1f} pp",
+    )
+    selected_cards[1].metric(
+        "After similar observations",
+        f"{selected['adjusted_difference']:+.1f} pp",
+        delta=(
+            f"{selected['adjusted_difference'] - selected['overall_difference']:+.1f} pp "
+            "vs first glance"
+        ),
+        delta_color="off",
+    )
+    selected_cards[2].metric(
+        "Comparison groups",
+        f"{selected['contributing_strata']:,}",
+    )
+
     render_chart_insight(
-        f"Within **{active_scope}**, {selected_stress_type.lower()} were "
-        f"**{abs(selected['adjusted_difference']):.1f} percentage points "
-        f"{selected_direction} common** during **{selected_label.lower()}**. "
-        f"{stability_message(selected)}"
+        stability_message(
+            selected,
+            selected_label,
+            selected_stress_type,
+        )
+        + (
+            f" The difference is **{selected['adjusted_difference']:+.1f} percentage "
+            f"points** after comparing similar observations, versus "
+            f"**{selected['overall_difference']:+.1f} points** at first glance."
+        )
     )
 
     geography_is_filtered = (
@@ -1665,11 +1764,11 @@ with exploration_section(
 
 st.markdown("### What this page establishes")
 st.markdown(
-    "Some weather conditions coincide with different stress-anomaly rates even after "
-    "broad calendar, policy-period, time-of-week, and geography context is made more "
-    "comparable; other apparent gaps shrink or reverse under that comparison. Weather "
-    "is therefore useful context for understanding when mobility stress appears, but "
-    "the relationship is conditional rather than a simple citywide weather effect."
+    "Weather sometimes lines up with mobility stress in ways that remain visible even "
+    "when we compare similar times and places. In other cases, an eye-catching first "
+    "impression fades or reverses once those circumstances are made more comparable. "
+    "The practical takeaway is that weather can help describe **when and where mobility "
+    "stress tends to appear**, but no single weather condition tells the whole story."
 )
 
 with st.expander("How this page works", expanded=False):

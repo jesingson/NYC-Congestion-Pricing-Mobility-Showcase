@@ -37,14 +37,26 @@ FORECAST_DIR = (
     / "4.7.1.final_tables"
 )
 
-FORECAST_RECORD_SURFACE_PATH = (
-    FORECAST_DIR
-    / "showcase_forecast_record_surface.parquet"
+APP_TABLES_DIR = (
+    PROJECT_ROOT
+    / "data"
+    / "processed"
+    / "app_tables"
 )
 
-FORECAST_HISTORY_SURFACE_PATH = (
-    FORECAST_DIR
-    / "showcase_forecast_history_surface.parquet"
+FORECAST_RECORD_RUNTIME_PATH = (
+    APP_TABLES_DIR
+    / "forecast_holdout_runtime.parquet"
+)
+
+FORECAST_HISTORY_RUNTIME_PATH = (
+    APP_TABLES_DIR
+    / "forecast_explorer_runtime.parquet"
+)
+
+FORECAST_HOLDOUT_SLICE_SUMMARY_PATH = (
+    APP_TABLES_DIR
+    / "forecast_holdout_slice_summary.parquet"
 )
 
 FORECAST_JOB_SUMMARY_PATH = (
@@ -319,6 +331,119 @@ def _read_forecast_parquet(
 # Forecast record surface
 # ---------------------------------------------------------------------
 
+def _forecast_zone_lookup() -> pd.DataFrame:
+    """Return one canonical reader-facing geography row per Taxi Zone."""
+    zones = pd.read_parquet(
+        FORECAST_ZONE_SUMMARY_PATH,
+        columns=[
+            "taxi_zone_id",
+            "zone",
+            "borough",
+            "reader_facing_zone",
+        ],
+    )
+
+    zones["taxi_zone_id"] = pd.to_numeric(
+        zones["taxi_zone_id"],
+        errors="coerce",
+    ).astype("Int64")
+
+    return (
+        zones[
+            [
+                "taxi_zone_id",
+                "zone",
+                "borough",
+                "reader_facing_zone",
+            ]
+        ]
+        .drop_duplicates("taxi_zone_id")
+        .reset_index(drop=True)
+    )
+
+
+def _forecast_job_lookup() -> pd.DataFrame:
+    """Return the selected model family for each metric × horizon."""
+    jobs = pd.read_parquet(
+        FORECAST_JOB_SUMMARY_PATH,
+        columns=[
+            "metric",
+            "horizon",
+            "champion_family",
+        ],
+    )
+
+    jobs["horizon"] = pd.to_numeric(
+        jobs["horizon"],
+        errors="coerce",
+    ).astype("Int64")
+
+    return (
+        jobs[
+            [
+                "metric",
+                "horizon",
+                "champion_family",
+            ]
+        ]
+        .drop_duplicates(
+            [
+                "metric",
+                "horizon",
+            ]
+        )
+        .reset_index(drop=True)
+    )
+
+
+def _enrich_forecast_runtime(
+    frame: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Restore lightweight descriptive fields omitted from the compact runtime.
+
+    WHY:
+    Zone names, boroughs, reader-facing status, and champion family are
+    dimension attributes. Repeating them 1.4 million times in the runtime
+    Parquet wastes space, so they are joined from the tiny frozen summaries.
+    """
+    frame = frame.copy()
+
+    frame = frame.merge(
+        _forecast_zone_lookup(),
+        on="taxi_zone_id",
+        how="left",
+        validate="many_to_one",
+    )
+
+    frame = frame.merge(
+        _forecast_job_lookup(),
+        on=[
+            "metric",
+            "horizon",
+        ],
+        how="left",
+        validate="many_to_one",
+    )
+
+    # These quantities are exact functions of the retained native-unit values.
+    frame["absolute_error"] = (
+        frame["actual"]
+        - frame["champion_prediction"]
+    ).abs()
+
+    frame["benchmark_absolute_error"] = (
+        frame["actual"]
+        - frame["benchmark_prediction"]
+    ).abs()
+
+    frame["champion_better_than_benchmark"] = (
+        frame["absolute_error"]
+        < frame["benchmark_absolute_error"]
+    )
+
+    return frame
+
 def load_forecast_records(
     *,
     columns: Sequence[str] | None = None,
@@ -331,123 +456,107 @@ def load_forecast_records(
     reader_facing_only: bool = False,
     final_holdout_only: bool = False,
 ) -> pd.DataFrame:
-    """Load the authoritative row-level forecasting surface."""
+    """
+    Load exact final-holdout forecasting records from the compact runtime.
+
+    The old 118 MB Chapter 4 record surface is a build-time source only.
+    Reader-facing geography and champion-family labels are restored from the
+    tiny frozen summary tables.
+    """
     metric_values = _as_list(metrics)
     horizon_values = _as_list(horizons)
     zone_id_values = _as_list(taxi_zone_ids)
     borough_values = _as_list(boroughs)
     zone_values = _as_list(zones)
 
-    parquet_filters: list[tuple[str, str, object]] = []
-
-    if reader_facing_only:
-        parquet_filters.append(
-            ("reader_facing_zone", "==", True)
-        )
-
-    if metric_values and len(metric_values) == 1:
-        parquet_filters.append(
-            ("metric", "==", metric_values[0])
-        )
-
-    if horizon_values and len(horizon_values) == 1:
-        parquet_filters.append(
-            ("horizon", "==", int(horizon_values[0]))
-        )
-
-    if zone_id_values and len(zone_id_values) == 1:
-        parquet_filters.append(
-            ("taxi_zone_id", "==", int(zone_id_values[0]))
-        )
-
-    if borough_values and len(borough_values) == 1:
-        parquet_filters.append(
-            ("borough", "==", borough_values[0])
-        )
-
-    if zone_values and len(zone_values) == 1:
-        parquet_filters.append(
-            ("zone", "==", zone_values[0])
-        )
-
-    frame = _read_forecast_parquet(
-        FORECAST_RECORD_SURFACE_PATH,
-        label="forecast record surface",
-        columns=columns,
-        filters=parquet_filters or None,
+    frame = pd.read_parquet(
+        FORECAST_RECORD_RUNTIME_PATH
     )
 
     frame = _normalize_common_forecast_columns(
         frame
     )
 
-    if required_columns is not None:
-        require_columns(
-            frame,
-            required_columns,
-            label="showcase_forecast_record_surface",
-        )
-
-    if reader_facing_only:
-        if "reader_facing_zone" not in frame.columns:
-            raise ForecastDataContractError(
-                "reader_facing_only=True requires reader_facing_zone "
-                "in the requested columns."
-            )
-
-        frame = frame.loc[
-            frame["reader_facing_zone"]
-        ].copy()
+    frame = _enrich_forecast_runtime(
+        frame
+    )
 
     if metric_values is not None:
         frame = frame.loc[
             frame["metric"].isin(
                 metric_values
             )
-        ].copy()
+        ]
 
     if horizon_values is not None:
         frame = frame.loc[
             frame["horizon"].isin(
-                [int(value) for value in horizon_values]
+                [
+                    int(value)
+                    for value in horizon_values
+                ]
             )
-        ].copy()
+        ]
 
     if zone_id_values is not None:
         frame = frame.loc[
             frame["taxi_zone_id"].isin(
-                [int(value) for value in zone_id_values]
+                [
+                    int(value)
+                    for value in zone_id_values
+                ]
             )
-        ].copy()
+        ]
 
     if borough_values is not None:
         frame = frame.loc[
             frame["borough"].isin(
                 borough_values
             )
-        ].copy()
+        ]
 
     if zone_values is not None:
         frame = frame.loc[
             frame["zone"].isin(
                 zone_values
             )
-        ].copy()
+        ]
+
+    if reader_facing_only:
+        frame = frame.loc[
+            frame[
+                "reader_facing_zone"
+            ]
+            .fillna(False)
+            .astype(bool)
+        ]
 
     if final_holdout_only:
-        if "target_date" not in frame.columns:
-            raise ForecastDataContractError(
-                "final_holdout_only=True requires target_date "
-                "in the requested columns."
-            )
-
         frame = frame.loc[
             frame["target_date"].between(
                 FINAL_HOLDOUT_START_DATE,
                 FINAL_HOLDOUT_END_DATE,
                 inclusive="both",
             )
-        ].copy()
+        ]
+
+    if required_columns is not None:
+        require_columns(
+            frame,
+            required_columns,
+            label="forecast_holdout_runtime",
+        )
+
+    if columns is not None:
+        require_columns(
+            frame,
+            columns,
+            label="forecast_holdout_runtime",
+        )
+
+        frame = frame[
+            list(columns)
+        ]
 
     return frame.reset_index(drop=True)
 
@@ -466,117 +575,161 @@ def load_forecast_history(
     reader_facing_only: bool = False,
 ) -> pd.DataFrame:
     """
-    Load the frozen longitudinal forecasting-history surface.
+    Load longitudinal forecasting evidence from the compact wide runtime.
 
-    WHY:
-    Raw 18 needs narrow history slices for its interactive explorer and
-    personalized Quilts. Predicate filters are pushed down when possible and
-    then reapplied in Pandas so behavior is consistent across parquet engines.
+    Storage is one row per target observation. This loader restores the old
+    metric × horizon long-form API so downstream analytical behavior remains
+    unchanged.
     """
     metric_values = _as_list(metrics)
     horizon_values = _as_list(horizons)
     zone_id_values = _as_list(taxi_zone_ids)
 
-    parquet_filters: list[tuple[str, str, object]] = []
-
-    if reader_facing_only:
-        parquet_filters.append(
-            ("reader_facing_zone", "==", True)
-        )
-
-    if metric_values:
-        parquet_filters.append(
-            (
-                "metric",
-                "==" if len(metric_values) == 1 else "in",
-                metric_values[0] if len(metric_values) == 1 else metric_values,
-            )
-        )
-
-    if horizon_values:
-        integer_horizons = [
-            int(value)
-            for value in horizon_values
-        ]
-        parquet_filters.append(
-            (
-                "horizon",
-                "==" if len(integer_horizons) == 1 else "in",
-                (
-                    integer_horizons[0]
-                    if len(integer_horizons) == 1
-                    else integer_horizons
-                ),
-            )
-        )
-
-    if zone_id_values:
-        integer_zone_ids = [
-            int(value)
-            for value in zone_id_values
-        ]
-        parquet_filters.append(
-            (
-                "taxi_zone_id",
-                "==" if len(integer_zone_ids) == 1 else "in",
-                (
-                    integer_zone_ids[0]
-                    if len(integer_zone_ids) == 1
-                    else integer_zone_ids
-                ),
-            )
-        )
-
-    frame = _read_forecast_parquet(
-        FORECAST_HISTORY_SURFACE_PATH,
-        label="forecast history surface",
-        columns=columns,
-        filters=parquet_filters or None,
+    frame = pd.read_parquet(
+        FORECAST_HISTORY_RUNTIME_PATH
     )
 
-    frame = _normalize_common_forecast_columns(
-        frame
+    frame["target_date"] = pd.to_datetime(
+        frame["target_date"],
+        errors="coerce",
     )
 
-    if required_columns is not None:
-        require_columns(
-            frame,
-            required_columns,
-            label="showcase_forecast_history_surface",
-        )
-
-    if reader_facing_only:
-        if "reader_facing_zone" not in frame.columns:
-            raise ForecastDataContractError(
-                "reader_facing_only=True requires reader_facing_zone "
-                "in the requested columns."
-            )
-        frame = frame.loc[
-            frame["reader_facing_zone"]
-        ].copy()
+    frame["taxi_zone_id"] = pd.to_numeric(
+        frame["taxi_zone_id"],
+        errors="coerce",
+    ).astype("Int64")
 
     if metric_values is not None:
         frame = frame.loc[
             frame["metric"].isin(
                 metric_values
             )
-        ].copy()
-
-    if horizon_values is not None:
-        frame = frame.loc[
-            frame["horizon"].isin(
-                [int(value) for value in horizon_values]
-            )
-        ].copy()
+        ]
 
     if zone_id_values is not None:
         frame = frame.loc[
             frame["taxi_zone_id"].isin(
-                [int(value) for value in zone_id_values]
+                [
+                    int(value)
+                    for value in zone_id_values
+                ]
             )
+        ]
+
+    requested_horizons = (
+        [
+            int(value)
+            for value in horizon_values
+        ]
+        if horizon_values is not None
+        else list(FORECAST_HORIZONS)
+    )
+
+    id_columns = [
+        "metric",
+        "taxi_zone_id",
+        "zone",
+        "borough",
+        "target_date",
+        "target_temporal_bucket",
+        "target_observation_sequence_id",
+        "evaluation_period",
+        "actual",
+    ]
+
+    long_frames = []
+
+    for horizon in requested_horizons:
+        forecast_column = (
+            f"forecast_h{horizon}"
+        )
+        benchmark_column = (
+            f"benchmark_h{horizon}"
+        )
+
+        require_columns(
+            frame,
+            [
+                forecast_column,
+                benchmark_column,
+            ],
+            label="forecast_explorer_runtime",
+        )
+
+        horizon_frame = frame[
+            id_columns
+            + [
+                forecast_column,
+                benchmark_column,
+            ]
         ].copy()
 
-    return frame.reset_index(drop=True)
+        horizon_frame["horizon"] = (
+            horizon
+        )
+
+        horizon_frame[
+            "champion_prediction"
+        ] = horizon_frame[
+            forecast_column
+        ]
+
+        horizon_frame[
+            "benchmark_prediction"
+        ] = horizon_frame[
+            benchmark_column
+        ]
+
+        horizon_frame.drop(
+            columns=[
+                forecast_column,
+                benchmark_column,
+            ],
+            inplace=True,
+        )
+
+        long_frames.append(
+            horizon_frame
+        )
+
+    result = pd.concat(
+        long_frames,
+        ignore_index=True,
+    )
+
+    result["horizon"] = pd.to_numeric(
+        result["horizon"],
+        errors="coerce",
+    ).astype("Int64")
+
+    # Every row in this runtime was already restricted to the canonical
+    # reader-facing population by the builder.
+    result["reader_facing_zone"] = True
+
+    if reader_facing_only:
+        result = result.loc[
+            result["reader_facing_zone"]
+        ]
+
+    if required_columns is not None:
+        require_columns(
+            result,
+            required_columns,
+            label="forecast_explorer_runtime",
+        )
+
+    if columns is not None:
+        require_columns(
+            result,
+            columns,
+            label="forecast_explorer_runtime",
+        )
+
+        result = result[
+            list(columns)
+        ]
+
+    return result.reset_index(drop=True)
 
 
 # ---------------------------------------------------------------------

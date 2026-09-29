@@ -4,7 +4,7 @@ Counterfactual data-access helpers for Showcase Raw 21–25.
 The Streamlit pages stay focused on controls, chart construction, and reader
 interpretation. This module owns the reusable counterfactual data contracts:
 - loading validated compact Raw 21 and Raw 22 artifacts;
-- loading the frozen Chapter 5 counterfactual surface used by Raw 23;
+- loading the compact Raw 23 counterfactual runtime surface;
 - multimodal profile construction and Taxi-Zone peer/child lookups;
 - canonical physical Taxi-Zone handling for reader-facing zone views;
 - frozen h=1 Chapter 4 vs synthetic-world feature-reliance comparison;
@@ -36,9 +36,16 @@ FINAL_DIR = (
     / "5.3.1.final_tables"
 )
 
-GAP_SURFACE_PATH = (
-    FINAL_DIR
-    / "counterfactual_gap_surface.parquet"
+APP_TABLE_DIR = (
+    APP_ROOT
+    / "data"
+    / "processed"
+    / "app_tables"
+)
+
+RAW23_RUNTIME_PATH = (
+    APP_TABLE_DIR
+    / "counterfactual_raw23_runtime.parquet"
 )
 
 PROFILE_SUMMARY_PATH = (
@@ -279,7 +286,7 @@ PERIODS = {
     ),
 }
 
-SOURCE_COLUMNS = [
+RAW23_RUNTIME_COLUMNS = [
     "taxi_zone_id",
     "canonical_location_id",
     "zone",
@@ -291,7 +298,6 @@ SOURCE_COLUMNS = [
     "target_date",
     "target_temporal_bucket",
     "counterfactual_gap_mae_units",
-    "primary_gap_eligible",
 ]
 
 PROFILE_REQUIRED_COLUMNS = [
@@ -945,16 +951,29 @@ def load_counterfactual_geography_explorer() -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False)
 def load_counterfactual_surface() -> pd.DataFrame:
-    """Load only the Chapter 5 columns Raw 23 needs."""
+    """
+    Load Raw 23's compact exact-row runtime surface.
+
+    WHY:
+    Raw 23 only needs the frozen primary population and eleven columns from the
+    much wider Chapter 5 gap surface. The deployment artifact stores exactly
+    that subset without rounding or aggregation, so all existing Raw 23 slicing
+    and profile calculations retain their original semantics.
+    """
+    _require_files(
+        [RAW23_RUNTIME_PATH],
+        "Raw 23 counterfactual runtime contract",
+    )
+
     frame = pd.read_parquet(
-        GAP_SURFACE_PATH,
-        columns=SOURCE_COLUMNS,
+        RAW23_RUNTIME_PATH,
+        columns=RAW23_RUNTIME_COLUMNS,
     )
 
     _require_columns(
         frame,
-        SOURCE_COLUMNS,
-        "counterfactual_gap_surface",
+        RAW23_RUNTIME_COLUMNS,
+        "counterfactual_raw23_runtime",
     )
 
     frame["target_date"] = pd.to_datetime(
@@ -995,12 +1014,14 @@ def load_counterfactual_surface() -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False)
 def load_primary_counterfactual_surface() -> pd.DataFrame:
-    """Return the frozen reader-facing Chapter 5 primary population."""
-    source = load_counterfactual_surface()
+    """
+    Return the frozen reader-facing Chapter 5 primary population.
 
-    return source.loc[
-        source["primary_gap_eligible"].astype(bool)
-    ].copy()
+    The compact Raw 23 runtime is already filtered to primary-gap-eligible rows
+    during its offline build, so this remains a compatibility wrapper for the
+    existing Raw 23 API.
+    """
+    return load_counterfactual_surface().copy()
 
 
 @st.cache_data(show_spinner=False)

@@ -9,6 +9,9 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from app.data_access.forecasting import (
+    load_forecast_records,
+)
 from app.utils.project_branding import (
     BRAND_COLORS,
     apply_branding,
@@ -38,7 +41,6 @@ PAGE_TITLE = "A forecast can miss badly and still be useful"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 FORECAST_DIR = PROJECT_ROOT / "data" / "processed" / "4.7.1.final_tables"
 
-RECORD_SURFACE_PATH = FORECAST_DIR / "showcase_forecast_record_surface.parquet"
 FAILURE_CASES_PATH = FORECAST_DIR / "forecast_failure_case_studies.parquet"
 FAILURE_CONTEXT_PATH = FORECAST_DIR / "forecast_failure_case_context.parquet"
 FAILURE_MECHANISM_PATH = FORECAST_DIR / "forecast_failure_mechanism_summary.parquet"
@@ -101,9 +103,6 @@ RECORD_COLUMNS = [
     "champion_better_than_benchmark",
     "severe_error",
     "failure_combination",
-    "low_zero_demand",
-    "unstable_conditions",
-    "shared_shock",
     "system_row_error_index",
     "benchmark_advantage_index",
     "reader_facing_zone",
@@ -577,50 +576,88 @@ def explorer_plane_takeaway(
 
 
 @st.cache_data(show_spinner=False)
-def load_page_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Load only final-holdout fields needed to render Page 20."""
-    records = pd.read_parquet(
-        RECORD_SURFACE_PATH,
+def load_page_data() -> tuple[
+    pd.DataFrame,
+    pd.DataFrame,
+    pd.DataFrame,
+    pd.DataFrame,
+]:
+    """Load compact final-holdout evidence needed to render Page 20."""
+    records = load_forecast_records(
         columns=RECORD_COLUMNS,
+        required_columns=RECORD_COLUMNS,
+        reader_facing_only=True,
+        final_holdout_only=True,
     )
-    require_columns(records, RECORD_COLUMNS, "showcase_forecast_record_surface")
 
-    records["target_date"] = pd.to_datetime(records["target_date"], errors="coerce")
-    records["horizon"] = pd.to_numeric(records["horizon"], errors="coerce").astype("Int64")
-    records["reader_facing_zone"] = records["reader_facing_zone"].fillna(False).astype(bool)
-    records["severe_error"] = records["severe_error"].fillna(False).astype(bool)
-
-    records = records.loc[
-        records["reader_facing_zone"]
-        & records["target_date"].between(
-            FINAL_HOLDOUT_START_DATE,
-            FINAL_HOLDOUT_END_DATE,
-            inclusive="both",
-        )
-    ].copy()
-
-    for column in ["low_zero_demand", "unstable_conditions", "shared_shock"]:
-        records[column] = records[column].fillna(False).astype(bool)
+    records["severe_error"] = (
+        records["severe_error"]
+        .fillna(False)
+        .astype(bool)
+    )
 
     records["failure_combination"] = (
         records["failure_combination"]
         .astype("string")
-        .fillna("No identified mechanism")
+        .fillna(
+            "No identified mechanism"
+        )
     )
-    records["lens"] = analysis_lens(records)
 
-    cases = pd.read_parquet(FAILURE_CASES_PATH)
-    require_columns(cases, FAILURE_CASE_REQUIRED, "forecast_failure_case_studies")
-    cases["target_date"] = pd.to_datetime(cases["target_date"], errors="coerce")
+    records["lens"] = analysis_lens(
+        records
+    )
 
-    context = pd.read_parquet(FAILURE_CONTEXT_PATH)
-    require_columns(context, FAILURE_CONTEXT_REQUIRED, "forecast_failure_case_context")
-    context["target_date"] = pd.to_datetime(context["target_date"], errors="coerce")
+    cases = pd.read_parquet(
+        FAILURE_CASES_PATH
+    )
 
-    mechanisms = pd.read_parquet(FAILURE_MECHANISM_PATH)
-    require_columns(mechanisms, MECHANISM_REQUIRED, "forecast_failure_mechanism_summary")
+    require_columns(
+        cases,
+        FAILURE_CASE_REQUIRED,
+        "forecast_failure_case_studies",
+    )
 
-    return records, cases, context, mechanisms
+    cases["target_date"] = (
+        pd.to_datetime(
+            cases["target_date"],
+            errors="coerce",
+        )
+    )
+
+    context = pd.read_parquet(
+        FAILURE_CONTEXT_PATH
+    )
+
+    require_columns(
+        context,
+        FAILURE_CONTEXT_REQUIRED,
+        "forecast_failure_case_context",
+    )
+
+    context["target_date"] = (
+        pd.to_datetime(
+            context["target_date"],
+            errors="coerce",
+        )
+    )
+
+    mechanisms = pd.read_parquet(
+        FAILURE_MECHANISM_PATH
+    )
+
+    require_columns(
+        mechanisms,
+        MECHANISM_REQUIRED,
+        "forecast_failure_mechanism_summary",
+    )
+
+    return (
+        records,
+        cases,
+        context,
+        mechanisms,
+    )
 
 
 # ---------------------------------------------------------------------
@@ -1807,7 +1844,7 @@ def build_forecast_error_strips(
     )
     figure.update_xaxes(
         type="date",
-        title="Mobility measure date",
+        title="Forecast target date",
         title_standoff=5,
         range=[
             (min_date - pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
@@ -1924,7 +1961,7 @@ def build_record_context_chart(
         },
     )
     figure.update_xaxes(
-        title="Mobility measure date",
+        title="Forecast target date",
         title_standoff=5,
     )
     figure.update_yaxes(
@@ -2043,7 +2080,7 @@ def build_failure_context_chart(
         },
     )
     figure.update_xaxes(
-        title="Mobility measure date",
+        title="Forecast target date",
         title_standoff=5,
     )
     figure.update_yaxes(title=f"{metric_label(case['metric'])} ({metric_unit(case['metric'])})")
@@ -2166,7 +2203,6 @@ st.markdown(
 )
 
 for source_path in [
-    RECORD_SURFACE_PATH,
     FAILURE_CASES_PATH,
     FAILURE_CONTEXT_PATH,
     FAILURE_MECHANISM_PATH,
@@ -2456,7 +2492,7 @@ for case_index, (tab, selected_case) in enumerate(
                     "Taxi Zone",
                     "Borough",
                     "mobility measure × horizon",
-                    "Mobility measure date",
+                    "Forecast target date",
                     "Temporal bucket",
                     "Selected forecast family",
                     "Diagnostic category",
@@ -2892,7 +2928,7 @@ with exploration_section(
                             "Taxi Zone",
                             "Borough",
                             "mobility measure × horizon",
-                            "Mobility measure date",
+                            "Forecast target date",
                             "Temporal bucket",
                             "Selected forecast family",
                             "Severe error",
