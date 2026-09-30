@@ -25,7 +25,7 @@ from app.data_access.counterfactuals import (
     METRIC_MODALITY,
     METRIC_ORDER,
     PERIODS,
-    load_primary_counterfactual_surface,
+    load_raw23_weekly_runtime,
     get_child_taxi_zone_profiles,
     get_complete_profiles,
     get_counterfactual_profiles,
@@ -1165,62 +1165,39 @@ def build_weekly_multimodal_braid(
     daypart: str = "All dayparts",
 ) -> pd.DataFrame:
     """
-    Build one geography's five-metric counterfactual profile by policy week.
+    Return one geography's weekly multimodal storyline from preaggregated cells.
 
-    WHY:
-    Raw 23's storyline uses the frozen row-level gap in Pre-CP MAE units.
-    Filtering geography and temporal buckets during the Parquet read preserves
-    that exact contract while avoiding a full Raw 23 runtime materialization.
+    WHY: the old implementation scanned and grouped the exact-row Raw 23 surface
+    on new selections. The serving artifact already stores weekly sufficient
+    statistics by temporal bucket, so the app only combines the handful of
+    buckets selected by the reader.
     """
-    if grouping_name not in GROUPINGS:
-        raise ValueError(f"Unsupported grouping: {grouping_name}")
-
-    valid_buckets = tuple(
-        sorted(
-            BRAID_DAY_TYPE_BUCKETS[day_type]
-            & BRAID_DAYPART_BUCKETS[daypart]
-        )
+    valid_buckets = (
+        BRAID_DAY_TYPE_BUCKETS[day_type]
+        & BRAID_DAYPART_BUCKETS[daypart]
     )
 
-    geography_filters = {
-        "taxi_zone_id": None,
-        "borough": None,
-        "cbd_spatial_category": None,
-        "pre_cp_mobility_environment": None,
-    }
+    source = load_raw23_weekly_runtime()
 
-    group_column = GROUPINGS[grouping_name]["group_id"]
-
-    if group_column == "taxi_zone_id":
-        geography_filters["taxi_zone_id"] = int(float(group_value))
-    elif group_column in geography_filters:
-        geography_filters[group_column] = str(group_value)
-    else:
-        raise ValueError(
-            f"Unsupported Raw 23 storyline geography: {grouping_name}"
-        )
-
-    scoped = load_primary_counterfactual_surface(
-        temporal_buckets=valid_buckets,
-        **geography_filters,
+    mask = (
+        source["grouping"].eq(grouping_name)
+        & source["group_value"].astype(str).eq(str(group_value))
+        & source["target_temporal_bucket"].isin(valid_buckets)
     )
+
+    scoped = source.loc[
+        mask,
+        [
+            "week_start",
+            "metric",
+            "horizon",
+            "gap_sum",
+            "support_rows",
+        ],
+    ]
 
     if scoped.empty:
         return pd.DataFrame()
-
-    # Policy-relative weeks begin Sunday Jan. 5, 2025.
-    days_since_launch = (
-        scoped["target_date"]
-        - pd.Timestamp("2025-01-05")
-    ).dt.days
-
-    scoped["week_start"] = (
-        pd.Timestamp("2025-01-05")
-        + pd.to_timedelta(
-            (days_since_launch // 7) * 7,
-            unit="D",
-        )
-    )
 
     weekly = (
         scoped.groupby(
@@ -1229,10 +1206,16 @@ def build_weekly_multimodal_braid(
             dropna=False,
         )
         .agg(
-            gap_mae_units=("counterfactual_gap_mae_units", "mean"),
-            support_rows=("counterfactual_gap_mae_units", "count"),
+            gap_sum=("gap_sum", "sum"),
+            support_rows=("support_rows", "sum"),
         )
         .reset_index()
+    )
+
+    weekly["gap_mae_units"] = np.where(
+        weekly["support_rows"].gt(0),
+        weekly["gap_sum"] / weekly["support_rows"],
+        np.nan,
     )
 
     weekly["horizon"] = pd.to_numeric(
@@ -1246,7 +1229,9 @@ def build_weekly_multimodal_braid(
             & weekly["horizon"].isin(HORIZONS)
             & weekly["gap_mae_units"].notna()
         ]
-        .sort_values(["metric", "horizon", "week_start"])
+        .sort_values(
+            ["metric", "horizon", "week_start"]
+        )
         .reset_index(drop=True)
     )
 
