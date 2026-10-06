@@ -8,6 +8,31 @@ st.set_page_config(
     layout="wide",
 )
 
+st.markdown(
+    """
+    <style>
+    /* Let sidebar section headers use the full width and wrap cleanly. */
+    [data-testid="stSidebarNav"] [data-testid="stNavSectionHeader"] {
+        font-size: 0.88rem !important;
+        line-height: 1.2 !important;
+        max-width: none !important;
+        width: 100% !important;
+        overflow: visible !important;
+        text-overflow: clip !important;
+        white-space: normal !important;
+    }
+
+    [data-testid="stSidebarNav"] [data-testid="stNavSectionHeader"] * {
+        max-width: none !important;
+        overflow: visible !important;
+        text-overflow: clip !important;
+        white-space: normal !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 pages = {
     "Overview": [
         st.Page(
@@ -17,7 +42,7 @@ pages = {
         ),
     ],
 
-    "Mobility Patterns": [
+    "What changed?": [
         st.Page(
             "views/raw_01_temporal_did_mobility_change.py",
             title="Temporal Overview",
@@ -43,9 +68,6 @@ pages = {
             title="Zone Profile",
             icon=":material/location_on:",
         ),
-    ],
-
-    "Relationships & Dynamics": [
         st.Page(
             "views/raw_05_mode_relationships_move_together.py",
             title="Mode Relationships",
@@ -56,75 +78,42 @@ pages = {
             title="Mode Divergences",
             icon=":material/compare_arrows:",
         ),
-        st.Page(
-            "views/raw_08_rolling_mode_relationships.py",
-            title="Rolling Relationships",
-            icon=":material/timeline:",
-        ),
-        st.Page(
-            "views/raw_09_weather_relationships.py",
-            title="Weather Relationships",
-            icon=":material/cloud:",
-        ),
-        st.Page(
-            "views/raw_10_mobility_pulse.py",
-            title="Mobility Pulse",
-            icon=":material/travel_explore:",
-        ),
-        st.Page(
-            "views/raw_11_cyclical_time.py",
-            title="Cyclical Time",
-            icon=":material/cycle:",
-        ),
     ],
 
-    "Mobility Types & Drivers": [
-        st.Page(
-            "views/raw_16_mobility_environment_profiler.py",
-            title="Mobility Environment Profiler",
-            icon=":material/account_tree:",
-        ),
-        st.Page(
-            "views/raw_26_mobility_day_types.py",
-            title="Mobility Day Types",
-            icon=":material/calendar_month:",
-        ),
+    "What became unusual?": [
         st.Page(
             "views/raw_27_mobility_drivers.py",
             title="Mobility Drivers",
             icon=":material/stacked_line_chart:",
         ),
-    ],
-
-    "Stress & Anomalies": [
         st.Page(
             "views/raw_12_stress_anomalies_over_time.py",
-            title="Stress Anomaly Temporal Explorer",
+            title="Stress Over Time",
             icon=":material/monitoring:",
         ),
         st.Page(
             "views/raw_13_stress_anomaly_spatial_explorer.py",
-            title="Stress Anomaly Spatial Explorer",
+            title="Stress Geography",
             icon=":material/location_searching:",
         ),
         st.Page(
             "views/raw_14_mobility_stress_patterns.py",
-            title="Stress Anomaly Patterns",
+            title="Stress Patterns",
             icon=":material/analytics:",
         ),
         st.Page(
             "views/raw_15_stress_anomaly_event_profiler.py",
-            title="Stress Anomaly Deep Dive",
+            title="Stress Event Deep Dive",
             icon=":material/troubleshoot:",
         ),
         st.Page(
             "views/raw_17_weather_stress_episode_explorer.py",
-            title="Weather and Stress Episodes",
+            title="Weather & Stress Episodes",
             icon=":material/weather_mix:",
         ),
     ],
 
-    "Forecasting & Reliability": [
+    "Can we predict it?": [
         st.Page(
             "views/raw_18_forecast_scorecard.py",
             title="Forecast Scorecard",
@@ -142,7 +131,7 @@ pages = {
         ),
     ],
 
-    "No-CP Counterfactual Mobility": [
+    "What if congestion pricing hadn’t begun?": [
         st.Page(
             "views/raw_21_counterfactual_overview.py",
             title="Counterfactual Overview",
@@ -170,7 +159,40 @@ pages = {
         ),
     ],
 
-    "About the Project": [
+    "Other ways to see the city": [
+        st.Page(
+            "views/raw_08_rolling_mode_relationships.py",
+            title="Rolling Relationships",
+            icon=":material/timeline:",
+        ),
+        st.Page(
+            "views/raw_09_weather_relationships.py",
+            title="Weather Relationships",
+            icon=":material/cloud:",
+        ),
+        st.Page(
+            "views/raw_10_mobility_pulse.py",
+            title="Mobility Pulse",
+            icon=":material/travel_explore:",
+        ),
+        st.Page(
+            "views/raw_11_cyclical_time.py",
+            title="Cyclical Time",
+            icon=":material/cycle:",
+        ),
+        st.Page(
+            "views/raw_16_mobility_environment_profiler.py",
+            title="Mobility Environment Profiler",
+            icon=":material/account_tree:",
+        ),
+        st.Page(
+            "views/raw_26_mobility_day_types.py",
+            title="Mobility Day Types",
+            icon=":material/calendar_month:",
+        ),
+    ],
+
+    "About the project": [
         st.Page(
             "views/about_source_pipeline.py",
             title="About the Source Pipeline",

@@ -1416,6 +1416,64 @@ archetype = hero["archetype"]
 strongest = hero["strongest"]
 explorer_members = explorer["members"]
 
+st.header("What defines a mobility environment?")
+st.write(
+    "Start with one learned group: the Post-CP **Long-Trip Fast-Mobility Zones** "
+    "environment. Each bar shows one headline mobility measure relative to the citywide "
+    "feature norm: right of zero is above the norm and left is below. These ten averages "
+    "make the environment readable, while the actual cluster assignment uses the full "
+    "110-feature mobility pattern."
+)
+
+st.altair_chart(_archetype_chart(archetype), width="stretch")
+hero_low = archetype.iloc[0]
+hero_high = archetype.iloc[-1]
+render_chart_insight(
+    f"This environment is distinguished most by **low {hero_low['metric_label']}** "
+    f"({float(hero_low['cluster_signal_zscore']):+.1f} relative to the city norm) and "
+    f"**high {hero_high['metric_label']}** "
+    f"({float(hero_high['cluster_signal_zscore']):+.1f}). Membership is determined by "
+    "the complete 110-feature mobility pattern—not by geography or either metric alone."
+)
+
+hero_1, hero_2, hero_3, hero_4 = st.columns(4)
+hero_1.metric("Post-CP members", f"{len(hero_members):,}")
+hero_2.metric("New since Pre-CP", f"{int(hero['entrants']):,}")
+hero_3.metric(
+    "Boundary members",
+    f"{int(hero_members['distance_ratio'].ge(0.90).sum()):,}",
+    help="Members whose closest competing centroid is almost as near as the selected centroid.",
+)
+hero_4.metric(
+    "Strongest defining signal",
+    f"{float(strongest['cluster_signal_zscore']):+.1f}",
+    help=f"{strongest['metric_label']}; standardized units from the city norm.",
+)
+
+st.markdown("#### A useful boundary example: Broad Channel")
+boundary_1, boundary_2, boundary_3 = st.columns(3)
+boundary_1.metric(
+    "Boundary example period",
+    "Post-CP",
+    help=f"Broad Channel belonged to {hero['pre_cluster']} Pre-CP.",
+)
+boundary_2.metric(
+    "Selected-centroid distance", f"{float(hero_member['assigned_distance']):.3f}"
+)
+boundary_3.metric(
+    "Closest-competitor distance",
+    f"{float(hero_member['nearest_alternative_distance']):.3f}",
+    help=str(hero_member["nearest_alternative_cluster_name"]),
+)
+render_chart_insight(
+    f"Broad Channel changed from **{hero['pre_cluster']} Pre-CP** to "
+    f"**{HERO_CLUSTER} Post-CP**, but the Post-CP winner leads its closest competitor "
+    f"by only **{float(hero_member['assignment_margin']):.3f} distance units**. It is "
+    "therefore a boundary assignment worth investigating—not a textbook example."
+)
+
+st.divider()
+
 st.header("How do we group NYC Taxi Zones?")
 st.write(
     "Two recurring geography systems appear throughout the Showcase. **Mobility "
@@ -1478,61 +1536,7 @@ render_chart_insight(
     "separate makes the recurring filters elsewhere in the Showcase easier to interpret."
 )
 
-st.header("What defines a mobility environment?")
-st.write(
-    "Now look inside one of the learned groups. The fixed example is the Post-CP "
-    "**Long-Trip Fast-Mobility Zones** environment. Each bar shows one headline "
-    "mobility measure relative to the citywide feature norm: right of zero is above "
-    "the norm and left is below. These ten averages make the environment readable, "
-    "while the actual cluster assignment uses the full 110-feature mobility pattern."
-)
-
-st.altair_chart(_archetype_chart(archetype), width="stretch")
-hero_low = archetype.iloc[0]
-hero_high = archetype.iloc[-1]
-render_chart_insight(
-    f"This environment is distinguished most by **low {hero_low['metric_label']}** "
-    f"({float(hero_low['cluster_signal_zscore']):+.1f} relative to the city norm) and "
-    f"**high {hero_high['metric_label']}** "
-    f"({float(hero_high['cluster_signal_zscore']):+.1f}). Membership is determined by "
-    "the complete 110-feature mobility pattern—not by geography or either metric alone."
-)
-
-hero_1, hero_2, hero_3, hero_4 = st.columns(4)
-hero_1.metric("Post-CP members", f"{len(hero_members):,}")
-hero_2.metric("New since Pre-CP", f"{int(hero['entrants']):,}")
-hero_3.metric(
-    "Boundary members",
-    f"{int(hero_members['distance_ratio'].ge(0.90).sum()):,}",
-    help="Members whose closest competing centroid is almost as near as the selected centroid.",
-)
-hero_4.metric(
-    "Strongest defining signal",
-    f"{float(strongest['cluster_signal_zscore']):+.1f}",
-    help=f"{strongest['metric_label']}; standardized units from the city norm.",
-)
-
-st.markdown("#### A useful boundary example: Broad Channel")
-boundary_1, boundary_2, boundary_3 = st.columns(3)
-boundary_1.metric(
-    "Boundary example period",
-    "Post-CP",
-    help=f"Broad Channel belonged to {hero['pre_cluster']} Pre-CP.",
-)
-boundary_2.metric(
-    "Selected-centroid distance", f"{float(hero_member['assigned_distance']):.3f}"
-)
-boundary_3.metric(
-    "Closest-competitor distance",
-    f"{float(hero_member['nearest_alternative_distance']):.3f}",
-    help=str(hero_member["nearest_alternative_cluster_name"]),
-)
-render_chart_insight(
-    f"Broad Channel changed from **{hero['pre_cluster']} Pre-CP** to "
-    f"**{HERO_CLUSTER} Post-CP**, but the Post-CP winner leads its closest competitor "
-    f"by only **{float(hero_member['assignment_margin']):.3f} distance units**. It is "
-    "therefore a boundary assignment worth investigating—not a textbook example."
-)
+st.divider()
 
 with exploration_section(
     key="raw16_exploration_area",

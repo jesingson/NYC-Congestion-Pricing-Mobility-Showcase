@@ -805,16 +805,16 @@ _initialize_state(
 
 st.caption("WEATHER RELATIONSHIPS")
 
-st.title("How did weather relate to mobility?")
+st.title("How consistent were weather–mobility relationships across NYC?")
 
 st.write(
-    "Weather changes alongside many of the same daily and seasonal patterns that shape "
-    "transportation. This page asks whether mobility demand and speeds tended to move "
-    "with weather conditions, while keeping association separate from an explanation "
-    "of why mobility changed."
+    "Weather and mobility often move together, but not in the same way everywhere or at "
+    "every time of week. This page starts with one clear citywide relationship, then asks "
+    "whether that pattern holds across boroughs, mobility measures, and time contexts. "
+    "These are associations, not explanations of why mobility changed."
 )
 
-st.header("How did temperature relate to weekday-evening bus speed?")
+st.header("Start with one clear citywide relationship")
 
 hero_pair = build_weather_relationship_pair_data(
     mobility_metric="avg_bus_speed",
@@ -851,10 +851,10 @@ hero_post_value = (
 
 st.write(
     "The fixed opening example pairs **citywide Bus Average Speed** with "
-    "**Temperature** on weekday evenings. Each point is a matched observation. "
-    "Spearman correlation summarizes whether the two measures generally move in the "
-    "same or opposite direction; the before/after cards show whether that association "
-    "looked similar on the two sides of the congestion-pricing launch."
+    "**Temperature** on weekday evenings because it provides a clear relationship to "
+    "start from. Each point is a matched observation. The more important question is "
+    "whether this citywide pattern still looks the same when we change the geography, "
+    "mobility measure, or time of week."
 )
 
 hero_card_1, hero_card_2, hero_card_3 = st.columns(3)
@@ -895,13 +895,13 @@ hero_headline, hero_body = _dynamic_interpretation(
 )
 render_chart_insight(f"**{hero_headline}.** {hero_body}")
 
-st.header("But that relationship was not the same across NYC")
+st.header("The citywide pattern did not hold equally across NYC")
 
 st.write(
-    "The citywide example is useful for seeing the relationship, but it can hide "
-    "meaningful geographic variation. Temperature produced the clearest recurring "
-    "weather–mobility relationships in the broader borough scan, and weekend-overnight "
-    "bus speed provides one of the clearest contrasts."
+    "The citywide example makes the relationship easy to see, but borough-level results "
+    "show why one citywide coefficient is not enough. Temperature produced the clearest "
+    "recurring weather–mobility relationships in the broader scan, and weekend-overnight "
+    "bus speed shows how sharply the same relationship can vary across boroughs."
 )
 
 borough_summary = build_borough_relationship_summary(
@@ -994,14 +994,14 @@ st.caption(
 # From observed relationship to possible explanations
 # ---------------------------------------------------------------------
 
-st.header("What might be behind the bus-speed pattern?")
+st.header("Why might the relationship vary?")
 
 st.write(
-    "The relationship is clear, but the reason is not. One possibility is "
-    "passenger behavior: colder weather could mean fewer people waiting for or "
-    "boarding buses, shortening dwell times at stops and allowing buses to move "
-    "faster. Road conditions, traffic volumes, seasonal travel patterns, and "
-    "other factors could also contribute."
+    "The relationship is visible, but this analysis cannot tell us why it differs across "
+    "places or times. One possibility is passenger behavior: colder weather could mean "
+    "fewer people waiting for or boarding buses, shortening dwell times at stops and "
+    "allowing buses to move faster. Road conditions, traffic volumes, seasonal travel "
+    "patterns, and other factors could also contribute."
 )
 
 st.info(
@@ -1020,13 +1020,13 @@ st.write(
 # Temperature and travel demand
 # ---------------------------------------------------------------------
 
-st.header("Temperature was related to travel demand, too")
+st.header("The pattern also changes when we look at demand")
 
 st.write(
-    "Subway ridership provides a different view of the weather relationship. "
-    "Instead of measuring how quickly vehicles moved, it measures how much the "
-    "system was used. During weekday evenings, the relationship between "
-    "temperature and subway ridership again varied across boroughs."
+    "Bus speed is only one part of the story. Subway ridership asks whether weather was "
+    "also associated with how much people traveled, not just how quickly transportation "
+    "moved. During weekday evenings, the temperature–ridership relationship again varied "
+    "across boroughs."
 )
 
 demand_summary = build_borough_relationship_summary(
@@ -1509,11 +1509,12 @@ with exploration_section(
 
 st.markdown("### What this page establishes")
 st.markdown(
-    "Temperature produced the clearest recurring relationships in the broader weather "
-    "scan, and the Borough comparison shows why citywide averages are not the whole "
-    "story. More broadly, the strength and direction of weather–mobility relationships "
-    "depend on the measure, geography, and time of week being compared. These patterns "
-    "provide context for mobility variation; they do not establish that weather caused it."
+    "Weather–mobility relationships were not uniform across NYC. Temperature produced "
+    "some of the clearest recurring patterns in the broader weather scan, but their "
+    "strength and direction changed with the mobility measure, borough, and time of week. "
+    "The useful takeaway is therefore not one citywide weather coefficient, but where and "
+    "when those relationships hold, weaken, or change. These patterns provide context for "
+    "mobility variation; they do not establish that weather caused it."
 )
 
 with st.expander("How this page works", expanded=False):
