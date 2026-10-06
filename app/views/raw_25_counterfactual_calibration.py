@@ -23,6 +23,7 @@ import streamlit as st
 
 from app.data_access.counterfactuals import (
     load_counterfactual_raw25_inputs,
+    load_counterfactual_temporal_explorer_metric,
 )
 from app.utils.project_branding import (
     BRAND_COLORS,
@@ -102,6 +103,20 @@ POLICY_LABELS = {
     "adjacent_to_cbd": "Adjacent to CBD",
     "gateway_to_cbd": "Gateway to CBD",
     "non_cbd": "Outside CBD / adjacent / gateway",
+}
+
+
+TEMPORAL_BUCKET_LABELS = {
+    "weekday_overnight": "Weekday · Overnight",
+    "weekday_am_peak": "Weekday · AM peak",
+    "weekday_midday": "Weekday · Midday",
+    "weekday_pm_peak": "Weekday · PM peak",
+    "weekday_evening": "Weekday · Evening",
+    "weekend_overnight": "Weekend · Overnight",
+    "weekend_am_peak": "Weekend · AM peak",
+    "weekend_midday": "Weekend · Midday",
+    "weekend_pm_peak": "Weekend · PM peak",
+    "weekend_evening": "Weekend · Evening",
 }
 
 
@@ -1486,6 +1501,616 @@ def build_mae_ruler(example_mae: float) -> go.Figure:
 
 
 # ---------------------------------------------------------------------
+# Worked example — make the ×MAE yardstick visible on a real series
+# ---------------------------------------------------------------------
+
+WORKED_METRIC = "taxi_avg_trip_speed"
+WORKED_HORIZON = 1
+
+
+@st.cache_data(show_spinner=False)
+def build_worked_example_weekly() -> tuple[pd.DataFrame, str, str]:
+    """
+    Return one fixed Taxi Zone × temporal-bucket trajectory for the MAE lesson.
+
+    WHY:
+    Raw 25's calibration denominator is the ordinary row-level Pre-CP validation
+    MAE for a Metric × Horizon job. Keeping one Taxi Zone and one temporal bucket
+    preserves that same native-unit grain, so the ±1 MAE band is a true visual
+    yardstick rather than an apples-to-oranges band around an aggregate series.
+    """
+    source = load_counterfactual_temporal_explorer_metric(WORKED_METRIC).copy()
+
+    required = {
+        "week_start",
+        "target_temporal_bucket",
+        "taxi_zone_id",
+        "zone",
+        "period_complete",
+        "observed_level",
+        f"no_cp_h{WORKED_HORIZON}",
+    }
+    missing = sorted(required.difference(source.columns))
+    if missing:
+        raise RuntimeError(
+            "Raw 25 worked example is missing temporal counterfactual columns: "
+            + ", ".join(missing)
+        )
+
+    source["week_start"] = pd.to_datetime(source["week_start"], errors="coerce")
+    source = source.loc[
+        source["week_start"].notna()
+        & source["period_complete"].fillna(False).astype(bool)
+        & source["target_temporal_bucket"].eq("weekday_pm_peak")
+    ].copy()
+
+    # Prefer a familiar, high-volume location for the teaching example.
+    # Fall back to the best-supported physical Taxi Zone if the label changes.
+    preferred = source.loc[
+        source["zone"].astype(str).str.contains("Times Sq", case=False, na=False)
+    ].copy()
+
+    if preferred.empty:
+        support = (
+            source.groupby(["taxi_zone_id", "zone"], observed=True)
+            .size()
+            .reset_index(name="rows")
+            .sort_values(["rows", "taxi_zone_id"], ascending=[False, True])
+        )
+        if support.empty:
+            raise RuntimeError("No supported Taxi Zone is available for the worked example.")
+        selected_zone_id = support.iloc[0]["taxi_zone_id"]
+        selected_zone_label = str(support.iloc[0]["zone"])
+    else:
+        selected_zone_id = preferred.iloc[0]["taxi_zone_id"]
+        selected_zone_label = str(preferred.iloc[0]["zone"])
+
+    selected = source.loc[
+        pd.to_numeric(source["taxi_zone_id"], errors="coerce").eq(
+            float(selected_zone_id)
+        )
+    ].copy()
+
+    if selected.duplicated("week_start").any():
+        raise RuntimeError(
+            "Worked example expected one row per week for one Taxi Zone × temporal bucket."
+        )
+
+    selected["observed"] = pd.to_numeric(selected["observed_level"], errors="coerce")
+    selected["no_cp"] = pd.to_numeric(
+        selected[f"no_cp_h{WORKED_HORIZON}"],
+        errors="coerce",
+    )
+
+    selected = (
+        selected.loc[:, ["week_start", "observed", "no_cp"]]
+        .replace([np.inf, -np.inf], np.nan)
+        .dropna(subset=["observed", "no_cp"])
+        .sort_values("week_start")
+        .reset_index(drop=True)
+    )
+
+    return selected, selected_zone_label, TEMPORAL_BUCKET_LABELS["weekday_pm_peak"]
+
+
+def worked_example_mae(summary: pd.DataFrame) -> float:
+    """Return the frozen native Pre-CP MAE for Taxi average speed at h=1."""
+    match = summary.loc[
+        summary["metric"].eq(WORKED_METRIC)
+        & summary["horizon"].eq(WORKED_HORIZON),
+        "pre_cp_validation_system_mae",
+    ]
+
+    if len(match) != 1:
+        raise RuntimeError(
+            "Expected exactly one Taxi average speed · h=1 native MAE row."
+        )
+
+    value = float(match.iloc[0])
+    if not np.isfinite(value) or value <= 0:
+        raise RuntimeError("Taxi average speed · h=1 native MAE must be positive.")
+
+    return value
+
+
+def build_worked_example_figure(
+    weekly: pd.DataFrame,
+    mae: float,
+) -> tuple[go.Figure, pd.Series, float]:
+    """
+    Plot observed mobility, its ±1 MAE yardstick, and the estimated no-CP path.
+
+    The band is intentionally centered on observed mobility. It answers the visual
+    question: how far would the no-CP estimate have to sit from what actually happened
+    before the separation exceeds one ordinary Pre-CP forecast miss?
+    """
+    plot = weekly.copy()
+    plot["band_low"] = plot["observed"] - mae
+    plot["band_high"] = plot["observed"] + mae
+    plot["gap"] = plot["no_cp"] - plot["observed"]
+    plot["gap_xmae"] = plot["gap"].abs() / mae
+
+    largest = plot.loc[plot["gap"].abs().idxmax()].copy()
+    outside_share = float(100.0 * plot["gap"].abs().gt(mae).mean())
+
+    figure = go.Figure()
+
+    # Draw the band first so both trajectories remain visually dominant.
+    figure.add_trace(
+        go.Scatter(
+            x=plot["week_start"],
+            y=plot["band_low"],
+            mode="lines",
+            line={"width": 0},
+            hoverinfo="skip",
+            showlegend=False,
+        )
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=plot["week_start"],
+            y=plot["band_high"],
+            mode="lines",
+            fill="tonexty",
+            fillcolor="rgba(131, 197, 190, 0.20)",
+            line={"width": 0},
+            name="±1 ordinary Pre-CP MAE",
+            hoverinfo="skip",
+        )
+    )
+
+    figure.add_trace(
+        go.Scatter(
+            x=plot["week_start"],
+            y=plot["observed"],
+            mode="lines",
+            name="Observed",
+            line={
+                "color": BRAND_COLORS["dark_teal"],
+                "width": 3.2,
+            },
+            hovertemplate=(
+                "<b>Observed</b><br>"
+                "%{x|%b %d, %Y}<br>"
+                "%{y:.3f} mph<extra></extra>"
+            ),
+        )
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=plot["week_start"],
+            y=plot["no_cp"],
+            mode="lines",
+            name="Estimated no-CP · h=1",
+            line={
+                "color": BRAND_COLORS["terracotta"],
+                "width": 2.8,
+                "dash": "dash",
+            },
+            hovertemplate=(
+                "<b>Estimated no-CP · h=1</b><br>"
+                "%{x|%b %d, %Y}<br>"
+                "%{y:.3f} mph<extra></extra>"
+            ),
+        )
+    )
+
+    figure.add_trace(
+        go.Scatter(
+            x=[largest["week_start"]],
+            y=[largest["no_cp"]],
+            mode="markers",
+            marker={
+                "size": 12,
+                "color": BRAND_COLORS["terracotta"],
+                "line": {"color": "white", "width": 1.2},
+            },
+            name="Largest gap",
+            showlegend=False,
+            hovertemplate=(
+                "<b>Largest absolute gap</b><br>"
+                "%{x|%b %d, %Y}<br>"
+                f"Observed: {float(largest['observed']):.3f} mph<br>"
+                f"Estimated no-CP: {float(largest['no_cp']):.3f} mph<br>"
+                f"Gap: {float(largest['gap']):+.3f} mph<br>"
+                f"|Gap|: {float(largest['gap_xmae']):.2f}× MAE"
+                "<extra></extra>"
+            ),
+        )
+    )
+
+    direction = (
+        "no-CP above observed"
+        if float(largest["gap"]) > 0
+        else "observed above no-CP"
+    )
+    figure.add_annotation(
+        x=largest["week_start"],
+        y=largest["no_cp"],
+        text=(
+            "<b>Largest gap</b><br>"
+            f"{abs(float(largest['gap'])):.2f} mph · "
+            f"{float(largest['gap_xmae']):.2f}× MAE<br>"
+            f"{direction}"
+        ),
+        showarrow=True,
+        arrowhead=2,
+        ax=-72,
+        ay=-72,
+        bgcolor="rgba(255,255,255,0.92)",
+        bordercolor="rgba(226,149,120,0.45)",
+        borderwidth=1,
+        font={"size": 11, "color": "#335C67"},
+    )
+
+    figure = apply_branding(figure)
+    figure.update_layout(
+        title={"text": ""},
+        height=475,
+        hovermode="x unified",
+        margin={"l": 70, "r": 25, "t": 35, "b": 65},
+        legend={
+            "orientation": "h",
+            "yanchor": "bottom",
+            "y": 1.02,
+            "xanchor": "left",
+            "x": 0,
+        },
+    )
+    figure.update_xaxes(title=None)
+    figure.update_yaxes(
+        title_text="Taxi average speed (mph)",
+        gridcolor="rgba(131, 197, 190, 0.18)",
+    )
+
+    return figure, largest, outside_share
+
+
+def worked_example_takeaway(
+    largest: pd.Series,
+    outside_share: float,
+) -> str:
+    """Translate the fixed visual calibration example into one plain-language finding."""
+    gap = float(largest["gap"])
+    xmae = float(largest["gap_xmae"])
+    date_label = pd.Timestamp(largest["week_start"]).strftime("%b %d, %Y")
+
+    relation = (
+        "the estimated no-CP speed was above observed speed"
+        if gap > 0
+        else "observed speed was above the estimated no-CP speed"
+    )
+
+    if outside_share >= 60:
+        persistence = (
+            "The separation was therefore often larger than routine forecast error, "
+            "not just at one isolated peak."
+        )
+    elif outside_share >= 25:
+        persistence = (
+            "The separation exceeded routine forecast error in a meaningful share of "
+            "weeks, but not consistently across the full post-CP period."
+        )
+    else:
+        persistence = (
+            "Most weeks remained within one ordinary forecast-error unit, with larger "
+            "separations appearing only occasionally."
+        )
+
+    return (
+        f"For this fixed **Taxi average speed · h=1** example, the no-CP path sits "
+        f"outside the **±1 MAE** band in **{outside_share:.1f}%** of post-CP weeks. "
+        f"The largest gap occurs in the week of **{date_label}**, when {relation} by "
+        f"**{abs(gap):.2f} mph**, or **{xmae:.2f}×** the model's ordinary Pre-CP "
+        f"error. {persistence}"
+    )
+
+
+
+def _scope_trajectory_zones(
+    frame: pd.DataFrame,
+    *,
+    geography_type: str,
+    geography_id: object,
+) -> pd.DataFrame:
+    """Limit row-level trajectories to Taxi Zones inside the selected geography."""
+    if geography_type == "Systemwide":
+        return frame.copy()
+
+    column = {
+        "Borough": "borough",
+        "Policy geography": "cbd_spatial_category",
+        "Mobility environment": "pre_cp_mobility_environment",
+        "Taxi Zone": "taxi_zone_id",
+    }.get(geography_type)
+
+    if column is None:
+        raise ValueError(f"Unsupported geography type: {geography_type}")
+
+    if geography_type == "Taxi Zone":
+        mask = pd.to_numeric(frame[column], errors="coerce").eq(float(geography_id))
+    else:
+        mask = frame[column].astype(str).eq(str(geography_id))
+
+    return frame.loc[mask].copy()
+
+
+def trajectory_zone_options(
+    source: pd.DataFrame,
+    *,
+    geography_type: str,
+    geography_id: object,
+    temporal_bucket: str,
+) -> pd.DataFrame:
+    """Return supported physical Taxi Zones for one explorer trajectory context."""
+    scoped = _scope_trajectory_zones(
+        source,
+        geography_type=geography_type,
+        geography_id=geography_id,
+    )
+    scoped = scoped.loc[
+        scoped["target_temporal_bucket"].eq(temporal_bucket)
+    ].copy()
+
+    if scoped.empty:
+        return pd.DataFrame(columns=["taxi_zone_id", "display_label", "rows"])
+
+    options = (
+        scoped.groupby(
+            ["taxi_zone_id", "zone", "borough"],
+            observed=True,
+            dropna=False,
+        )
+        .size()
+        .reset_index(name="rows")
+    )
+    options = options.loc[
+        options["zone"].astype(str).str.strip().str.lower().ne("unknown")
+    ].copy()
+
+    options["display_label"] = np.where(
+        options["borough"].notna()
+        & options["borough"].astype(str).str.strip().ne("")
+        & options["borough"].astype(str).str.lower().ne("unknown"),
+        options["zone"].astype(str) + " · " + options["borough"].astype(str),
+        options["zone"].astype(str),
+    )
+
+    return (
+        options.sort_values(["display_label", "taxi_zone_id"], kind="stable")
+        .reset_index(drop=True)
+    )
+
+
+def build_selected_trajectory(
+    source: pd.DataFrame,
+    *,
+    taxi_zone_id: object,
+    temporal_bucket: str,
+    horizon: int,
+) -> pd.DataFrame:
+    """
+    Return one row per week at the calibration-valid native-unit grain.
+
+    WHY:
+    The ±1 MAE band is valid only when the plotted gap uses the same row-level
+    native scale as the frozen Pre-CP validation MAE. One Taxi Zone × temporal
+    bucket × Metric × Horizon preserves that contract exactly.
+    """
+    scoped = source.loc[
+        pd.to_numeric(source["taxi_zone_id"], errors="coerce").eq(float(taxi_zone_id))
+        & source["target_temporal_bucket"].eq(temporal_bucket)
+        & source["period_complete"].fillna(False).astype(bool)
+    ].copy()
+
+    if scoped.empty:
+        return pd.DataFrame()
+
+    if scoped.duplicated("week_start").any():
+        raise RuntimeError(
+            "Interactive calibration trajectory expected one row per week for "
+            "one Taxi Zone × temporal bucket."
+        )
+
+    scoped["week_start"] = pd.to_datetime(scoped["week_start"], errors="coerce")
+    scoped["observed"] = pd.to_numeric(scoped["observed_level"], errors="coerce")
+    scoped["no_cp"] = pd.to_numeric(scoped[f"no_cp_h{int(horizon)}"], errors="coerce")
+
+    return (
+        scoped.loc[:, ["week_start", "observed", "no_cp"]]
+        .replace([np.inf, -np.inf], np.nan)
+        .dropna(subset=["week_start", "observed", "no_cp"])
+        .sort_values("week_start")
+        .reset_index(drop=True)
+    )
+
+
+def native_mae_for_job(
+    summary: pd.DataFrame,
+    *,
+    metric: str,
+    horizon: int,
+) -> float:
+    """Return the frozen native Pre-CP validation MAE for one forecasting job."""
+    match = summary.loc[
+        summary["metric"].eq(metric)
+        & summary["horizon"].eq(int(horizon)),
+        "pre_cp_validation_system_mae",
+    ]
+
+    if len(match) != 1:
+        raise RuntimeError(
+            f"Expected one native MAE row for {metric} · h={int(horizon)}."
+        )
+
+    value = float(match.iloc[0])
+    if not np.isfinite(value) or value <= 0:
+        raise RuntimeError("Native MAE must be finite and positive.")
+
+    return value
+
+
+def build_trajectory_figure(
+    weekly: pd.DataFrame,
+    *,
+    mae: float,
+    metric: str,
+    horizon: int,
+) -> tuple[go.Figure, pd.Series, float]:
+    """Render observed, no-CP, and ±1 MAE for one interactive row-level trajectory."""
+    plot = weekly.copy()
+    plot["band_low"] = plot["observed"] - mae
+    plot["band_high"] = plot["observed"] + mae
+    plot["gap"] = plot["no_cp"] - plot["observed"]
+    plot["gap_xmae"] = plot["gap"].abs() / mae
+
+    largest = plot.loc[plot["gap"].abs().idxmax()].copy()
+    outside_share = float(100.0 * plot["gap"].abs().gt(mae).mean())
+    unit = METRIC_UNITS[metric]
+
+    figure = go.Figure()
+    figure.add_trace(
+        go.Scatter(
+            x=plot["week_start"],
+            y=plot["band_low"],
+            mode="lines",
+            line={"width": 0},
+            hoverinfo="skip",
+            showlegend=False,
+        )
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=plot["week_start"],
+            y=plot["band_high"],
+            mode="lines",
+            fill="tonexty",
+            fillcolor="rgba(131, 197, 190, 0.20)",
+            line={"width": 0},
+            name="±1 ordinary Pre-CP MAE",
+            hoverinfo="skip",
+        )
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=plot["week_start"],
+            y=plot["observed"],
+            mode="lines",
+            name="Observed",
+            line={"color": BRAND_COLORS["dark_teal"], "width": 3.0},
+            hovertemplate=(
+                "<b>Observed</b><br>%{x|%b %d, %Y}<br>"
+                f"%{{y:,.3f}} {unit}<extra></extra>"
+            ),
+        )
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=plot["week_start"],
+            y=plot["no_cp"],
+            mode="lines",
+            name=f"Estimated no-CP · h={int(horizon)}",
+            line={
+                "color": BRAND_COLORS["terracotta"],
+                "width": 2.7,
+                "dash": "dash",
+            },
+            hovertemplate=(
+                f"<b>Estimated no-CP · h={int(horizon)}</b><br>"
+                "%{x|%b %d, %Y}<br>"
+                f"%{{y:,.3f}} {unit}<extra></extra>"
+            ),
+        )
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=[largest["week_start"]],
+            y=[largest["no_cp"]],
+            mode="markers",
+            marker={
+                "size": 12,
+                "color": BRAND_COLORS["terracotta"],
+                "line": {"color": "white", "width": 1.2},
+            },
+            showlegend=False,
+            hovertemplate=(
+                "<b>Largest absolute gap</b><br>"
+                "%{x|%b %d, %Y}<br>"
+                f"Gap: {float(largest['gap']):+,.3f} {unit}<br>"
+                f"|Gap|: {float(largest['gap_xmae']):.2f}× MAE"
+                "<extra></extra>"
+            ),
+        )
+    )
+
+    figure.add_annotation(
+        x=largest["week_start"],
+        y=largest["no_cp"],
+        text=(
+            "<b>Largest gap</b><br>"
+            f"{abs(float(largest['gap'])):,.2f} {unit} · "
+            f"{float(largest['gap_xmae']):.2f}× MAE"
+        ),
+        showarrow=True,
+        arrowhead=2,
+        ax=-68,
+        ay=-65,
+        bgcolor="rgba(255,255,255,0.92)",
+        bordercolor="rgba(226,149,120,0.45)",
+        borderwidth=1,
+        font={"size": 11, "color": "#335C67"},
+    )
+
+    figure = apply_branding(figure)
+    figure.update_layout(
+        title={"text": ""},
+        height=440,
+        hovermode="x unified",
+        margin={"l": 75, "r": 25, "t": 35, "b": 60},
+        legend={
+            "orientation": "h",
+            "yanchor": "bottom",
+            "y": 1.02,
+            "xanchor": "left",
+            "x": 0,
+        },
+    )
+    figure.update_xaxes(title=None)
+    figure.update_yaxes(
+        title_text=f"{metric_label(metric)} ({unit})",
+        gridcolor="rgba(131, 197, 190, 0.18)",
+    )
+
+    return figure, largest, outside_share
+
+
+def trajectory_takeaway(
+    largest: pd.Series,
+    *,
+    outside_share: float,
+    metric: str,
+    horizon: int,
+    zone_label: str,
+    temporal_bucket: str,
+) -> str:
+    """Explain one reader-selected calibration trajectory without causal overreach."""
+    unit = METRIC_UNITS[metric]
+    gap = float(largest["gap"])
+    xmae = float(largest["gap_xmae"])
+    date_label = pd.Timestamp(largest["week_start"]).strftime("%b %d, %Y")
+
+    return (
+        f"For **{zone_label} · {TEMPORAL_BUCKET_LABELS[temporal_bucket]} · "
+        f"{metric_label(metric)} · h={int(horizon)}**, the estimated no-CP path "
+        f"falls outside the **±1 MAE** yardstick in **{outside_share:.1f}%** of "
+        f"supported weeks. The largest absolute gap occurs in the week of "
+        f"**{date_label}** at **{abs(gap):,.2f} {unit}**, or **{xmae:.2f}× MAE**. "
+        "The band compares gap size with ordinary Pre-CP forecast error; it is not "
+        "a confidence interval or significance test."
+    )
+
+
+# ---------------------------------------------------------------------
 # Page
 # ---------------------------------------------------------------------
 
@@ -1504,89 +2129,17 @@ except FileNotFoundError:
 
 
 # ---------------------------------------------------------------------
-# Opening — establish the native error scale before using ×MAE
+# Opening — minimum context needed to read the hero
 # ---------------------------------------------------------------------
 
-st.markdown("### First, what does an ordinary forecast miss look like?")
+st.markdown("### Put the gap on the model's own error scale")
 st.write(
-    "The counterfactual gap is easier to interpret once we know the forecasting "
-    "system's ordinary error in the original units. The table below shows the "
-    "**Pre-CP validation mean absolute error (MAE)** for every mobility measure "
-    "and forecast horizon. MAE is the average size of an absolute forecast miss: "
-    "lower is better, and the units stay familiar — trips, mph, or riders."
-)
-
-native_mae_table = build_native_mae_table(summary)
-st.dataframe(
-    format_native_mae_table(native_mae_table),
-    width="stretch",
-    hide_index=True,
-)
-
-st.caption(
-    "These numbers are not directly comparable across mobility measures because "
-    "their native units differ. Their role is to establish the ordinary error "
-    "scale for each mobility measure × forecast horizon."
-)
-
-
-# ---------------------------------------------------------------------
-# Bridge — convert a native gap into MAE units
-# ---------------------------------------------------------------------
-
-st.markdown("### Put the counterfactual gap on that same error scale")
-st.write(
-    "For each row, we divide the counterfactual gap by that job's Pre-CP validation "
-    "MAE. This gives a common **×MAE** ruler: a 1× gap is the same size as one "
-    "ordinary average absolute validation error for that forecasting job. A 2× gap "
-    "is twice that error scale. This is a magnitude comparison — **not** a "
+    "Each post-CP counterfactual gap is divided by that forecasting job's "
+    "**Pre-CP validation mean absolute error (MAE)**. A gap of **1× MAE** is the "
+    "same size as one ordinary average absolute Pre-CP forecast miss; **2× MAE** "
+    "is twice that error scale. Treat ×MAE as an **error yardstick**, not a "
     "significance test, confidence level, or causal threshold."
 )
-
-example_row = summary.loc[
-    summary["metric"].eq("taxi_avg_trip_speed")
-    & summary["horizon"].eq(1)
-]
-if len(example_row) != 1:
-    raise RuntimeError("Expected one Taxi average speed · h=1 calibration row.")
-example_mae = float(example_row.iloc[0]["pre_cp_validation_system_mae"])
-
-st.markdown("#### Worked example · Taxi average speed · h=1")
-st.plotly_chart(
-    build_mae_ruler(example_mae),
-    width="stretch",
-    config=PLOT_CONFIG,
-    key="raw25_mae_ruler",
-)
-st.caption(
-    f"Here, ordinary Pre-CP MAE is {example_mae:.2f} mph. A 1.20 mph gap is about "
-    f"0.5× MAE; {example_mae:.2f} mph is 1× MAE; and {2 * example_mae:.2f} mph "
-    "is 2× MAE. The same conversion is done in each job's own native units."
-)
-
-with st.container(border=True):
-    st.markdown("#### So what should I look for?")
-    st.write(
-        "Think of MAE as an **error yardstick**, not a pass/fail threshold. A typical "
-        "gap well below 1× MAE is small compared with the errors this forecasting "
-        "system ordinarily makes, so the observed and no-CP paths are not strongly "
-        "separated on this descriptive error scale. As the gap grows to one, two, "
-        "or several times MAE, that separation becomes increasingly large relative "
-        "to ordinary forecast imprecision. **Bigger is not worse**: a real post-CP mobility "
-        "shift—whatever its cause—could produce a very large gap."
-    )
-    st.write(
-        "Then check **h=1, h=2, and h=5 together for the same mobility measure**. "
-        "If all three tell a similar story, the magnitude conclusion is less dependent "
-        "on forecast horizon. If they differ sharply, the apparent separation is more "
-        "horizon-sensitive."
-    )
-    st.caption(
-        "There is no magic cutoff at 1× or 2× MAE. These comparisons do not test a "
-        "null hypothesis, establish statistical significance, or identify why the "
-        "actual and no-CP paths differ."
-    )
-
 
 # ---------------------------------------------------------------------
 # Hero — all 15 systemwide calibration jobs
@@ -1618,6 +2171,146 @@ st.caption(
     "significance threshold."
 )
 
+
+# ---------------------------------------------------------------------
+# Fixed visual example — show what 1× MAE looks like through time
+# ---------------------------------------------------------------------
+
+st.markdown("### What does 1× MAE look like on a real post-CP series?")
+st.write(
+    "The summary above puts all 15 jobs on the same error scale. This fixed "
+    "**Taxi average speed · h=1** example keeps one Taxi Zone and one time-of-week "
+    "bucket so the native-unit gap stays on the same grain as the MAE yardstick. "
+    "The shaded region is **±1 ordinary Pre-CP MAE around observed speed**."
+)
+
+worked_weekly, worked_zone_label, worked_bucket_label = build_worked_example_weekly()
+worked_mae = worked_example_mae(summary)
+worked_figure, worked_largest, worked_outside_share = build_worked_example_figure(
+    worked_weekly,
+    worked_mae,
+)
+
+worked_cols = st.columns(4)
+worked_cols[0].metric("Ordinary error scale", f"{worked_mae:.2f} mph")
+worked_cols[1].metric(
+    "Largest post-CP gap",
+    f"{abs(float(worked_largest['gap'])):.2f} mph",
+)
+worked_cols[2].metric(
+    "Largest gap in ×MAE",
+    f"{float(worked_largest['gap_xmae']):.2f}×",
+)
+worked_cols[3].metric(
+    "Weeks outside ±1 MAE",
+    f"{worked_outside_share:.1f}%",
+)
+
+st.plotly_chart(
+    worked_figure,
+    width="stretch",
+    config=PLOT_CONFIG,
+    key="raw25_worked_mae_timeseries",
+)
+
+st.caption(
+    f"Fixed worked example · {worked_zone_label} · {worked_bucket_label} · "
+    "Taxi average speed · h=1. The band is a visual error yardstick, not a "
+    "confidence interval or statistical-significance region."
+)
+
+render_chart_insight(
+    worked_example_takeaway(
+        worked_largest,
+        worked_outside_share,
+    )
+)
+
+
+# ---------------------------------------------------------------------
+# Optional orientation — deeper explanation of the ×MAE scale
+# ---------------------------------------------------------------------
+
+with st.expander("How to read the ×MAE scale", expanded=False):
+    st.markdown("### First, what does an ordinary forecast miss look like?")
+    st.write(
+        "The counterfactual gap is easier to interpret once we know the forecasting "
+        "system's ordinary error in the original units. The table below shows the "
+        "**Pre-CP validation mean absolute error (MAE)** for every mobility measure "
+        "and forecast horizon. MAE is the average size of an absolute forecast miss: "
+        "lower is better, and the units stay familiar — trips, mph, or riders."
+    )
+
+    native_mae_table = build_native_mae_table(summary)
+    st.dataframe(
+        format_native_mae_table(native_mae_table),
+        width="stretch",
+        hide_index=True,
+    )
+
+    st.caption(
+        "These numbers are not directly comparable across mobility measures because "
+        "their native units differ. Their role is to establish the ordinary error "
+        "scale for each mobility measure × forecast horizon."
+    )
+
+
+    # ---------------------------------------------------------------------
+    # Bridge — convert a native gap into MAE units
+    # ---------------------------------------------------------------------
+
+    st.markdown("### Put the counterfactual gap on that same error scale")
+    st.write(
+        "For each row, we divide the counterfactual gap by that job's Pre-CP validation "
+        "MAE. This gives a common **×MAE** ruler: a 1× gap is the same size as one "
+        "ordinary average absolute validation error for that forecasting job. A 2× gap "
+        "is twice that error scale. This is a magnitude comparison — **not** a "
+        "significance test, confidence level, or causal threshold."
+    )
+
+    example_row = summary.loc[
+        summary["metric"].eq("taxi_avg_trip_speed")
+        & summary["horizon"].eq(1)
+    ]
+    if len(example_row) != 1:
+        raise RuntimeError("Expected one Taxi average speed · h=1 calibration row.")
+    example_mae = float(example_row.iloc[0]["pre_cp_validation_system_mae"])
+
+    st.markdown("#### Worked example · Taxi average speed · h=1")
+    st.plotly_chart(
+        build_mae_ruler(example_mae),
+        width="stretch",
+        config=PLOT_CONFIG,
+        key="raw25_mae_ruler",
+    )
+    st.caption(
+        f"Here, ordinary Pre-CP MAE is {example_mae:.2f} mph. A 1.20 mph gap is about "
+        f"0.5× MAE; {example_mae:.2f} mph is 1× MAE; and {2 * example_mae:.2f} mph "
+        "is 2× MAE. The same conversion is done in each job's own native units."
+    )
+
+    with st.container(border=True):
+        st.markdown("#### So what should I look for?")
+        st.write(
+            "Think of MAE as an **error yardstick**, not a pass/fail threshold. A typical "
+            "gap well below 1× MAE is small compared with the errors this forecasting "
+            "system ordinarily makes, so the observed and no-CP paths are not strongly "
+            "separated on this descriptive error scale. As the gap grows to one, two, "
+            "or several times MAE, that separation becomes increasingly large relative "
+            "to ordinary forecast imprecision. **Bigger is not worse**: a real post-CP mobility "
+            "shift—whatever its cause—could produce a very large gap."
+        )
+        st.write(
+            "Then check **h=1, h=2, and h=5 together for the same mobility measure**. "
+            "If all three tell a similar story, the magnitude conclusion is less dependent "
+            "on forecast horizon. If they differ sharply, the apparent separation is more "
+            "horizon-sensitive."
+        )
+        st.caption(
+            "There is no magic cutoff at 1× or 2× MAE. These comparisons do not test a "
+            "null hypothesis, establish statistical significance, or identify why the "
+            "actual and no-CP paths differ."
+        )
 
 # ---------------------------------------------------------------------
 # Interactive exploration — one place / time slice, same calibration grammar
@@ -1712,6 +2405,194 @@ with exploration_section(
                 daypart=selected_daypart,
             )
         )
+
+        st.markdown("### See the MAE yardstick on a trajectory")
+        st.write(
+            "Choose one supported mobility measure, forecast horizon, Taxi Zone, and "
+            "time-of-week bucket inside the selected geography. Keeping the trajectory "
+            "at one **Taxi Zone × temporal bucket** preserves the same native-unit grain "
+            "used by the frozen MAE denominator."
+        )
+
+        trajectory_controls = st.columns([1.35, 0.65, 1.45, 1.35])
+
+        available_metrics = [
+            metric
+            for metric in METRIC_ORDER
+            if metric in set(selected_grid["metric"].astype(str))
+        ]
+        with trajectory_controls[0]:
+            trajectory_metric = st.selectbox(
+                "Trajectory measure",
+                available_metrics,
+                format_func=metric_label,
+                key="raw25_trajectory_metric",
+            )
+
+        supported_horizons = (
+            selected_grid.loc[
+                selected_grid["metric"].eq(trajectory_metric),
+                "horizon",
+            ]
+            .astype(int)
+            .drop_duplicates()
+            .sort_values()
+            .tolist()
+        )
+        with trajectory_controls[1]:
+            trajectory_horizon = st.selectbox(
+                "Horizon",
+                supported_horizons,
+                format_func=lambda value: f"h={int(value)}",
+                key="raw25_trajectory_horizon",
+            )
+
+        # Default to the explorer's exact daypart when possible; otherwise use
+        # weekday PM peak as a stable, interpretable row-level bucket.
+        daypart_suffix = {
+            "Overnight": "overnight",
+            "AM peak": "am_peak",
+            "Midday": "midday",
+            "PM peak": "pm_peak",
+            "Evening": "evening",
+        }
+        if selected_daypart != "All dayparts":
+            prefix = "weekend" if selected_day_type == "Weekends" else "weekday"
+            default_bucket = f"{prefix}_{daypart_suffix[selected_daypart]}"
+        else:
+            default_bucket = "weekday_pm_peak"
+
+        bucket_options = list(TEMPORAL_BUCKET_LABELS)
+        default_bucket_index = (
+            bucket_options.index(default_bucket)
+            if default_bucket in bucket_options
+            else 0
+        )
+        with trajectory_controls[2]:
+            trajectory_bucket = st.selectbox(
+                "Time-of-week bucket",
+                bucket_options,
+                index=default_bucket_index,
+                format_func=lambda value: TEMPORAL_BUCKET_LABELS[value],
+                key="raw25_trajectory_bucket",
+            )
+
+        trajectory_source = load_counterfactual_temporal_explorer_metric(
+            trajectory_metric
+        ).copy()
+
+        zone_options = trajectory_zone_options(
+            trajectory_source,
+            geography_type=selected_geography_type,
+            geography_id=selected_geography_id,
+            temporal_bucket=trajectory_bucket,
+        )
+
+        if zone_options.empty:
+            st.info(
+                "No Taxi Zone trajectory is available for this geography and "
+                "time-of-week bucket."
+            )
+        else:
+            zone_ids = zone_options["taxi_zone_id"].tolist()
+            zone_labels = dict(
+                zip(
+                    zone_options["taxi_zone_id"].astype(str),
+                    zone_options["display_label"],
+                )
+            )
+
+            if selected_geography_type == "Taxi Zone":
+                default_zone_index = 0
+            else:
+                # Prefer the best-supported underlying zone as a stable default.
+                best_zone_id = (
+                    zone_options.sort_values(
+                        ["rows", "taxi_zone_id"],
+                        ascending=[False, True],
+                    )
+                    .iloc[0]["taxi_zone_id"]
+                )
+                default_zone_index = zone_ids.index(best_zone_id)
+
+            with trajectory_controls[3]:
+                trajectory_zone_id = st.selectbox(
+                    "Taxi Zone",
+                    zone_ids,
+                    index=default_zone_index,
+                    format_func=lambda value: zone_labels[str(value)],
+                    key="raw25_trajectory_zone",
+                )
+
+            trajectory_zone_label = zone_labels[str(trajectory_zone_id)]
+            trajectory_weekly = build_selected_trajectory(
+                trajectory_source,
+                taxi_zone_id=trajectory_zone_id,
+                temporal_bucket=trajectory_bucket,
+                horizon=int(trajectory_horizon),
+            )
+
+            if trajectory_weekly.empty:
+                st.info("No supported trajectory rows are available for this selection.")
+            else:
+                trajectory_mae = native_mae_for_job(
+                    summary,
+                    metric=trajectory_metric,
+                    horizon=int(trajectory_horizon),
+                )
+                trajectory_figure, trajectory_largest, trajectory_outside_share = (
+                    build_trajectory_figure(
+                        trajectory_weekly,
+                        mae=trajectory_mae,
+                        metric=trajectory_metric,
+                        horizon=int(trajectory_horizon),
+                    )
+                )
+
+                trajectory_kpis = st.columns(4)
+                trajectory_kpis[0].metric(
+                    "Ordinary error scale",
+                    f"{trajectory_mae:,.2f} {METRIC_UNITS[trajectory_metric]}",
+                )
+                trajectory_kpis[1].metric(
+                    "Largest gap",
+                    f"{abs(float(trajectory_largest['gap'])):,.2f} "
+                    f"{METRIC_UNITS[trajectory_metric]}",
+                )
+                trajectory_kpis[2].metric(
+                    "Largest gap in ×MAE",
+                    f"{float(trajectory_largest['gap_xmae']):.2f}×",
+                )
+                trajectory_kpis[3].metric(
+                    "Weeks outside ±1 MAE",
+                    f"{trajectory_outside_share:.1f}%",
+                )
+
+                st.plotly_chart(
+                    trajectory_figure,
+                    width="stretch",
+                    config=PLOT_CONFIG,
+                    key="raw25_interactive_mae_trajectory",
+                )
+
+                st.caption(
+                    f"{trajectory_zone_label} · "
+                    f"{TEMPORAL_BUCKET_LABELS[trajectory_bucket]} · "
+                    f"{metric_label(trajectory_metric)} · h={int(trajectory_horizon)}. "
+                    "The band is ±1 ordinary Pre-CP validation MAE around observed "
+                    "mobility at the same row-level grain."
+                )
+
+                render_chart_insight(
+                    trajectory_takeaway(
+                        trajectory_largest,
+                        outside_share=trajectory_outside_share,
+                        metric=trajectory_metric,
+                        horizon=int(trajectory_horizon),
+                        zone_label=trajectory_zone_label,
+                        temporal_bucket=trajectory_bucket,
+                    )
+                )
 
         min_support = int(selected_grid["rows"].min())
         available_jobs = int(len(selected_grid))

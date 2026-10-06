@@ -574,9 +574,8 @@ hero_metric_4.metric(
 )
 
 st.caption(
-    "Observed Pre/Post views describe mobility around the policy launch. "
-    "Counterfactual views estimate an alternative no-CP path; they are not direct "
-    "causal measurements."
+    "Some views show what changed around the January 5, 2025 launch. Others compare "
+    "what actually happened with a modeled world where congestion pricing never began."
 )
 
 st.divider()
@@ -605,17 +604,17 @@ with start_1:
         eyebrow="Observed mobility",
         title="What changed?",
         body=(
-            "Start with the observed mobility record: when change appeared, where it "
-            "was concentrated, and how differently neighborhoods responded."
+            "See when mobility shifted after the launch, which parts of the city changed "
+            "most, and where neighborhood patterns broke from the citywide story."
         ),
         links=[
             (
-                "Start with Temporal Overview",
+                "See when mobility changed",
                 "views/raw_01_temporal_did_mobility_change.py",
                 "start_temporal",
             ),
             (
-                "Then explore Spatial Patterns",
+                "See where the changes were concentrated",
                 "views/raw_03_spatial_where_did_it_change.py",
                 "start_spatial",
             ),
@@ -628,18 +627,17 @@ with start_2:
         eyebrow="Mobility structure & stress",
         title="When and where did mobility become unusual?",
         body=(
-            "See how the city's mobility system moved together, when it departed "
-            "from its usual patterns, and which transportation modes drove those "
-            "unusual conditions."
+            "See when the city's usual mobility patterns broke down, where unusual "
+            "conditions clustered, and which transportation modes drove the change."
         ),
         links=[
             (
-                "Start with Mobility Drivers",
+                "See what drove the unusual periods",
                 "views/raw_27_mobility_drivers.py",
                 "start_drivers",
             ),
             (
-                "Then explore Stress Anomaly Patterns",
+                "See when modes became unusual together",
                 "views/raw_14_mobility_stress_patterns.py",
                 "start_stress_patterns",
             ),
@@ -654,18 +652,18 @@ with start_3:
         eyebrow="Forecasting",
         title="Can we predict what happens next?",
         body=(
-            "See how closely the forecasting system followed mobility it had never "
-            "seen, where it struggled, and whether it improved on simply repeating "
+            "See whether the forecasting system could track mobility it had never seen, "
+            "where it struggled, and whether it beat the simple strategy of repeating "
             "the previous week's value."
         ),
         links=[
             (
-                "Start with Forecast Scorecard",
+                "See how closely the forecasts tracked reality",
                 "views/raw_18_forecast_scorecard.py",
                 "start_forecast_scorecard",
             ),
             (
-                "Then explore Forecast Reliability",
+                "See where forecasts worked — and failed",
                 "views/raw_19_forecast_reliability.py",
                 "start_forecast_reliability",
             ),
@@ -678,18 +676,18 @@ with start_4:
         eyebrow="Counterfactual",
         title="What might have happened without congestion pricing?",
         body=(
-            "Compare observed post-launch mobility with a model-estimated no-CP "
-            "trajectory, then test which conclusions hold up across alternative "
-            "analytical choices."
+            "Compare what actually happened after the launch with what the forecasting system "
+            "estimates might have happened if congestion pricing had never begun — then see "
+            "which conclusions stay consistent when we challenge the analysis in different ways."
         ),
         links=[
             (
-                "Start with Counterfactual Overview",
+                "Compare reality with the no-pricing world",
                 "views/raw_21_counterfactual_overview.py",
                 "start_cf_overview",
             ),
             (
-                "Then test Counterfactual Robustness",
+                "See which conclusions hold up",
                 "views/raw_24_counterfactual_robustness.py",
                 "start_cf_robustness",
             ),
@@ -710,8 +708,8 @@ st.markdown(
 st.header("Four findings worth starting with")
 
 st.write(
-    "These are the strongest substantive results from across the Showcase — not a "
-    "summary of every page, but four places where the citywide story becomes clear."
+    "You do not need to explore every page to find the main story. Start with four "
+    "patterns that stood out most clearly, then follow any one of them deeper into the city."
 )
 
 # Finding 01 — image left, copy right
@@ -728,17 +726,16 @@ with kf1_image:
 with kf1_copy:
     _render_finding_copy(
         number="01",
-        title="Citywide demand shifted upward around January 2025",
+        title="Taxi, FHV, and Subway demand all shifted upward around January 2025",
         body=(
-            "Before congestion pricing began, Taxi, FHVHV, and Subway demand spent "
-            "long stretches below their usual same-weekday and same-daypart levels. "
-            "Afterward, all three spent much more time above those typical levels, "
-            "often together. The timing is striking, but this descriptive view alone "
-            "does not establish causation."
+            "Before congestion pricing began, Taxi, FHV, and Subway demand were often "
+            "running below their usual levels for the same kind of day and time. Afterward, "
+            "all three spent much more time above those usual levels — often at the same time. "
+            "The timing is striking, although this comparison alone does not prove why it happened."
         ),
     )
     _nav_button(
-        "Explore Mobility Drivers",
+        "See what drove the shift",
         "views/raw_27_mobility_drivers.py",
         key="kf1_link",
     )
@@ -752,7 +749,7 @@ kf2_copy, kf2_image = st.columns(
 with kf2_copy:
     _render_finding_copy(
         number="02",
-        title="Taxi growth drives most Taxi–FHVHV neighborhood divergence",
+        title="Where Taxi and FHV moved apart, Taxi growth usually drove the split",
         body=(
             "Among the 54 Taxi Zones where Taxi and FHVHV demand moved in opposite "
             "directions, 51 paired rising Taxi activity with declining FHVHV activity, "
@@ -761,7 +758,7 @@ with kf2_copy:
         ),
     )
     _nav_button(
-        "Explore Mode Divergences",
+        "See where Taxi and FHV moved apart",
         "views/raw_06_mode_divergences_disagree.py",
         key="kf2_link",
     )
@@ -785,16 +782,16 @@ with kf3_image:
 with kf3_copy:
     _render_finding_copy(
         number="03",
-        title="Mobility stress reorganized geographically",
+        title="Mobility stress shifted away from the city core",
         body=(
-            "After a sharp demand-stress surge around the January 2025 transition, "
-            "stress incidence settled lower in the CBD and gateway areas but higher "
-            "outside them. Outside those core areas, demand-related stress remained "
-            "substantial even as congestion-only stress receded."
+            "After a sharp surge around January 2025, unusual mobility conditions became "
+            "less common in the CBD and gateway areas but more common outside them. Away from "
+            "the core, demand-related stress remained elevated even as congestion-related "
+            "stress became less common."
         ),
     )
     _nav_button(
-        "Explore Stress Geography",
+        "See where mobility stress moved",
         "views/raw_13_stress_anomaly_spatial_explorer.py",
         key="kf3_link",
     )
@@ -808,17 +805,17 @@ kf4_copy, kf4_image = st.columns(
 with kf4_copy:
     _render_finding_copy(
         number="04",
-        title="The modeled no-CP difference varies sharply by borough and mode",
+        title="Taxi demand rose far above the modeled no-pricing path in several boroughs",
         body=(
-            "The counterfactual does not tell one uniform citywide story. Manhattan "
-            "shows the strongest Taxi-trip separation, while Brooklyn, Queens, and "
-            "the Bronx are more strongly distinguished by FHVHV-trip differences. "
-            "These are model-estimated comparisons between observed post-launch "
-            "mobility and an estimated no-CP path."
+            "After congestion pricing began, observed Taxi trips ran well above what "
+            "the forecasting system estimated for a world without the policy. The gap "
+            "was especially large relative to expected Taxi demand in Brooklyn and the "
+            "Bronx, showing how different the post-launch story can look depending on "
+            "where in the city you look."
         ),
     )
     _nav_button(
-        "Explore Multimodal Counterfactuals",
+        "Compare the observed and no-pricing worlds",
         "views/raw_23_multimodal_counterfactuals.py",
         key="kf4_link",
     )
@@ -839,12 +836,12 @@ st.markdown(
     '<div class="section-kicker">Go local</div>',
     unsafe_allow_html=True,
 )
-st.header("Explore NYC Taxi Zone by Taxi Zone")
+st.header("What happened in your part of the city?")
 
 st.write(
-    "The citywide story is only the starting point. Drill into individual Taxi Zones "
-    "to see how a place behaves across transportation modes, unusual mobility periods, "
-    "forecast reliability, and the estimated no-congestion-pricing path."
+    "Citywide averages hide a lot. Pick any of 263 Taxi Zones and see how demand, "
+    "unusual mobility conditions, forecast reliability, and the modeled no-pricing "
+    "world looked locally."
 )
 
 zone_image, zone_copy = st.columns(
@@ -867,13 +864,12 @@ with zone_copy:
         <div class="zone-panel">
             <div class="zone-number">263</div>
             <div class="zone-label">Taxi Zones to explore</div>
-            <h3>One place. Many analytical lenses.</h3>
+            <h3>One neighborhood, several ways to understand what changed.</h3>
             <p>
-                The Accuracy Quilt shows how forecast reliability can change inside
-                one Taxi Zone depending on the mobility measure and how far ahead the
-                system is asked to predict. The same geography can also be explored
-                through observed change, stress, relationships, and the no-CP
-                counterfactual.
+                The Accuracy Quilt shows where forecasts were dependable inside one
+                Taxi Zone and where they struggled. From there, follow the same place
+                through observed change, unusual mobility conditions, mode relationships,
+                and the modeled world without congestion pricing.
             </p>
         </div>
         """,
@@ -884,7 +880,7 @@ with zone_copy:
         [
             "Profile & compare",
             "Stress & forecast",
-            "No-CP",
+            "Without pricing",
         ]
     )
 
@@ -902,19 +898,19 @@ with zone_copy:
 
     with zone_tab_2:
         _nav_button(
-            "Explore Stress Geography",
+            "See where mobility stress moved",
             "views/raw_13_stress_anomaly_spatial_explorer.py",
             key="zone_stress",
         )
         _nav_button(
-            "Explore Forecast Reliability",
+            "See local forecast reliability",
             "views/raw_19_forecast_reliability.py",
             key="zone_forecast",
         )
 
     with zone_tab_3:
         _nav_button(
-            "Explore Counterfactual Geography",
+            "Compare local observed vs modeled paths",
             "views/raw_22_counterfactual_geography.py",
             key="zone_counterfactual",
         )
@@ -936,10 +932,10 @@ st.header("How we tested the analytical system")
 st.markdown(
     """
     <div class="method-intro">
-        The Showcase moves from describing observed mobility to detecting unusual
-        conditions, forecasting mobility the models have not seen, and finally
-        estimating an unobserved no-CP path. Each step introduces a different kind
-        of uncertainty, so each is tested in a different way.
+        The Showcase moves from describing what changed, to identifying unusual
+        conditions, to forecasting mobility the models have not seen, and finally
+        estimating what might have happened without congestion pricing. Each step asks
+        a harder question, so each is tested in a different way.
     </div>
     """,
     unsafe_allow_html=True,
@@ -968,7 +964,7 @@ with anomaly_tab:
         "method_anomaly_congestion_retreat.png"
     )
     _nav_button(
-        "Open Stress Anomaly Patterns",
+        "See how unusual conditions changed",
         "views/raw_14_mobility_stress_patterns.py",
         key="method_anomaly_link",
     )
@@ -988,14 +984,14 @@ with forecast_tab:
         "method_forecast_validation.png"
     )
     _nav_button(
-        "Open Forecast Scorecard",
+        "See the forecast evidence",
         "views/raw_18_forecast_scorecard.py",
         key="method_forecast_link",
     )
 
 with counterfactual_tab:
     st.subheader(
-        "Do the no-CP conclusions survive different analytical views?"
+        "Do the no-pricing conclusions hold up when we challenge the analysis?"
     )
     st.write(
         "The counterfactual is challenged across population, weighting, time, "
@@ -1007,7 +1003,7 @@ with counterfactual_tab:
         "method_counterfactual_robustness.png"
     )
     _nav_button(
-        "Open Counterfactual Robustness",
+        "See which conclusions hold up",
         "views/raw_24_counterfactual_robustness.py",
         key="method_cf_link",
     )
@@ -1027,14 +1023,12 @@ st.markdown(
 st.markdown(
     """
     <div class="bridge-panel">
-        <h2>From predicting the city to imagining the city without pricing</h2>
+        <h2>From predicting the city to asking what might have happened instead</h2>
         <p>
-            Once the forecasting system has been tested against mobility that actually
-            occurred, it can be used for the harder question: <strong>what might mobility
-            have looked like if congestion pricing had not begun?</strong> The chart below
-            makes that transition concrete by showing observed mobility alongside the
-            model-estimated no-CP trajectories rather than reducing the counterfactual to
-            a single summary number.
+            Once the forecasting system has shown it can track mobility it has not seen,
+            we can ask the harder question: <strong>what might the city have looked like
+            if congestion pricing had never begun?</strong> The chart below puts what
+            actually happened beside that modeled alternative.
         </p>
     </div>
     """,
@@ -1053,14 +1047,14 @@ bridge_left, bridge_right = st.columns(2)
 
 with bridge_left:
     _nav_button(
-        "Open Counterfactual Overview",
+        "Compare observed and modeled mobility",
         "views/raw_21_counterfactual_overview.py",
         key="bridge_overview",
     )
 
 with bridge_right:
     _nav_button(
-        "Explore Counterfactual Geography",
+        "See how the comparison changes by place",
         "views/raw_22_counterfactual_geography.py",
         key="bridge_geography",
     )
@@ -1073,18 +1067,17 @@ st.divider()
 # ---------------------------------------------------------------------
 
 st.markdown(
-    '<div class="section-kicker">Explore the Showcase</div>',
+    '<div class="section-kicker">Follow a question deeper</div>',
     unsafe_allow_html=True,
 )
-st.header("See the mobility system from a different angle")
+st.header("Go deeper from a specific question")
 
 st.markdown(
     """
     <div class="gallery-intro">
-        The same mobility record can reveal very different structure depending on
-        how you look at it. Start with two featured views, then open the gallery
-        tabs for relationships, forecast evaluation, counterfactual robustness,
-        animated geography, seasonal cycles, and recurring mobility day types.
+        Each view below starts from a question rather than a chart type. Use them to
+        follow a finding, test whether it holds elsewhere, or look at the same mobility
+        record from a different angle.
     </div>
     """,
     unsafe_allow_html=True,
@@ -1159,13 +1152,13 @@ with featured_right:
 # without extending the homepage into another long gallery.
 # ------------------------------------------------------------------
 
-st.subheader("More ways to explore")
+st.subheader("More questions to follow")
 
 st.markdown(
     """
     <div class="showcase-tab-note">
-        Pick a visual lens. Each tab previews one analytical experience and links
-        directly to the interactive page behind it.
+        Pick the question that interests you. Each tab previews one way to investigate
+        it and links directly to the interactive page behind the finding.
     </div>
     """,
     unsafe_allow_html=True,
@@ -1207,11 +1200,11 @@ with relationships_tab:
             """
             <div class="showcase-copy">
                 <div class="showcase-kicker">Observed mobility</div>
-                <h3>Watch two modes move together — or apart</h3>
+                <h3>Where did Taxi and FHV demand move together — or apart?</h3>
                 <p>
-                    Connect each Taxi Zone's Pre- and Post-CP position to see whether
-                    Taxi and FHVHV demand moved together, diverged, or changed at very
-                    different magnitudes.
+                    Compare each Taxi Zone before and after the launch to see where
+                    Taxi and FHV demand moved together, split directions, or changed
+                    at very different magnitudes.
                 </p>
             </div>
             """,
@@ -1242,10 +1235,11 @@ with win_miss_tab:
             """
             <div class="showcase-copy">
                 <div class="showcase-kicker">Forecast evaluation</div>
-                <h3>Separate forecast difficulty from forecast usefulness</h3>
+                <h3>Where did the forecast struggle — but still add value?</h3>
                 <p>
-                    The Win–Miss Plane shows why a forecast can have relatively high
-                    error and still improve substantially on the Last-week baseline.
+                    A forecast can have noticeable error and still beat the simple
+                    strategy of repeating last week's value. The Win–Miss Plane shows
+                    where both things happened at once.
                 </p>
             </div>
             """,
@@ -1276,11 +1270,11 @@ with robustness_tab:
             """
             <div class="showcase-copy">
                 <div class="showcase-kicker">Counterfactual</div>
-                <h3>Robustness has a shape, not a single score</h3>
+                <h3>Which no-pricing conclusions still hold when we challenge them?</h3>
                 <p>
-                    A result can hold up strongly under one analytical choice and be
-                    more sensitive under another. The profile exposes that structure
-                    rather than hiding it behind one confidence-like number.
+                    Some conclusions stay consistent across different populations,
+                    weighting choices, time windows, geographies, horizons, and
+                    calibration checks. Others are more sensitive to how we look.
                 </p>
             </div>
             """,
@@ -1312,11 +1306,11 @@ with pulse_tab:
             """
             <div class="showcase-copy">
                 <div class="showcase-kicker">Animated geography</div>
-                <h3>Watch mobility move across the city</h3>
+                <h3>Where did mobility move away from its usual pattern?</h3>
                 <p>
-                    Mobility Pulse animates Taxi Zones through time, showing how each
-                    zone moves away from its own pre-pricing reference while
-                    metric-linked stress events appear across the map.
+                    Mobility Pulse animates Taxi Zones through time so you can see
+                    where local mobility departs from its own pre-pricing norm and
+                    when unusual conditions appear across the map.
                 </p>
             </div>
             """,
@@ -1347,10 +1341,10 @@ with spiral_tab:
             """
             <div class="showcase-copy">
                 <div class="showcase-kicker">Cyclical time</div>
-                <h3>See the year as a cycle instead of a straight line</h3>
+                <h3>Which changes are seasonal — and which break the yearly pattern?</h3>
                 <p>
-                    The annual spiral keeps seasonal position visible, making
-                    recurring periods and year-over-year departures easier to compare.
+                    The annual spiral keeps each point in its seasonal position, making
+                    recurring periods and genuine year-over-year departures easier to see.
                 </p>
             </div>
             """,
@@ -1381,11 +1375,11 @@ with day_types_tab:
             """
             <div class="showcase-copy">
                 <div class="showcase-kicker">Mobility environments</div>
-                <h3>See what kind of mobility day NYC was experiencing</h3>
+                <h3>What kinds of mobility days kept repeating?</h3>
                 <p>
-                    The day-type calendar compresses multiple mobility measures and
-                    dayparts into recurring daily states, then shows how those states
-                    cluster and persist through time.
+                    The day-type calendar combines multiple mobility measures and
+                    dayparts into recurring daily patterns, then shows when those
+                    patterns clustered or persisted through time.
                 </p>
             </div>
             """,
@@ -1474,11 +1468,11 @@ with deep_3:
 st.markdown(
     """
     <div class="evidence-boundary">
-        <strong>Evidence boundary.</strong> Pre/Post views describe observed mobility
-        around the January 5, 2025 policy launch. Forecasting views evaluate prediction
-        against held-out observations. No-CP counterfactual views compare observed
-        post-launch mobility with model-estimated alternative trajectories and should
-        not be read as direct causal measurements.
+        <strong>Evidence boundary.</strong> Pre/Post views show what changed around
+        the January 5, 2025 launch but do not by themselves prove why it changed.
+        Forecasting views test predictions against observations the models had not seen.
+        Counterfactual views compare what actually happened with a modeled world where
+        congestion pricing never began; they are estimates, not direct causal measurements.
     </div>
     """,
     unsafe_allow_html=True,
