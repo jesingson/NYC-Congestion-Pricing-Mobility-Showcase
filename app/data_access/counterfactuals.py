@@ -530,7 +530,10 @@ RAW25_JOB_HISTOGRAM_REQUIRED_COLUMNS = {
 RAW25_JOB_SUMMARY_REQUIRED_COLUMNS = {
     "metric",
     "horizon",
-    "pre_cp_validation_system_mae",
+    "pre_cp_reference_mae",
+    "reference_validation_periods",
+    "reference_validation_rows",
+    "rows",
     "median_absolute_mae_units",
     "p90_absolute_mae_units",
     "share_abs_ge_1_mae_pct",
@@ -545,6 +548,7 @@ RAW25_JOB_SUMMARY_REQUIRED_COLUMNS = {
     "share_abs_ge_2_0_mae_pct",
     "share_abs_ge_3_0_mae_pct",
     "overflow_ge_8_mae_pct",
+    "support_ok",
 }
 
 RAW25_SLICE_SCOUT_REQUIRED_COLUMNS = {
@@ -555,15 +559,22 @@ RAW25_SLICE_SCOUT_REQUIRED_COLUMNS = {
     "geography_label",
     "day_type",
     "daypart",
+    "pre_cp_reference_mae",
+    "reference_validation_periods",
+    "reference_validation_rows",
+    "reference_support_ok",
     "rows",
+    "source_rows",
     "p50_abs_mae_units",
     "p75_abs_mae_units",
     "p90_abs_mae_units",
     "p95_abs_mae_units",
+    "p99_abs_mae_units",
     "share_abs_ge_0_5_mae_pct",
     "share_abs_ge_1_0_mae_pct",
     "share_abs_ge_2_0_mae_pct",
     "share_abs_ge_3_0_mae_pct",
+    "overflow_ge_8_mae_pct",
     "support_ok",
 }
 
@@ -1997,7 +2008,10 @@ def _load_counterfactual_raw25_inputs_cached(
 
     WHY:
     Raw 25 owns reader-facing calibration logic and visualization. This shared
-    layer owns physical files, schemas, QA, and basic type normalization.
+    layer owns physical files, schemas, QA, and basic type normalization. The
+    rebuilt serving contract already carries the matching slice-specific Pre-CP
+    Reference MAE, so the page does not need to load the larger calibration
+    lookup separately.
     """
     paths = [
         RAW25_JOB_HISTOGRAM_PATH,
@@ -2063,17 +2077,57 @@ def _load_counterfactual_raw25_inputs_cached(
         summary["horizon"],
         errors="raise",
     ).astype(int)
+    summary["pre_cp_reference_mae"] = pd.to_numeric(
+        summary["pre_cp_reference_mae"],
+        errors="raise",
+    )
+    summary["reference_validation_periods"] = pd.to_numeric(
+        summary["reference_validation_periods"],
+        errors="raise",
+    ).astype(int)
+    summary["reference_validation_rows"] = pd.to_numeric(
+        summary["reference_validation_rows"],
+        errors="raise",
+    ).astype(int)
+    summary["rows"] = pd.to_numeric(
+        summary["rows"],
+        errors="raise",
+    ).astype(int)
+    summary["support_ok"] = (
+        summary["support_ok"]
+        .fillna(False)
+        .astype(bool)
+    )
 
     slice_scout["horizon"] = pd.to_numeric(
         slice_scout["horizon"],
         errors="raise",
     ).astype(int)
-
+    slice_scout["pre_cp_reference_mae"] = pd.to_numeric(
+        slice_scout["pre_cp_reference_mae"],
+        errors="raise",
+    )
+    slice_scout["reference_validation_periods"] = pd.to_numeric(
+        slice_scout["reference_validation_periods"],
+        errors="raise",
+    ).astype(int)
+    slice_scout["reference_validation_rows"] = pd.to_numeric(
+        slice_scout["reference_validation_rows"],
+        errors="raise",
+    ).astype(int)
     slice_scout["rows"] = pd.to_numeric(
         slice_scout["rows"],
         errors="raise",
     ).astype(int)
-
+    slice_scout["source_rows"] = pd.to_numeric(
+        slice_scout["source_rows"],
+        errors="raise",
+    ).astype(int)
+    slice_scout["reference_support_ok"] = (
+        slice_scout["reference_support_ok"]
+        .fillna(False)
+        .astype(bool)
+    )
     slice_scout["support_ok"] = (
         slice_scout["support_ok"]
         .fillna(False)
@@ -2085,6 +2139,7 @@ def _load_counterfactual_raw25_inputs_cached(
         summary,
         slice_scout,
     )
+
 
 def load_counterfactual_raw25_inputs() -> tuple[
     pd.DataFrame,

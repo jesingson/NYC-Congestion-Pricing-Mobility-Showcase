@@ -41,10 +41,10 @@ from app.utils.project_branding import (
 inject_app_css()
 
 PAGE_CAPTION = "COUNTERFACTUAL CALIBRATION"
-PAGE_TITLE = "How large is the no-CP gap relative to ordinary forecast error?"
+PAGE_TITLE = "How large is the no-CP gap relative to Pre-CP Reference error?"
 PAGE_SUBTITLE = (
     "Put the observed-versus-no-CP gap on the same scale as the forecasting "
-    "system's ordinary Pre-CP validation error, then see where the typical gap "
+    "Reference system's Pre-CP validation error, then see where the typical gap "
     "is modest and where the upper tail becomes much larger."
 )
 
@@ -67,6 +67,12 @@ METRIC_LABELS = {
     "fhvhv_trip_count": "FHVHV trips",
     "fhvhv_avg_trip_speed": "FHVHV average speed",
     "subway_ridership": "Subway ridership",
+}
+
+COUNT_METRICS = {
+    "taxi_trip_count",
+    "fhvhv_trip_count",
+    "subway_ridership",
 }
 
 HORIZONS = [
@@ -103,6 +109,12 @@ POLICY_LABELS = {
     "adjacent_to_cbd": "Adjacent to CBD",
     "gateway_to_cbd": "Gateway to CBD",
     "non_cbd": "Outside CBD / adjacent / gateway",
+}
+
+# Match the physical-zone contract used by the corrected Raw 25 builders.
+TAXI_ZONE_ALIASES = {
+    57: 56,
+    105: 103,
 }
 
 
@@ -455,7 +467,7 @@ def build_calibration_range_strip(
         y=1.075,
         xref="x",
         yref="paper",
-        text="<b>1× ordinary Pre-CP MAE</b>",
+        text="<b>1× Pre-CP Reference MAE</b>",
         showarrow=False,
         xanchor="right",
         font={"size": 11, "color": BRAND_COLORS["dark_teal"]},
@@ -488,7 +500,7 @@ def build_calibration_range_strip(
         autorange="reversed",
     )
     figure.update_xaxes(
-        title_text="Absolute post-CP gap in Pre-CP validation MAE units",
+        title_text="Absolute post-CP gap in Pre-CP Reference MAE units",
         range=[0, x_max],
         zeroline=False,
     )
@@ -1005,7 +1017,7 @@ def build_selected_slice_strip(
     )
 
     figure.update_xaxes(
-        title_text="Absolute post-CP gap in Pre-CP validation MAE units",
+        title_text="Absolute post-CP gap in Pre-CP Reference MAE units",
         range=[0, x_max],
     )
     figure.update_yaxes(
@@ -1399,30 +1411,43 @@ METRIC_UNITS = {
 
 
 def build_native_mae_table(summary: pd.DataFrame) -> pd.DataFrame:
-    """Return one reader-facing row per mobility measure with native MAE by horizon."""
-    required = ["metric", "horizon", "pre_cp_validation_system_mae"]
-    missing = [column for column in required if column not in summary.columns]
+    """Return Systemwide Pre-CP Reference MAE by mobility measure and horizon."""
+    required = [
+        "metric",
+        "horizon",
+        "pre_cp_reference_mae",
+    ]
+    missing = [
+        column
+        for column in required
+        if column not in summary.columns
+    ]
+
     if missing:
         raise RuntimeError(
-            "Raw 25 summary is missing native MAE fields: "
+            "Raw 25 summary is missing Reference-MAE fields: "
             + ", ".join(missing)
             + ". Available columns: "
             + ", ".join(str(column) for column in summary.columns)
         )
 
-    # WHY: select the verified loader contract directly. The Raw 25 builder and
-    # data-access layer guarantee one native Pre-CP MAE per Metric × Horizon.
+    # WHY: the rebuilt 15-row summary is explicitly Systemwide × All days ×
+    # All dayparts, so these values are the correct hero/orientation yardsticks.
     working = summary.loc[:, required].copy()
+
     if working.duplicated(["metric", "horizon"]).any():
-        raise RuntimeError("Native MAE table received duplicate Metric × Horizon rows.")
+        raise RuntimeError(
+            "Reference MAE table received duplicate Metric × Horizon rows."
+        )
 
     pivot = working.pivot(
         index="metric",
         columns="horizon",
-        values="pre_cp_validation_system_mae",
+        values="pre_cp_reference_mae",
     ).reindex(METRIC_ORDER)
 
     rows = []
+
     for metric in METRIC_ORDER:
         rows.append({
             "Mobility measure": metric_label(metric),
@@ -1431,6 +1456,7 @@ def build_native_mae_table(summary: pd.DataFrame) -> pd.DataFrame:
             "h=2": float(pivot.loc[metric, 2]),
             "h=5": float(pivot.loc[metric, 5]),
         })
+
     return pd.DataFrame(rows)
 
 
@@ -1509,17 +1535,18 @@ WORKED_HORIZON = 1
 
 
 @st.cache_data(show_spinner=False)
-def build_worked_example_weekly() -> tuple[pd.DataFrame, str, str]:
+def build_worked_example_weekly() -> tuple[pd.DataFrame, str, str, str]:
     """
     Return one fixed Taxi Zone × temporal-bucket trajectory for the MAE lesson.
 
     WHY:
-    Raw 25's calibration denominator is the ordinary row-level Pre-CP validation
-    MAE for a Metric × Horizon job. Keeping one Taxi Zone and one temporal bucket
-    preserves that same native-unit grain, so the ±1 MAE band is a true visual
-    yardstick rather than an apples-to-oranges band around an aggregate series.
+    The worked example stays at one Taxi Zone and one temporal bucket so its
+    native-unit gap can be compared directly with the matching Taxi Zone ×
+    Weekdays × PM peak Pre-CP Reference MAE.
     """
-    source = load_counterfactual_temporal_explorer_metric(WORKED_METRIC).copy()
+    source = load_counterfactual_temporal_explorer_metric(
+        WORKED_METRIC
+    ).copy()
 
     required = {
         "week_start",
@@ -1530,85 +1557,137 @@ def build_worked_example_weekly() -> tuple[pd.DataFrame, str, str]:
         "observed_level",
         f"no_cp_h{WORKED_HORIZON}",
     }
-    missing = sorted(required.difference(source.columns))
+    missing = sorted(
+        required.difference(source.columns)
+    )
+
     if missing:
         raise RuntimeError(
             "Raw 25 worked example is missing temporal counterfactual columns: "
             + ", ".join(missing)
         )
 
-    source["week_start"] = pd.to_datetime(source["week_start"], errors="coerce")
+    source["week_start"] = pd.to_datetime(
+        source["week_start"],
+        errors="coerce",
+    )
     source = source.loc[
         source["week_start"].notna()
         & source["period_complete"].fillna(False).astype(bool)
         & source["target_temporal_bucket"].eq("weekday_pm_peak")
     ].copy()
 
-    # Prefer a familiar, high-volume location for the teaching example.
-    # Fall back to the best-supported physical Taxi Zone if the label changes.
+    # Prefer a familiar high-volume location. The selected ID is returned so
+    # the page can retrieve that exact slice's Reference MAE from slice_scout.
     preferred = source.loc[
-        source["zone"].astype(str).str.contains("Times Sq", case=False, na=False)
+        source["zone"]
+        .astype(str)
+        .str.contains(
+            "Times Sq",
+            case=False,
+            na=False,
+        )
     ].copy()
 
     if preferred.empty:
         support = (
-            source.groupby(["taxi_zone_id", "zone"], observed=True)
+            source.groupby(
+                ["taxi_zone_id", "zone"],
+                observed=True,
+            )
             .size()
             .reset_index(name="rows")
-            .sort_values(["rows", "taxi_zone_id"], ascending=[False, True])
+            .sort_values(
+                ["rows", "taxi_zone_id"],
+                ascending=[False, True],
+            )
         )
+
         if support.empty:
-            raise RuntimeError("No supported Taxi Zone is available for the worked example.")
+            raise RuntimeError(
+                "No supported Taxi Zone is available for the worked example."
+            )
+
         selected_zone_id = support.iloc[0]["taxi_zone_id"]
-        selected_zone_label = str(support.iloc[0]["zone"])
+        selected_zone_label = str(
+            support.iloc[0]["zone"]
+        )
+
     else:
         selected_zone_id = preferred.iloc[0]["taxi_zone_id"]
-        selected_zone_label = str(preferred.iloc[0]["zone"])
+        selected_zone_label = str(
+            preferred.iloc[0]["zone"]
+        )
 
     selected = source.loc[
-        pd.to_numeric(source["taxi_zone_id"], errors="coerce").eq(
-            float(selected_zone_id)
-        )
+        pd.to_numeric(
+            source["taxi_zone_id"],
+            errors="coerce",
+        ).eq(float(selected_zone_id))
     ].copy()
 
     if selected.duplicated("week_start").any():
         raise RuntimeError(
-            "Worked example expected one row per week for one Taxi Zone × temporal bucket."
+            "Worked example expected one row per week for one "
+            "Taxi Zone × temporal bucket."
         )
 
-    selected["observed"] = pd.to_numeric(selected["observed_level"], errors="coerce")
+    selected["observed"] = pd.to_numeric(
+        selected["observed_level"],
+        errors="coerce",
+    )
     selected["no_cp"] = pd.to_numeric(
         selected[f"no_cp_h{WORKED_HORIZON}"],
         errors="coerce",
     )
 
     selected = (
-        selected.loc[:, ["week_start", "observed", "no_cp"]]
+        selected.loc[
+            :,
+            [
+                "week_start",
+                "observed",
+                "no_cp",
+            ],
+        ]
         .replace([np.inf, -np.inf], np.nan)
         .dropna(subset=["observed", "no_cp"])
         .sort_values("week_start")
         .reset_index(drop=True)
     )
 
-    return selected, selected_zone_label, TEMPORAL_BUCKET_LABELS["weekday_pm_peak"]
+    return (
+        selected,
+        str(int(float(selected_zone_id))),
+        selected_zone_label,
+        TEMPORAL_BUCKET_LABELS["weekday_pm_peak"],
+    )
 
 
-def worked_example_mae(summary: pd.DataFrame) -> float:
-    """Return the frozen native Pre-CP MAE for Taxi average speed at h=1."""
-    match = summary.loc[
-        summary["metric"].eq(WORKED_METRIC)
-        & summary["horizon"].eq(WORKED_HORIZON),
-        "pre_cp_validation_system_mae",
-    ]
+def worked_example_mae(
+    slice_scout: pd.DataFrame,
+    *,
+    zone_id: str,
+) -> float:
+    """Return the matching Taxi Zone × weekday PM-peak Reference MAE."""
+    row = selected_slice_row(
+        slice_scout,
+        metric=WORKED_METRIC,
+        horizon=WORKED_HORIZON,
+        geography_type="Taxi Zone",
+        geography_id=str(zone_id),
+        day_type="Weekdays",
+        daypart="PM peak",
+    )
 
-    if len(match) != 1:
-        raise RuntimeError(
-            "Expected exactly one Taxi average speed · h=1 native MAE row."
-        )
+    value = float(
+        row["pre_cp_reference_mae"]
+    )
 
-    value = float(match.iloc[0])
     if not np.isfinite(value) or value <= 0:
-        raise RuntimeError("Taxi average speed · h=1 native MAE must be positive.")
+        raise RuntimeError(
+            "Worked-example Pre-CP Reference MAE must be finite and positive."
+        )
 
     return value
 
@@ -1766,6 +1845,55 @@ def build_worked_example_figure(
     return figure, largest, outside_share
 
 
+def build_worked_example_xmae_figure(
+    weekly: pd.DataFrame,
+    mae: float,
+) -> go.Figure:
+    """Plot the fixed worked example directly on the ×MAE calibration scale."""
+    plot = weekly.copy()
+    plot["gap_xmae"] = (plot["no_cp"] - plot["observed"]).abs() / mae
+
+    figure = go.Figure()
+    figure.add_trace(
+        go.Scatter(
+            x=plot["week_start"],
+            y=plot["gap_xmae"],
+            mode="lines",
+            name="Absolute gap",
+            line={"color": BRAND_COLORS["dark_teal"], "width": 3},
+            hovertemplate="%{x|%b %d, %Y}<br>|Gap|: %{y:.2f}× MAE<extra></extra>",
+        )
+    )
+    figure.add_hline(
+        y=1.0,
+        line={"color": "rgba(51,92,103,0.50)", "width": 1.4, "dash": "dash"},
+        annotation_text="1× Reference MAE",
+        annotation_position="top left",
+    )
+    figure.add_hline(
+        y=2.0,
+        line={"color": "rgba(51,92,103,0.30)", "width": 1.2, "dash": "dot"},
+        annotation_text="2× MAE",
+        annotation_position="top left",
+    )
+
+    figure = apply_branding(figure)
+    figure.update_layout(
+        title={"text": ""},
+        height=460,
+        hovermode="x unified",
+        margin={"l": 70, "r": 25, "t": 35, "b": 60},
+        showlegend=False,
+    )
+    figure.update_xaxes(title=None)
+    figure.update_yaxes(
+        title_text="Absolute gap (× Pre-CP Reference MAE)",
+        rangemode="tozero",
+        gridcolor="rgba(131, 197, 190, 0.18)",
+    )
+    return figure
+
+
 def worked_example_takeaway(
     largest: pd.Series,
     outside_share: float,
@@ -1807,13 +1935,32 @@ def worked_example_takeaway(
 
 
 
-def _scope_trajectory_zones(
+def selected_temporal_buckets(*, day_type: str, daypart: str) -> list[str]:
+    """Translate the explorer's day-type/daypart controls into temporal-bucket IDs."""
+    prefix = {"All days": None, "Weekdays": "weekday_", "Weekends": "weekend_"}[day_type]
+    suffix = {
+        "All dayparts": None,
+        "Overnight": "overnight",
+        "AM peak": "am_peak",
+        "Midday": "midday",
+        "PM peak": "pm_peak",
+        "Evening": "evening",
+    }[daypart]
+
+    return [
+        bucket for bucket in TEMPORAL_BUCKET_LABELS
+        if (prefix is None or bucket.startswith(prefix))
+        and (suffix is None or bucket.endswith(suffix))
+    ]
+
+
+def scope_trajectory_geography(
     frame: pd.DataFrame,
     *,
     geography_type: str,
     geography_id: object,
 ) -> pd.DataFrame:
-    """Limit row-level trajectories to Taxi Zones inside the selected geography."""
+    """Apply the reader's geography selection to the trajectory source."""
     if geography_type == "Systemwide":
         return frame.copy()
 
@@ -1825,248 +1972,228 @@ def _scope_trajectory_zones(
     }.get(geography_type)
 
     if column is None:
-        raise ValueError(f"Unsupported geography type: {geography_type}")
+        raise ValueError(
+            f"Unsupported geography type: {geography_type}"
+        )
 
     if geography_type == "Taxi Zone":
-        mask = pd.to_numeric(frame[column], errors="coerce").eq(float(geography_id))
+        # WHY: Raw 25's denominator and slice scout use physical Taxi Zones.
+        # Apply the same 57→56 and 105→103 aliases before selecting the path.
+        canonical = pd.to_numeric(
+            frame[column],
+            errors="coerce",
+        ).astype("Int64").replace(
+            TAXI_ZONE_ALIASES
+        )
+
+        mask = canonical.eq(
+            int(float(geography_id))
+        )
+
     else:
-        mask = frame[column].astype(str).eq(str(geography_id))
+        mask = (
+            frame[column]
+            .astype(str)
+            .eq(str(geography_id))
+        )
 
     return frame.loc[mask].copy()
 
 
-def trajectory_zone_options(
+def reference_mae_for_slice(
+    slice_scout: pd.DataFrame,
+    *,
+    geography_type: str,
+    geography_id: object,
+    day_type: str,
+    daypart: str,
+    metric: str,
+    horizon: int,
+) -> float | None:
+    """Return the exact supported Pre-CP Reference MAE for one Raw 25 slice."""
+    match = slice_scout.loc[
+        slice_scout["geography_type"].eq(geography_type)
+        & slice_scout["geography_id"].astype(str).eq(str(geography_id))
+        & slice_scout["day_type"].eq(day_type)
+        & slice_scout["daypart"].eq(daypart)
+        & slice_scout["metric"].eq(metric)
+        & slice_scout["horizon"].eq(int(horizon))
+        & slice_scout["support_ok"]
+    ]
+
+    if match.empty:
+        return None
+
+    if len(match) != 1:
+        raise RuntimeError(
+            "Expected at most one supported Reference-MAE row for "
+            f"{geography_type} · {geography_id} · {day_type} · {daypart} · "
+            f"{metric} · h={int(horizon)}; found {len(match)}."
+        )
+
+    value = float(
+        match.iloc[0]["pre_cp_reference_mae"]
+    )
+
+    if not np.isfinite(value) or value <= 0:
+        raise RuntimeError(
+            "Supported Pre-CP Reference MAE must be finite and positive for "
+            f"{metric} · h={int(horizon)}."
+        )
+
+    return value
+
+
+def build_slice_native_trajectory(
     source: pd.DataFrame,
     *,
     geography_type: str,
     geography_id: object,
-    temporal_bucket: str,
+    day_type: str,
+    daypart: str,
+    metric: str,
 ) -> pd.DataFrame:
-    """Return supported physical Taxi Zones for one explorer trajectory context."""
-    scoped = _scope_trajectory_zones(
+    """
+    Aggregate observed and no-CP paths for the exact explorer slice.
+
+    WHY:
+    Count measures are additive, while speed measures must preserve the validated
+    activity-weighted aggregation used by the counterfactual overview.
+    """
+    buckets = selected_temporal_buckets(day_type=day_type, daypart=daypart)
+    scoped = scope_trajectory_geography(
         source,
         geography_type=geography_type,
         geography_id=geography_id,
     )
     scoped = scoped.loc[
-        scoped["target_temporal_bucket"].eq(temporal_bucket)
-    ].copy()
-
-    if scoped.empty:
-        return pd.DataFrame(columns=["taxi_zone_id", "display_label", "rows"])
-
-    options = (
-        scoped.groupby(
-            ["taxi_zone_id", "zone", "borough"],
-            observed=True,
-            dropna=False,
-        )
-        .size()
-        .reset_index(name="rows")
-    )
-    options = options.loc[
-        options["zone"].astype(str).str.strip().str.lower().ne("unknown")
-    ].copy()
-
-    options["display_label"] = np.where(
-        options["borough"].notna()
-        & options["borough"].astype(str).str.strip().ne("")
-        & options["borough"].astype(str).str.lower().ne("unknown"),
-        options["zone"].astype(str) + " · " + options["borough"].astype(str),
-        options["zone"].astype(str),
-    )
-
-    return (
-        options.sort_values(["display_label", "taxi_zone_id"], kind="stable")
-        .reset_index(drop=True)
-    )
-
-
-def build_selected_trajectory(
-    source: pd.DataFrame,
-    *,
-    taxi_zone_id: object,
-    temporal_bucket: str,
-    horizon: int,
-) -> pd.DataFrame:
-    """
-    Return one row per week at the calibration-valid native-unit grain.
-
-    WHY:
-    The ±1 MAE band is valid only when the plotted gap uses the same row-level
-    native scale as the frozen Pre-CP validation MAE. One Taxi Zone × temporal
-    bucket × Metric × Horizon preserves that contract exactly.
-    """
-    scoped = source.loc[
-        pd.to_numeric(source["taxi_zone_id"], errors="coerce").eq(float(taxi_zone_id))
-        & source["target_temporal_bucket"].eq(temporal_bucket)
-        & source["period_complete"].fillna(False).astype(bool)
+        scoped["target_temporal_bucket"].isin(buckets)
+        & scoped["period_complete"].fillna(False).astype(bool)
     ].copy()
 
     if scoped.empty:
         return pd.DataFrame()
 
-    if scoped.duplicated("week_start").any():
-        raise RuntimeError(
-            "Interactive calibration trajectory expected one row per week for "
-            "one Taxi Zone × temporal bucket."
-        )
-
     scoped["week_start"] = pd.to_datetime(scoped["week_start"], errors="coerce")
-    scoped["observed"] = pd.to_numeric(scoped["observed_level"], errors="coerce")
-    scoped["no_cp"] = pd.to_numeric(scoped[f"no_cp_h{int(horizon)}"], errors="coerce")
 
-    return (
-        scoped.loc[:, ["week_start", "observed", "no_cp"]]
-        .replace([np.inf, -np.inf], np.nan)
-        .dropna(subset=["week_start", "observed", "no_cp"])
-        .sort_values("week_start")
-        .reset_index(drop=True)
-    )
+    if metric in COUNT_METRICS:
+        named_aggs = {
+            "support_rows": ("support_rows", "sum"),
+            "observed_level": ("observed_level", "sum"),
+        }
+        for horizon in HORIZONS:
+            named_aggs[f"no_cp_h{horizon}"] = (f"no_cp_h{horizon}", "sum")
 
-
-def native_mae_for_job(
-    summary: pd.DataFrame,
-    *,
-    metric: str,
-    horizon: int,
-) -> float:
-    """Return the frozen native Pre-CP validation MAE for one forecasting job."""
-    match = summary.loc[
-        summary["metric"].eq(metric)
-        & summary["horizon"].eq(int(horizon)),
-        "pre_cp_validation_system_mae",
-    ]
-
-    if len(match) != 1:
-        raise RuntimeError(
-            f"Expected one native MAE row for {metric} · h={int(horizon)}."
+        weekly = (
+            scoped.groupby("week_start", observed=True, sort=False)
+            .agg(**named_aggs)
+            .reset_index()
+        )
+    else:
+        scoped["observed_numerator"] = (
+            pd.to_numeric(scoped["observed_level"], errors="coerce")
+            * pd.to_numeric(scoped["observed_weight"], errors="coerce")
         )
 
-    value = float(match.iloc[0])
-    if not np.isfinite(value) or value <= 0:
-        raise RuntimeError("Native MAE must be finite and positive.")
+        for horizon in HORIZONS:
+            scoped[f"no_cp_numerator_h{horizon}"] = (
+                pd.to_numeric(scoped[f"no_cp_h{horizon}"], errors="coerce")
+                * pd.to_numeric(scoped[f"no_cp_weight_h{horizon}"], errors="coerce")
+            )
 
-    return value
+        named_aggs = {
+            "support_rows": ("support_rows", "sum"),
+            "observed_numerator": ("observed_numerator", "sum"),
+            "observed_weight": ("observed_weight", "sum"),
+        }
+        for horizon in HORIZONS:
+            named_aggs[f"no_cp_numerator_h{horizon}"] = (
+                f"no_cp_numerator_h{horizon}",
+                "sum",
+            )
+            named_aggs[f"no_cp_weight_h{horizon}"] = (
+                f"no_cp_weight_h{horizon}",
+                "sum",
+            )
+
+        weekly = (
+            scoped.groupby("week_start", observed=True, sort=False)
+            .agg(**named_aggs)
+            .reset_index()
+        )
+        weekly["observed_level"] = (
+            weekly["observed_numerator"]
+            / weekly["observed_weight"].where(weekly["observed_weight"].gt(0))
+        )
+
+        for horizon in HORIZONS:
+            weekly[f"no_cp_h{horizon}"] = (
+                weekly[f"no_cp_numerator_h{horizon}"]
+                / weekly[f"no_cp_weight_h{horizon}"].where(
+                    weekly[f"no_cp_weight_h{horizon}"].gt(0)
+                )
+            )
+
+        weekly = weekly[
+            [
+                "week_start",
+                "support_rows",
+                "observed_level",
+                *[f"no_cp_h{horizon}" for horizon in HORIZONS],
+            ]
+        ]
+
+    return weekly.replace([np.inf, -np.inf], np.nan).sort_values(
+        "week_start", kind="stable"
+    ).reset_index(drop=True)
 
 
-def build_trajectory_figure(
-    weekly: pd.DataFrame,
+def build_native_trajectory_figure(
+    trajectory: pd.DataFrame,
     *,
-    mae: float,
     metric: str,
-    horizon: int,
-) -> tuple[go.Figure, pd.Series, float]:
-    """Render observed, no-CP, and ±1 MAE for one interactive row-level trajectory."""
-    plot = weekly.copy()
-    plot["band_low"] = plot["observed"] - mae
-    plot["band_high"] = plot["observed"] + mae
-    plot["gap"] = plot["no_cp"] - plot["observed"]
-    plot["gap_xmae"] = plot["gap"].abs() / mae
-
-    largest = plot.loc[plot["gap"].abs().idxmax()].copy()
-    outside_share = float(100.0 * plot["gap"].abs().gt(mae).mean())
-    unit = METRIC_UNITS[metric]
-
+) -> go.Figure:
+    """Plot observed mobility beside the three no-CP horizon paths in native units."""
     figure = go.Figure()
+
     figure.add_trace(
         go.Scatter(
-            x=plot["week_start"],
-            y=plot["band_low"],
-            mode="lines",
-            line={"width": 0},
-            hoverinfo="skip",
-            showlegend=False,
-        )
-    )
-    figure.add_trace(
-        go.Scatter(
-            x=plot["week_start"],
-            y=plot["band_high"],
-            mode="lines",
-            fill="tonexty",
-            fillcolor="rgba(131, 197, 190, 0.20)",
-            line={"width": 0},
-            name="±1 ordinary Pre-CP MAE",
-            hoverinfo="skip",
-        )
-    )
-    figure.add_trace(
-        go.Scatter(
-            x=plot["week_start"],
-            y=plot["observed"],
+            x=trajectory["week_start"],
+            y=trajectory["observed_level"],
             mode="lines",
             name="Observed",
-            line={"color": BRAND_COLORS["dark_teal"], "width": 3.0},
-            hovertemplate=(
-                "<b>Observed</b><br>%{x|%b %d, %Y}<br>"
-                f"%{{y:,.3f}} {unit}<extra></extra>"
-            ),
-        )
-    )
-    figure.add_trace(
-        go.Scatter(
-            x=plot["week_start"],
-            y=plot["no_cp"],
-            mode="lines",
-            name=f"Estimated no-CP · h={int(horizon)}",
-            line={
-                "color": BRAND_COLORS["terracotta"],
-                "width": 2.7,
-                "dash": "dash",
-            },
-            hovertemplate=(
-                f"<b>Estimated no-CP · h={int(horizon)}</b><br>"
-                "%{x|%b %d, %Y}<br>"
-                f"%{{y:,.3f}} {unit}<extra></extra>"
-            ),
-        )
-    )
-    figure.add_trace(
-        go.Scatter(
-            x=[largest["week_start"]],
-            y=[largest["no_cp"]],
-            mode="markers",
-            marker={
-                "size": 12,
-                "color": BRAND_COLORS["terracotta"],
-                "line": {"color": "white", "width": 1.2},
-            },
-            showlegend=False,
-            hovertemplate=(
-                "<b>Largest absolute gap</b><br>"
-                "%{x|%b %d, %Y}<br>"
-                f"Gap: {float(largest['gap']):+,.3f} {unit}<br>"
-                f"|Gap|: {float(largest['gap_xmae']):.2f}× MAE"
-                "<extra></extra>"
-            ),
+            line={"color": "#5A6B73", "width": 3.4},
+            hovertemplate="%{x|%b %d, %Y}<br>Observed: %{y:,.2f}<extra></extra>",
         )
     )
 
-    figure.add_annotation(
-        x=largest["week_start"],
-        y=largest["no_cp"],
-        text=(
-            "<b>Largest gap</b><br>"
-            f"{abs(float(largest['gap'])):,.2f} {unit} · "
-            f"{float(largest['gap_xmae']):.2f}× MAE"
-        ),
-        showarrow=True,
-        arrowhead=2,
-        ax=-68,
-        ay=-65,
-        bgcolor="rgba(255,255,255,0.92)",
-        bordercolor="rgba(226,149,120,0.45)",
-        borderwidth=1,
-        font={"size": 11, "color": "#335C67"},
-    )
+    horizon_styles = {
+        1: (BRAND_COLORS["dark_teal"], "solid", 3.0),
+        2: (BRAND_COLORS["seafoam"], "dash", 2.2),
+        5: (BRAND_COLORS["terracotta"], "dot", 2.2),
+    }
+    for horizon in HORIZONS:
+        color, dash, width = horizon_styles[horizon]
+        figure.add_trace(
+            go.Scatter(
+                x=trajectory["week_start"],
+                y=trajectory[f"no_cp_h{horizon}"],
+                mode="lines",
+                name=f"No-CP · h={horizon}",
+                line={"color": color, "width": width, "dash": dash},
+                hovertemplate=(
+                    f"%{{x|%b %d, %Y}}<br>No-CP · h={horizon}: "
+                    "%{y:,.2f}<extra></extra>"
+                ),
+            )
+        )
 
     figure = apply_branding(figure)
     figure.update_layout(
         title={"text": ""},
-        height=440,
+        height=455,
         hovermode="x unified",
-        margin={"l": 75, "r": 25, "t": 35, "b": 60},
+        margin={"l": 70, "r": 25, "t": 35, "b": 60},
         legend={
             "orientation": "h",
             "yanchor": "bottom",
@@ -2077,35 +2204,420 @@ def build_trajectory_figure(
     )
     figure.update_xaxes(title=None)
     figure.update_yaxes(
-        title_text=f"{metric_label(metric)} ({unit})",
+        title_text=f"{metric_label(metric)} ({METRIC_UNITS[metric]})",
         gridcolor="rgba(131, 197, 190, 0.18)",
     )
+    return figure
 
-    return figure, largest, outside_share
 
-
-def trajectory_takeaway(
-    largest: pd.Series,
+def native_trajectory_takeaway(
+    trajectory: pd.DataFrame,
     *,
-    outside_share: float,
     metric: str,
-    horizon: int,
-    zone_label: str,
-    temporal_bucket: str,
+    geography_label: str,
+    day_type: str,
+    daypart: str,
 ) -> str:
-    """Explain one reader-selected calibration trajectory without causal overreach."""
-    unit = METRIC_UNITS[metric]
-    gap = float(largest["gap"])
-    xmae = float(largest["gap_xmae"])
-    date_label = pd.Timestamp(largest["week_start"]).strftime("%b %d, %Y")
+    """Summarize the observed-versus-no-CP trajectory without causal overreach."""
+    gap_columns = []
+    for horizon in HORIZONS:
+        column = f"gap_h{horizon}"
+        trajectory[column] = trajectory[f"no_cp_h{horizon}"] - trajectory["observed_level"]
+        gap_columns.append(column)
+
+    absolute = trajectory[gap_columns].abs()
+    row_index, col_index = np.unravel_index(
+        np.nanargmax(absolute.to_numpy(dtype=float)),
+        absolute.shape,
+    )
+    peak_row = trajectory.iloc[row_index]
+    peak_horizon = HORIZONS[col_index]
+    peak_gap = float(peak_row[f"gap_h{peak_horizon}"])
+    peak_date = pd.Timestamp(peak_row["week_start"]).strftime("%b %d, %Y")
+
+    direction = "above" if peak_gap < 0 else "below"
+    return (
+        f"For **{geography_label} · {day_type} · {daypart} · {metric_label(metric)}**, "
+        f"the largest observed-versus-no-CP separation occurs in the week of "
+        f"**{peak_date}** at **h={peak_horizon}**. Observed mobility is "
+        f"**{abs(peak_gap):,.2f} {METRIC_UNITS[metric]} {direction}** the no-CP path. "
+        "This view shows the native mobility trajectories; use the neighboring ×MAE tab "
+        "to judge that separation against ordinary Pre-CP forecast error."
+    )
+
+
+def build_slice_calibration_trajectory(
+    source: pd.DataFrame,
+    slice_scout: pd.DataFrame,
+    *,
+    geography_type: str,
+    geography_id: object,
+    day_type: str,
+    daypart: str,
+    metric: str,
+) -> pd.DataFrame:
+    """
+    Build weekly ×MAE trajectories with the matching slice-specific denominator.
+
+    WHY:
+    The corrected Raw 25 contract aggregates the post-CP numerator to the selected
+    geography BEFORE calibration. Counts/ridership are summed. Speeds use separate
+    observed and no-CP activity weights. The resulting geography-level gap is then
+    divided by the Pre-CP Reference MAE for the same geography, day type, daypart,
+    metric, and horizon.
+
+    Within each week, selected temporal buckets are summarized with a median and
+    IQR. This keeps broad choices such as All dayparts as a pooled set of eligible
+    periods instead of inventing one synthetic all-day MAE denominator.
+    """
+    buckets = selected_temporal_buckets(
+        day_type=day_type,
+        daypart=daypart,
+    )
+
+    scoped = scope_trajectory_geography(
+        source,
+        geography_type=geography_type,
+        geography_id=geography_id,
+    )
+    scoped = scoped.loc[
+        scoped["target_temporal_bucket"].isin(buckets)
+        & scoped["period_complete"].fillna(False).astype(bool)
+    ].copy()
+
+    if scoped.empty:
+        return pd.DataFrame()
+
+    scoped["week_start"] = pd.to_datetime(
+        scoped["week_start"],
+        errors="coerce",
+    )
+
+    period_key = [
+        "week_start",
+        "target_temporal_bucket",
+    ]
+
+    records = []
+
+    for horizon in HORIZONS:
+        mae = reference_mae_for_slice(
+            slice_scout,
+            geography_type=geography_type,
+            geography_id=geography_id,
+            day_type=day_type,
+            daypart=daypart,
+            metric=metric,
+            horizon=horizon,
+        )
+
+        if mae is None:
+            continue
+
+        no_cp_column = f"no_cp_h{horizon}"
+
+        if no_cp_column not in scoped.columns:
+            continue
+
+        if metric in COUNT_METRICS:
+            working = scoped.loc[
+                :,
+                [
+                    *period_key,
+                    "observed_level",
+                    no_cp_column,
+                ],
+            ].copy()
+
+            working["observed_level"] = pd.to_numeric(
+                working["observed_level"],
+                errors="coerce",
+            )
+            working[no_cp_column] = pd.to_numeric(
+                working[no_cp_column],
+                errors="coerce",
+            )
+
+            working = working.replace(
+                [np.inf, -np.inf],
+                np.nan,
+            ).dropna(
+                subset=[
+                    "observed_level",
+                    no_cp_column,
+                ]
+            )
+
+            periods = (
+                working.groupby(
+                    period_key,
+                    observed=True,
+                    sort=False,
+                )
+                .agg(
+                    observed=(
+                        "observed_level",
+                        "sum",
+                    ),
+                    no_cp=(
+                        no_cp_column,
+                        "sum",
+                    ),
+                )
+                .reset_index()
+            )
+
+        else:
+            no_cp_weight_column = (
+                f"no_cp_weight_h{horizon}"
+            )
+
+            required = {
+                "observed_level",
+                "observed_weight",
+                no_cp_column,
+                no_cp_weight_column,
+            }
+
+            if not required.issubset(scoped.columns):
+                continue
+
+            working = scoped.loc[
+                :,
+                [
+                    *period_key,
+                    "observed_level",
+                    "observed_weight",
+                    no_cp_column,
+                    no_cp_weight_column,
+                ],
+            ].copy()
+
+            for column in required:
+                working[column] = pd.to_numeric(
+                    working[column],
+                    errors="coerce",
+                )
+
+            working = working.replace(
+                [np.inf, -np.inf],
+                np.nan,
+            ).dropna(
+                subset=list(required)
+            )
+
+            working = working.loc[
+                working["observed_weight"].ge(0)
+                & working[no_cp_weight_column].ge(0)
+            ].copy()
+
+            working["observed_numerator"] = (
+                working["observed_level"]
+                * working["observed_weight"]
+            )
+            working["no_cp_numerator"] = (
+                working[no_cp_column]
+                * working[no_cp_weight_column]
+            )
+
+            periods = (
+                working.groupby(
+                    period_key,
+                    observed=True,
+                    sort=False,
+                )
+                .agg(
+                    observed_numerator=(
+                        "observed_numerator",
+                        "sum",
+                    ),
+                    observed_weight=(
+                        "observed_weight",
+                        "sum",
+                    ),
+                    no_cp_numerator=(
+                        "no_cp_numerator",
+                        "sum",
+                    ),
+                    no_cp_weight=(
+                        no_cp_weight_column,
+                        "sum",
+                    ),
+                )
+                .reset_index()
+            )
+
+            periods = periods.loc[
+                periods["observed_weight"].gt(0)
+                & periods["no_cp_weight"].gt(0)
+            ].copy()
+
+            periods["observed"] = (
+                periods["observed_numerator"]
+                / periods["observed_weight"]
+            )
+            periods["no_cp"] = (
+                periods["no_cp_numerator"]
+                / periods["no_cp_weight"]
+            )
+
+        if periods.empty:
+            continue
+
+        periods["absolute_mae_units"] = (
+            periods["no_cp"]
+            - periods["observed"]
+        ).abs() / mae
+
+        periods = periods.replace(
+            [np.inf, -np.inf],
+            np.nan,
+        ).dropna(
+            subset=["absolute_mae_units"]
+        )
+
+        if periods.empty:
+            continue
+
+        weekly = (
+            periods.groupby(
+                "week_start",
+                observed=True,
+            )["absolute_mae_units"]
+            .agg(
+                median="median",
+                p25=lambda values: values.quantile(0.25),
+                p75=lambda values: values.quantile(0.75),
+                rows="size",
+            )
+            .reset_index()
+        )
+
+        weekly["horizon"] = int(horizon)
+        weekly["pre_cp_reference_mae"] = mae
+        records.append(weekly)
+
+    if not records:
+        return pd.DataFrame()
 
     return (
-        f"For **{zone_label} · {TEMPORAL_BUCKET_LABELS[temporal_bucket]} · "
-        f"{metric_label(metric)} · h={int(horizon)}**, the estimated no-CP path "
-        f"falls outside the **±1 MAE** yardstick in **{outside_share:.1f}%** of "
-        f"supported weeks. The largest absolute gap occurs in the week of "
-        f"**{date_label}** at **{abs(gap):,.2f} {unit}**, or **{xmae:.2f}× MAE**. "
-        "The band compares gap size with ordinary Pre-CP forecast error; it is not "
+        pd.concat(
+            records,
+            ignore_index=True,
+        )
+        .sort_values(
+            ["horizon", "week_start"],
+            kind="stable",
+        )
+        .reset_index(drop=True)
+    )
+
+
+def build_slice_trajectory_figure(trajectory: pd.DataFrame) -> go.Figure:
+    """Show weekly median absolute gap in ×MAE for h=1, h=2, and h=5."""
+    figure = go.Figure()
+    styles = {
+        1: (BRAND_COLORS["dark_teal"], "solid"),
+        2: (BRAND_COLORS["terracotta"], "dash"),
+        5: (BRAND_COLORS["seafoam"], "dot"),
+    }
+
+    for horizon in HORIZONS:
+        subset = trajectory.loc[trajectory["horizon"].eq(horizon)].copy()
+        if subset.empty:
+            continue
+
+        color, dash = styles[horizon]
+        figure.add_trace(
+            go.Scatter(
+                x=pd.concat([subset["week_start"], subset["week_start"].iloc[::-1]]),
+                y=pd.concat([subset["p75"], subset["p25"].iloc[::-1]]),
+                fill="toself",
+                fillcolor=color,
+                opacity=0.09,
+                line={"width": 0},
+                hoverinfo="skip",
+                showlegend=False,
+            )
+        )
+        figure.add_trace(
+            go.Scatter(
+                x=subset["week_start"],
+                y=subset["median"],
+                mode="lines",
+                name=f"h={horizon}",
+                line={"color": color, "width": 2.7, "dash": dash},
+                customdata=subset[["p25", "p75", "rows"]].to_numpy(),
+                hovertemplate=(
+                    f"<b>h={horizon}</b><br>%{{x|%b %d, %Y}}<br>"
+                    "Median |gap|: %{y:.2f}× MAE<br>"
+                    "P25–P75: %{customdata[0]:.2f}–%{customdata[1]:.2f}×<br>"
+                    "Rows: %{customdata[2]:,.0f}<extra></extra>"
+                ),
+            )
+        )
+
+    figure.add_hline(
+        y=1.0,
+        line={"color": "rgba(51,92,103,0.45)", "width": 1.4, "dash": "dash"},
+        annotation_text="1× Reference MAE",
+        annotation_position="top left",
+    )
+    figure.add_hline(
+        y=2.0,
+        line={"color": "rgba(51,92,103,0.28)", "width": 1.2, "dash": "dot"},
+        annotation_text="2× MAE",
+        annotation_position="top left",
+    )
+
+    figure = apply_branding(figure)
+    figure.update_layout(
+        title={"text": ""},
+        height=455,
+        hovermode="x unified",
+        margin={"l": 70, "r": 25, "t": 35, "b": 60},
+        legend={
+            "orientation": "h",
+            "yanchor": "bottom",
+            "y": 1.02,
+            "xanchor": "left",
+            "x": 0,
+        },
+    )
+    figure.update_xaxes(title=None)
+    figure.update_yaxes(
+        title_text="Weekly median absolute gap (× Pre-CP Reference MAE)",
+        rangemode="tozero",
+        gridcolor="rgba(131, 197, 190, 0.18)",
+    )
+    return figure
+
+
+def slice_trajectory_takeaway(
+    trajectory: pd.DataFrame,
+    *,
+    metric: str,
+    geography_label: str,
+    day_type: str,
+    daypart: str,
+) -> str:
+    """Summarize the selected weekly calibration trajectory."""
+    horizon_summary = (
+        trajectory.groupby("horizon", observed=True)["median"]
+        .agg(period_median="median", peak="max")
+        .reset_index()
+    )
+    strongest = horizon_summary.loc[horizon_summary["period_median"].idxmax()]
+    peak_row = trajectory.loc[trajectory["median"].idxmax()]
+    peak_date = pd.Timestamp(peak_row["week_start"]).strftime("%b %d, %Y")
+
+    return (
+        f"For **{geography_label} · {day_type} · {daypart} · {metric_label(metric)}**, "
+        f"the largest typical separation across the three horizons is **h={int(strongest['horizon'])}**, "
+        f"with a median weekly calibration level of **{float(strongest['period_median']):.2f}× MAE**. "
+        f"The strongest single weekly median occurs in the week of **{peak_date}** at "
+        f"**{float(peak_row['median']):.2f}× MAE**. The chart summarizes absolute gap "
+        "magnitude at the same row-level calibration grain as the range strip; it is not "
         "a confidence interval or significance test."
     )
 
@@ -2147,14 +2659,17 @@ st.write(
 
 st.markdown("### How large are the post-CP gaps relative to ordinary forecast error?")
 st.write(
-    "Now every mobility measure can share one calibration ruler. **Read each three-row "
-    "mobility-measure group together**: h=1, h=2, and h=5 show whether the magnitude "
-    "story holds "
-    "as forecast horizon changes. Within each row, the diamond marks the **median "
-    "absolute post-CP gap**; the thicker segment reaches P75, the vertical tick marks "
-    "P90, and the lighter tail ends at P95."
+    "Across the full NYC system, every mobility measure can share one calibration ruler. "
+    "**Read each three-row mobility-measure group together**: h=1, h=2, and h=5 show "
+    "whether the magnitude story holds as forecast horizon changes. Within each row, "
+    "the diamond marks the **median absolute post-CP gap**; the thicker segment reaches "
+    "P75, the vertical tick marks P90, and the lighter tail ends at P95."
 )
 render_calibration_key()
+st.caption(
+    "Systemwide · full post-CP period · all Taxi Zones · all days and dayparts · "
+    "15 Metric × Horizon forecasting jobs"
+)
 st.plotly_chart(
     build_calibration_range_strip(summary),
     width="stretch",
@@ -2176,20 +2691,28 @@ st.caption(
 # Fixed visual example — show what 1× MAE looks like through time
 # ---------------------------------------------------------------------
 
-st.markdown("### What does 1× MAE look like on a real post-CP series?")
+st.markdown("### See the same fixed example two ways")
 st.write(
-    "The summary above puts all 15 jobs on the same error scale. This fixed "
-    "**Taxi average speed · h=1** example keeps one Taxi Zone and one time-of-week "
-    "bucket so the native-unit gap stays on the same grain as the MAE yardstick. "
-    "The shaded region is **±1 ordinary Pre-CP MAE around observed speed**."
+    "The summary above puts all 15 jobs on one calibration ruler. The fixed example "
+    "below keeps **Taxi average speed · h=1 · one Taxi Zone · weekday PM peak** so the "
+    "native mobility path and the ×MAE calibration view refer to exactly the same series."
 )
 
-worked_weekly, worked_zone_label, worked_bucket_label = build_worked_example_weekly()
-worked_mae = worked_example_mae(summary)
+(
+    worked_weekly,
+    worked_zone_id,
+    worked_zone_label,
+    worked_bucket_label,
+) = build_worked_example_weekly()
+worked_mae = worked_example_mae(
+    slice_scout,
+    zone_id=worked_zone_id,
+)
 worked_figure, worked_largest, worked_outside_share = build_worked_example_figure(
     worked_weekly,
     worked_mae,
 )
+worked_xmae_figure = build_worked_example_xmae_figure(worked_weekly, worked_mae)
 
 worked_cols = st.columns(4)
 worked_cols[0].metric("Ordinary error scale", f"{worked_mae:.2f} mph")
@@ -2206,25 +2729,51 @@ worked_cols[3].metric(
     f"{worked_outside_share:.1f}%",
 )
 
-st.plotly_chart(
-    worked_figure,
-    width="stretch",
-    config=PLOT_CONFIG,
-    key="raw25_worked_mae_timeseries",
+worked_actuals_tab, worked_mae_tab = st.tabs(
+    ["Observed vs no-CP", "Gap in ×MAE"]
 )
 
-st.caption(
-    f"Fixed worked example · {worked_zone_label} · {worked_bucket_label} · "
-    "Taxi average speed · h=1. The band is a visual error yardstick, not a "
-    "confidence interval or statistical-significance region."
-)
-
-render_chart_insight(
-    worked_example_takeaway(
-        worked_largest,
-        worked_outside_share,
+with worked_actuals_tab:
+    st.caption(
+        f"{worked_zone_label} · {worked_bucket_label} · Taxi average speed · h=1"
     )
-)
+    st.plotly_chart(
+        worked_figure,
+        width="stretch",
+        config=PLOT_CONFIG,
+        key="raw25_worked_native_timeseries",
+    )
+    st.caption(
+        "Observed speed and the estimated no-CP path are shown in mph. The shaded "
+        "region is ±1 ordinary Pre-CP MAE around observed speed — an error yardstick, "
+        "not a confidence interval."
+    )
+    render_chart_insight(
+        worked_example_takeaway(
+            worked_largest,
+            worked_outside_share,
+        )
+    )
+
+with worked_mae_tab:
+    st.caption(
+        f"{worked_zone_label} · {worked_bucket_label} · Taxi average speed · h=1"
+    )
+    st.plotly_chart(
+        worked_xmae_figure,
+        width="stretch",
+        config=PLOT_CONFIG,
+        key="raw25_worked_xmae_timeseries",
+    )
+    st.caption(
+        "The same weekly separation is now expressed directly in ordinary Pre-CP MAE "
+        "units. 1× means the gap equals one average absolute validation miss."
+    )
+    render_chart_insight(
+        "This is the same fixed trajectory as the neighboring tab, but the vertical "
+        "axis removes the native mph scale and asks only how large each weekly gap is "
+        "relative to ordinary forecasting error."
+    )
 
 
 # ---------------------------------------------------------------------
@@ -2274,7 +2823,7 @@ with st.expander("How to read the ×MAE scale", expanded=False):
     ]
     if len(example_row) != 1:
         raise RuntimeError("Expected one Taxi average speed · h=1 calibration row.")
-    example_mae = float(example_row.iloc[0]["pre_cp_validation_system_mae"])
+    example_mae = float(example_row.iloc[0]["pre_cp_reference_mae"])
 
     st.markdown("#### Worked example · Taxi average speed · h=1")
     st.plotly_chart(
@@ -2406,193 +2955,96 @@ with exploration_section(
             )
         )
 
-        st.markdown("### See the MAE yardstick on a trajectory")
+        st.markdown("### Follow the selected slice through time")
         st.write(
-            "Choose one supported mobility measure, forecast horizon, Taxi Zone, and "
-            "time-of-week bucket inside the selected geography. Keeping the trajectory "
-            "at one **Taxi Zone × temporal bucket** preserves the same native-unit grain "
-            "used by the frozen MAE denominator."
+            "Both views **inherit the geography, day type, and daypart selected above**. "
+            "Choose the mobility measure once, then switch tabs to see the native "
+            "observed-versus-no-CP paths or the same separation on the ×MAE scale."
         )
-
-        trajectory_controls = st.columns([1.35, 0.65, 1.45, 1.35])
 
         available_metrics = [
-            metric
-            for metric in METRIC_ORDER
+            metric for metric in METRIC_ORDER
             if metric in set(selected_grid["metric"].astype(str))
         ]
-        with trajectory_controls[0]:
-            trajectory_metric = st.selectbox(
-                "Trajectory measure",
-                available_metrics,
-                format_func=metric_label,
-                key="raw25_trajectory_metric",
-            )
-
-        supported_horizons = (
-            selected_grid.loc[
-                selected_grid["metric"].eq(trajectory_metric),
-                "horizon",
-            ]
-            .astype(int)
-            .drop_duplicates()
-            .sort_values()
-            .tolist()
+        trajectory_metric = st.selectbox(
+            "Trajectory measure",
+            available_metrics,
+            format_func=metric_label,
+            key="raw25_trajectory_metric",
         )
-        with trajectory_controls[1]:
-            trajectory_horizon = st.selectbox(
-                "Horizon",
-                supported_horizons,
-                format_func=lambda value: f"h={int(value)}",
-                key="raw25_trajectory_horizon",
-            )
-
-        # Default to the explorer's exact daypart when possible; otherwise use
-        # weekday PM peak as a stable, interpretable row-level bucket.
-        daypart_suffix = {
-            "Overnight": "overnight",
-            "AM peak": "am_peak",
-            "Midday": "midday",
-            "PM peak": "pm_peak",
-            "Evening": "evening",
-        }
-        if selected_daypart != "All dayparts":
-            prefix = "weekend" if selected_day_type == "Weekends" else "weekday"
-            default_bucket = f"{prefix}_{daypart_suffix[selected_daypart]}"
-        else:
-            default_bucket = "weekday_pm_peak"
-
-        bucket_options = list(TEMPORAL_BUCKET_LABELS)
-        default_bucket_index = (
-            bucket_options.index(default_bucket)
-            if default_bucket in bucket_options
-            else 0
-        )
-        with trajectory_controls[2]:
-            trajectory_bucket = st.selectbox(
-                "Time-of-week bucket",
-                bucket_options,
-                index=default_bucket_index,
-                format_func=lambda value: TEMPORAL_BUCKET_LABELS[value],
-                key="raw25_trajectory_bucket",
-            )
 
         trajectory_source = load_counterfactual_temporal_explorer_metric(
             trajectory_metric
         ).copy()
-
-        zone_options = trajectory_zone_options(
+        native_trajectory = build_slice_native_trajectory(
             trajectory_source,
             geography_type=selected_geography_type,
             geography_id=selected_geography_id,
-            temporal_bucket=trajectory_bucket,
+            day_type=selected_day_type,
+            daypart=selected_daypart,
+            metric=trajectory_metric,
+        )
+        calibration_trajectory = build_slice_calibration_trajectory(
+            trajectory_source,
+            slice_scout,
+            geography_type=selected_geography_type,
+            geography_id=selected_geography_id,
+            day_type=selected_day_type,
+            daypart=selected_daypart,
+            metric=trajectory_metric,
         )
 
-        if zone_options.empty:
-            st.info(
-                "No Taxi Zone trajectory is available for this geography and "
-                "time-of-week bucket."
-            )
-        else:
-            zone_ids = zone_options["taxi_zone_id"].tolist()
-            zone_labels = dict(
-                zip(
-                    zone_options["taxi_zone_id"].astype(str),
-                    zone_options["display_label"],
-                )
-            )
+        trajectory_scope = (
+            f"{selected_geography_label} · {selected_day_type} · {selected_daypart} · "
+            f"{metric_label(trajectory_metric)}"
+        )
+        actuals_tab, mae_tab = st.tabs(["Observed vs no-CP", "Gap in ×MAE"])
 
-            if selected_geography_type == "Taxi Zone":
-                default_zone_index = 0
+        with actuals_tab:
+            if native_trajectory.empty:
+                st.info("No supported native-unit trajectory is available for this selection.")
             else:
-                # Prefer the best-supported underlying zone as a stable default.
-                best_zone_id = (
-                    zone_options.sort_values(
-                        ["rows", "taxi_zone_id"],
-                        ascending=[False, True],
-                    )
-                    .iloc[0]["taxi_zone_id"]
-                )
-                default_zone_index = zone_ids.index(best_zone_id)
-
-            with trajectory_controls[3]:
-                trajectory_zone_id = st.selectbox(
-                    "Taxi Zone",
-                    zone_ids,
-                    index=default_zone_index,
-                    format_func=lambda value: zone_labels[str(value)],
-                    key="raw25_trajectory_zone",
-                )
-
-            trajectory_zone_label = zone_labels[str(trajectory_zone_id)]
-            trajectory_weekly = build_selected_trajectory(
-                trajectory_source,
-                taxi_zone_id=trajectory_zone_id,
-                temporal_bucket=trajectory_bucket,
-                horizon=int(trajectory_horizon),
-            )
-
-            if trajectory_weekly.empty:
-                st.info("No supported trajectory rows are available for this selection.")
-            else:
-                trajectory_mae = native_mae_for_job(
-                    summary,
-                    metric=trajectory_metric,
-                    horizon=int(trajectory_horizon),
-                )
-                trajectory_figure, trajectory_largest, trajectory_outside_share = (
-                    build_trajectory_figure(
-                        trajectory_weekly,
-                        mae=trajectory_mae,
-                        metric=trajectory_metric,
-                        horizon=int(trajectory_horizon),
-                    )
-                )
-
-                trajectory_kpis = st.columns(4)
-                trajectory_kpis[0].metric(
-                    "Ordinary error scale",
-                    f"{trajectory_mae:,.2f} {METRIC_UNITS[trajectory_metric]}",
-                )
-                trajectory_kpis[1].metric(
-                    "Largest gap",
-                    f"{abs(float(trajectory_largest['gap'])):,.2f} "
-                    f"{METRIC_UNITS[trajectory_metric]}",
-                )
-                trajectory_kpis[2].metric(
-                    "Largest gap in ×MAE",
-                    f"{float(trajectory_largest['gap_xmae']):.2f}×",
-                )
-                trajectory_kpis[3].metric(
-                    "Weeks outside ±1 MAE",
-                    f"{trajectory_outside_share:.1f}%",
-                )
-
+                st.caption(f"{trajectory_scope} · h=1 / h=2 / h=5")
                 st.plotly_chart(
-                    trajectory_figure,
+                    build_native_trajectory_figure(
+                        native_trajectory,
+                        metric=trajectory_metric,
+                    ),
                     width="stretch",
                     config=PLOT_CONFIG,
-                    key="raw25_interactive_mae_trajectory",
+                    key="raw25_interactive_native_trajectory",
                 )
-
-                st.caption(
-                    f"{trajectory_zone_label} · "
-                    f"{TEMPORAL_BUCKET_LABELS[trajectory_bucket]} · "
-                    f"{metric_label(trajectory_metric)} · h={int(trajectory_horizon)}. "
-                    "The band is ±1 ordinary Pre-CP validation MAE around observed "
-                    "mobility at the same row-level grain."
-                )
-
                 render_chart_insight(
-                    trajectory_takeaway(
-                        trajectory_largest,
-                        outside_share=trajectory_outside_share,
+                    native_trajectory_takeaway(
+                        native_trajectory.copy(),
                         metric=trajectory_metric,
-                        horizon=int(trajectory_horizon),
-                        zone_label=trajectory_zone_label,
-                        temporal_bucket=trajectory_bucket,
+                        geography_label=selected_geography_label,
+                        day_type=selected_day_type,
+                        daypart=selected_daypart,
                     )
                 )
+
+        with mae_tab:
+            if calibration_trajectory.empty:
+                st.info("No supported ×MAE trajectory is available for this selection.")
+            else:
+                st.caption(f"{trajectory_scope} · h=1 / h=2 / h=5")
+                st.plotly_chart(
+                    build_slice_trajectory_figure(calibration_trajectory),
+                    width="stretch",
+                    config=PLOT_CONFIG,
+                    key="raw25_interactive_calibration_trajectory",
+                )
+                render_chart_insight(
+                    slice_trajectory_takeaway(
+                        calibration_trajectory,
+                        metric=trajectory_metric,
+                        geography_label=selected_geography_label,
+                        day_type=selected_day_type,
+                        daypart=selected_daypart,
+                    )
+                )
+
 
         min_support = int(selected_grid["rows"].min())
         available_jobs = int(len(selected_grid))
@@ -2631,13 +3083,12 @@ st.write(
 
 with st.expander("How this page works"):
     st.write(
-        "Each post-CP counterfactual gap is divided by the corresponding forecasting "
-        "job's Pre-CP validation MAE. The denominator is fixed within each Metric × "
-        "Horizon job, so the resulting ×MAE values express gap magnitude on that "
-        "job's ordinary validation-error scale. The systemwide chart summarizes the "
-        "absolute distribution with P50, P75, P90, and P95 and groups h=1, h=2, and "
-        "h=5 together so horizon consistency is visible. The explorer repeats the "
-        "same grammar for supported geography and time slices."
+        "Each post-CP counterfactual gap is divided by the Pre-CP Reference MAE for "
+        "the same geography, day type, daypart, mobility measure, and forecast horizon. "
+        "The systemwide chart therefore uses Systemwide × All days × All dayparts "
+        "Reference error, while the explorer switches to the matching local error scale. "
+        "P50, P75, P90, and P95 summarize absolute gap magnitude, and h=1, h=2, and "
+        "h=5 remain grouped so horizon consistency is visible."
     )
 
 st.caption(
